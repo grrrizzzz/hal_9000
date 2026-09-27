@@ -1,0 +1,59 @@
+name: CI
+
+# No secrets are configured for this workflow, on purpose: the whole test
+# suite runs against tests/fakes.py::FakeLLM and never touches the network.
+#
+# The consequence is that tests/test_live_smoke.py -- the only tests that talk
+# to a real provider -- skip themselves here, every time, for want of a key.
+# That is intended, not a gap being papered over. What CI proves is that *our*
+# code is wired correctly, which needs no key; what a live call proves is that
+# the *provider's* response shape has not drifted, which no secret-free run can
+# establish. `-rs` on the test step prints every skip with its reason, so the
+# log says plainly which checks did not run.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
+    env:
+      # Pin every uv invocation in this job to the matrix interpreter, so a
+      # three-version matrix cannot quietly become three runs of one version.
+      UV_PYTHON: ${{ matrix.python-version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies
+        run: uv sync --all-extras --dev --python ${{ matrix.python-version }}
+
+      - name: Show the interpreter under test
+        run: uv run python -c "import sys; print(sys.version)"
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Test
+        env:
+          # No secrets are configured for this workflow by design.
+          # Pin LiteLLM's price map so the run needs no network at all.
+          LITELLM_LOCAL_MODEL_COST_MAP: "True"
+        # The coverage gate (--cov=hello_agent --cov-fail-under=85) lives in
+        # pyproject.toml's addopts, so it runs here exactly as it runs on a
+        # laptop: one command, one standard, no CI-only invocation to drift.
+        run: uv run pytest -rs

@@ -1,0 +1,55 @@
+name: Feature or pattern request
+description: Suggest an addition to the template.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please read this first: **the lean default is a feature, not an
+        omission.** The default run is five tools and no capabilities on
+        purpose. Anything added here ships complete, tested, and *off*, behind a
+        `Features` flag - so a proposal that cannot be switched off is unlikely
+        to land.
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: The situation you hit, not the solution you have in mind.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed addition
+      description: >
+        Which layer does it belong to - a tool, a capability, an environment, an
+        agent language, a sub-agent? If it is none of those, say so; that is
+        interesting in itself.
+    validations:
+      required: true
+  - type: input
+    id: source
+    attributes:
+      label: Source note, if any
+      description: >
+        This template implements a specific corpus (see docs/COVERAGE.md). If
+        your proposal comes from one of those notes, name it.
+      placeholder: "improving_agent_reasoning/plan_first_capability.md"
+  - type: textarea
+    id: cost
+    attributes:
+      label: What would it cost
+      description: >
+        Extra LLM calls per run or per iteration, extra tokens, extra tools in
+        the model's choice set, interactivity (does it block on input?). Every
+        flag in this template documents its cost in `FLAG_HELP`; yours would too.
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Shape of the change
+      options:
+        - label: It can be switched off, and is off by default
+        - label: It does not require a change to `core/agent.py`
+        - label: It can be tested with `FakeLLM` - no API key, no network

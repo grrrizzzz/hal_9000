@@ -1,0 +1,11 @@
+# Using this template? Replace OWNER/REPO below with your own repository, or
+# delete the contact_links block. Leaving it as-is gives contributors two dead
+# links, which is worse than no links at all.
+blank_issues_enabled: true
+contact_links:
+  - name: How do I add a tool, a capability, or my own domain?
+    url: https://github.com/OWNER/REPO/blob/main/docs/EXTENDING.md
+    about: Worked diffs for the six most common changes, plus the five traps worth avoiding.
+  - name: How does this work?
+    url: https://github.com/OWNER/REPO/blob/main/docs/ARCHITECTURE.md
+    about: The GAME walkthrough, the loop and its capability hooks, and the DI mechanism.

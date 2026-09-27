@@ -1,0 +1,63 @@
+name: Bug report
+description: Something in the template does not behave as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Two things make a bug here easy to fix:
+        the exact command you ran, and whether it also happens with **no
+        feature flags** enabled.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what you got instead. Paste the output.
+      placeholder: |
+        $ uv run python -m hello_agent "Ada Lovelace, mathematician, visiting from London."
+        ...
+    validations:
+      required: true
+  - type: dropdown
+    id: flags
+    attributes:
+      label: Does it happen with no flags?
+      description: >
+        The lean default is five tools and no capabilities. If the bug only
+        appears with a flag on, say which flag - that narrows it to one file.
+      options:
+        - "Yes - it happens with no flags at all"
+        - "No - only with one or more flags enabled (say which below)"
+        - "Not sure"
+    validations:
+      required: true
+  - type: input
+    id: flags-detail
+    attributes:
+      label: Flags enabled
+      placeholder: "--staged-review --reviewer llm"
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      options:
+        - anthropic
+        - openai
+        - "Not applicable - it fails without a key too"
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Python and uv versions
+      description: "`uv run python -V` and `uv --version`"
+      placeholder: "Python 3.12.4, uv 0.11.7"
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: "`uv run pytest` passes on a clean checkout (it needs no API key)"
+        - label: I have read the relevant section of docs/EXTENDING.md, including "Five traps"

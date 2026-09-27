@@ -1,0 +1,34 @@
+Greeting policy — the house rules
+=================================
+
+This file is read fresh every time the agent composes a greeting. Edit it and
+the next greeting changes. No code change, no restart, no redeploy. The rules
+are written in plain English because plain English is the format the model
+reads best — there is nothing to parse and no schema to keep in step.
+
+1. Greet the visitor by the name and title they gave. If they offered a title,
+   use it. If they gave only a first name, a first name is what they want.
+
+2. Keep it to three sentences at most. A greeting is spoken at a door, not
+   read from a lectern.
+
+3. Say one specific thing. Their work, where they travelled from, what brought
+   them here — one detail, drawn from what they actually told us.
+
+4. Never invent. If the details are thin, a short warm greeting is correct; a
+   long one built on guesses is not. Do not assume a pronoun, a seniority, or
+   a reason for the visit that nobody stated.
+
+5. Returning visitors get continuity, not a reset. If the details mention an
+   earlier visit, acknowledge it — "welcome back" costs nothing and means
+   something.
+
+6. Warm, never fawning. No exclamation marks. No "we are thrilled and honoured
+   and delighted." One sincere sentence outranks three enthusiastic ones.
+
+7. Match the visitor's language when they have told us their preference; write
+   in English otherwise.
+
+8. Close by pointing at the next thing: where to wait, who is coming, what
+   happens now — whichever the details support. If none of them do, close
+   simply.
