@@ -53,7 +53,7 @@ jobs:
           # No secrets are configured for this workflow by design.
           # Pin LiteLLM's price map so the run needs no network at all.
           LITELLM_LOCAL_MODEL_COST_MAP: "True"
-        # The coverage gate (--cov=hello_agent --cov-fail-under=85) lives in
+        # The coverage gate (--cov=hal9000 --cov-fail-under=85) lives in
         # pyproject.toml's addopts, so it runs here exactly as it runs on a
         # laptop: one command, one standard, no CI-only invocation to drift.
         run: uv run pytest -rs

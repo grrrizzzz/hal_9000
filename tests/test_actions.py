@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from hello_agent.core import registry
-from hello_agent.core.actions import Action, ActionRegistry, PythonActionRegistry
-from hello_agent.core.registry import AgentRegistry
+from hal9000.core import registry
+from hal9000.core.actions import Action, ActionRegistry, PythonActionRegistry
+from hal9000.core.registry import AgentRegistry
 
 # --------------------------------------------------------------------- Action
 

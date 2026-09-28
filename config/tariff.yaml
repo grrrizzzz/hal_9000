@@ -1,0 +1,43 @@
+# SDG&E EV-TOU-5 (delivery) + Clean Energy Alliance (generation, Clean Impact Plus), NEM 1.0.
+# Marginal rate per TOU period =
+#   (udc + wildfire + pcia + ipca) * (1 + franchise_fee) + state_regulatory_fee
+#   + cea_generation[season] + clean_impact_plus
+# Sources: February 2026 and August 2026 bills; SDG&E EV-TOU-5 table 1/1/2026; CEA rates 2/1/2026.
+schedule: EV-TOU-5 + CEA Clean Impact Plus
+confirmed_through: "2026-08-27"   # last bill the rates were checked against
+seasons:
+  summer: {start: "06-01", end: "10-31"}   # winter is everything else
+calendar:
+  on_peak: [16, 21]
+  weekend_super_off_peak: [0, 14]
+  weekday_super_off_peak: [[0, 6], [10, 14]]
+  weekday_midday_sop_all_year_from: "2026-05-01"   # before this, 10-14 was super off-peak only in March and April
+holidays:   # SDG&E: a holiday falling on Sunday is observed the following Monday
+  - new_years_day
+  - presidents_day
+  - memorial_day
+  - independence_day
+  - labor_day
+  - veterans_day
+  - thanksgiving
+  - christmas
+per_kwh_adders:
+  wildfire_fund: 0.00591
+  ipca: 0.00006
+  state_regulatory_fee: 0.001
+  clean_impact_plus: 0.001
+franchise_fee: 0.011
+components:
+  udc:   # SDG&E delivery, same in summer and winter
+    - {from: "2026-01-01", on_peak: 0.32322, off_peak: 0.32322, super_off_peak: 0.03676, source: "Feb 2026 bill; SDG&E table 1/1/2026"}
+    - {from: "2026-05-01", on_peak: 0.31711, off_peak: 0.31711, super_off_peak: 0.04114, source: "Aug 2026 bill 'Rate 1'; start date assumed at the 2026-05-01 revision"}
+    - {from: "2026-08-01", on_peak: 0.31218, off_peak: 0.31218, super_off_peak: 0.04114, source: "Aug 2026 bill 'Rate 2'"}
+  pcia:
+    - {from: "2026-01-01", value: 0.02823, source: "Feb 2026 bill"}
+    - {from: "2026-05-01", value: 0.02828, source: "Aug 2026 bill 'Rate 1'; start date assumed"}
+    - {from: "2026-08-01", value: 0.02613, source: "Aug 2026 bill"}
+  cea_generation:
+    - from: "2026-01-01"
+      summer: {on_peak: 0.51684, off_peak: 0.15975, super_off_peak: 0.04961}
+      winter: {on_peak: 0.24430, off_peak: 0.15782, super_off_peak: 0.05187}
+      source: "CEA adopted rates 2/1/2026; Feb and Aug 2026 bills"

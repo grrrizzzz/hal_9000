@@ -22,7 +22,7 @@ import json
 
 import pytest
 
-from hello_agent.core.prompt import Prompt
+from hal9000.core.prompt import Prompt
 from tests.fakes import FakeLLM, tool_call
 
 

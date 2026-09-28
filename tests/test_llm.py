@@ -11,8 +11,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from hello_agent import llm
-from hello_agent.core.prompt import Prompt
+from hal9000 import llm
+from hal9000.core.prompt import Prompt
 from tests.fakes import FakeLLM, tool_call
 
 TOOLS = [{"type": "function", "function": {"name": "sign_guestbook", "parameters": {}}}]
@@ -74,10 +74,11 @@ def test_tier_selects_the_model_and_tools_are_forwarded(captured, anthropic_env)
     assert captured["kwargs"]["model"] == "anthropic/claude-haiku-4-5"
     assert captured["kwargs"]["messages"] is prompt.messages
     assert captured["kwargs"]["tools"] == TOOLS
-    assert captured["kwargs"]["max_tokens"] == 1024
+    assert captured["kwargs"]["max_tokens"] == 4096
+    assert captured["kwargs"]["parallel_tool_calls"] is False
 
     llm.generate_response(prompt)
-    assert captured["kwargs"]["model"] == "anthropic/claude-opus-5"
+    assert captured["kwargs"]["model"] == "anthropic/claude-sonnet-5"
 
 
 def test_no_tools_is_passed_as_none_not_empty_list(captured, openai_env):
@@ -119,5 +120,6 @@ def test_fake_llm_is_substitutable_for_generate_response():
 
     real = inspect.signature(llm.generate_response).parameters
     fake = inspect.signature(FakeLLM([]).__call__).parameters
-    assert list(real) == list(fake) == ["prompt", "tier"]
+    assert list(real)[:2] == list(fake) == ["prompt", "tier"]
+    assert real["on_usage"].kind is inspect.Parameter.KEYWORD_ONLY
     assert real["tier"].default == fake["tier"].default == "powerful"

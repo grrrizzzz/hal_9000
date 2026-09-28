@@ -11,16 +11,15 @@ import json
 
 import pytest
 
-from hello_agent.agents import TRANSLATOR_AGENT_NAME, build_translator_agent
-from hello_agent.core.action_context import ActionContext
-from hello_agent.core.actions import PythonActionRegistry
-from hello_agent.core.agent import Agent
-from hello_agent.core.agent_language import AgentFunctionCallingActionLanguage
-from hello_agent.core.environment import PythonEnvironment
-from hello_agent.core.goals import Goal
-from hello_agent.core.memory import Memory
-from hello_agent.core.registry import AgentRegistry
-from hello_agent.tools.delegation import (
+from hal9000.core.action_context import ActionContext
+from hal9000.core.actions import PythonActionRegistry
+from hal9000.core.agent import Agent
+from hal9000.core.agent_language import AgentFunctionCallingActionLanguage
+from hal9000.core.environment import PythonEnvironment
+from hal9000.core.goals import Goal
+from hal9000.core.memory import Memory
+from hal9000.core.registry import AgentRegistry
+from hal9000.tools.delegation import (
     NOT_INHERITED,
     call_agent,
     call_agent_with_reflection,
@@ -396,52 +395,6 @@ def test_an_unknown_agent_does_not_escape_the_agent_loop(registered_tools):
 
 
 # --- the translator sub-agent -----------------------------------------------
-
-
-def test_translator_runs_standalone_and_returns_a_translation(registered_tools):
-    llm = FakeLLM([tool_call("terminate", message="ようこそ、チェン博士。")])
-
-    memory = build_translator_agent(generate_response=llm).run(
-        "Translate into Japanese: Welcome, Dr. Chen."
-    )
-
-    assert json.loads(memory.items[-1]["content"])["result"] == "ようこそ、チェン博士。"
-
-
-def test_translator_carries_its_persona_in_its_goals(registered_tools):
-    llm = FakeLLM([tool_call("terminate", message="ようこそ")])
-
-    build_translator_agent(generate_response=llm).run("Translate into Japanese: Welcome.")
-
-    system_message = llm.last_prompt.messages[0]["content"]
-    assert "conference interpreter" in system_message
-    assert "register, warmth and formality" in system_message
-
-
-def test_translator_is_a_leaf_agent(registered_tools):
-    """One tool, and none of them is a delegation tool: it answers and stops."""
-    agent = build_translator_agent(generate_response=FakeLLM([]))
-
-    assert [action.name for action in agent.actions.get_actions()] == ["terminate"]
-
-
-def test_translator_can_be_registered_and_called(registered_tools):
-    """The end-to-end shape T8 will assemble: greeter -> registry -> translator."""
-    translator = build_translator_agent(
-        generate_response=FakeLLM([tool_call("terminate", message="ようこそ、チェン博士。")])
-    )
-    agent_registry = AgentRegistry()
-    agent_registry.register_agent(TRANSLATOR_AGENT_NAME, translator.run)
-    context = ActionContext({"memory": Memory(), "agent_registry": agent_registry})
-
-    result = call_agent(context, TRANSLATOR_AGENT_NAME, "Translate into Japanese: Welcome.")
-
-    assert result["success"] is True
-    # The translation itself, not the framework's result envelope around it.
-    assert result["result"] == "ようこそ、チェン博士。"
-
-
-# --- the lean default --------------------------------------------------------
 
 
 def test_delegation_tools_are_tagged_delegation_and_absent_by_default(registered_tools):

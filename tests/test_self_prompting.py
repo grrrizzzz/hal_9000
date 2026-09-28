@@ -6,10 +6,10 @@ import json
 
 import pytest
 
-from hello_agent.core.action_context import ActionContext
-from hello_agent.core.actions import PythonActionRegistry
-from hello_agent.core.environment import PythonEnvironment
-from hello_agent.tools.self_prompting import (
+from hal9000.core.action_context import ActionContext
+from hal9000.core.actions import PythonActionRegistry
+from hal9000.core.environment import PythonEnvironment
+from hal9000.tools.self_prompting import (
     create_and_consult_expert,
     prompt_expert,
     prompt_llm,

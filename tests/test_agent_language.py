@@ -6,14 +6,14 @@ import json
 
 import pytest
 
-from hello_agent.core.actions import Action
-from hello_agent.core.agent_language import (
+from hal9000.core.actions import Action
+from hal9000.core.agent_language import (
     AgentFunctionCallingActionLanguage,
     AgentJsonActionLanguage,
     AgentLanguage,
 )
-from hello_agent.core.goals import Goal
-from hello_agent.core.memory import Memory
+from hal9000.core.goals import Goal
+from hal9000.core.memory import Memory
 
 SCHEMA = {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]}
 ACTIONS = [

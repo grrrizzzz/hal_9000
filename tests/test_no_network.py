@@ -15,7 +15,7 @@ places, and this module is the alarm on both:
 * ``tests/conftest.py``, at module scope, before the first litellm import;
 * ``.github/workflows/ci.yml``, on the Test step.
 
-It is deliberately *not* set in ``src/hello_agent/llm.py``: in production a
+It is deliberately *not* set in ``src/hal9000/llm.py``: in production a
 current price map is worth one fetch. This is a test and CI guarantee, not a
 library default -- which is precisely why it needs a test to defend it.
 
@@ -65,13 +65,13 @@ except OSError:
 blocker_works = len(attempts)
 attempts.clear()
 
-import hello_agent
-import hello_agent.tools  # importing this registers every tool
+import hal9000
+import hal9000.tools  # importing this registers every tool
 
-for module in pkgutil.walk_packages(hello_agent.__path__, hello_agent.__name__ + "."):
+for module in pkgutil.walk_packages(hal9000.__path__, hal9000.__name__ + "."):
     __import__(module.name)
 
-# litellm last, and explicitly: hello_agent.llm imports it *inside*
+# litellm last, and explicitly: hal9000.llm imports it *inside*
 # generate_response rather than at module scope, so walking the package would
 # never reach it -- and it is the one dependency known to dial out on import.
 import litellm
@@ -101,7 +101,7 @@ def test_ci_workflow_pins_the_litellm_cost_map():
 
 
 def test_importing_the_package_makes_no_connection():
-    """Import every module in ``hello_agent`` with sockets blocked. Nothing may dial out."""
+    """Import every module in ``hal9000`` with sockets blocked. Nothing may dial out."""
     environment = dict(os.environ)
     environment[COST_MAP_VAR] = "True"
 
@@ -123,6 +123,6 @@ def test_importing_the_package_makes_no_connection():
         "fix the probe rather than trusting its result."
     )
     assert report["attempts"] == [], (
-        "importing hello_agent attempted these outbound connections: "
+        "importing hal9000 attempted these outbound connections: "
         f"{report['attempts']}. An import must never need the network; see ruling R8."
     )

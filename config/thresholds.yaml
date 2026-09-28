@@ -1,0 +1,11 @@
+# ratio = actual / expected production for the day
+bands:
+  normal_min: 0.85
+  low_min: 0.60
+  zero_max: 0.05
+# minimum expected production (kWh) before a band is assigned at all
+min_expected_kwh: 1.0
+# net position: flag when a TOU period's rolling 30-day net import falls below this
+# fraction of its import (i.e. it is trending toward export)
+net_position_warn_fraction: 0.10
+# cost caps (USD); env vars HAL_RUN_SOFT_CAP_USD etc. override

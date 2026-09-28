@@ -3,7 +3,7 @@
 ``test_capabilities.py`` proves the *mechanism* -- ten hooks, firing in order,
 in the default loop. This file proves the mechanism is worth having: that a real
 capability slots into those hooks and changes behaviour with no change to
-:mod:`hello_agent.core.agent`.
+:mod:`hal9000.core.agent`.
 
 Every test scripts its LLM exactly. That is deliberate accounting, not
 pedantry: ``PlanFirstCapability`` spends one extra call in ``init`` and
@@ -19,23 +19,23 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from hello_agent.capabilities import (
+from hal9000.capabilities import (
     LoggingCapability,
     PlanFirstCapability,
     ProgressTrackingCapability,
     TimeAwareCapability,
 )
-from hello_agent.capabilities import time_aware as time_aware_module
-from hello_agent.core.action_context import ActionContext, default_properties
-from hello_agent.core.actions import Action, ActionRegistry, PythonActionRegistry
-from hello_agent.core.agent import Agent
-from hello_agent.core.agent_language import AgentFunctionCallingActionLanguage
-from hello_agent.core.capabilities import Capability
-from hello_agent.core.environment import PythonEnvironment
-from hello_agent.core.goals import Goal
-from hello_agent.core.memory import Memory
-from hello_agent.core.prompt import Prompt
-from hello_agent.tools.planning import create_plan, track_progress
+from hal9000.capabilities import time_aware as time_aware_module
+from hal9000.core.action_context import ActionContext, default_properties
+from hal9000.core.actions import Action, ActionRegistry, PythonActionRegistry
+from hal9000.core.agent import Agent
+from hal9000.core.agent_language import AgentFunctionCallingActionLanguage
+from hal9000.core.capabilities import Capability
+from hal9000.core.environment import PythonEnvironment
+from hal9000.core.goals import Goal
+from hal9000.core.memory import Memory
+from hal9000.core.prompt import Prompt
+from hal9000.tools.planning import create_plan, track_progress
 from tests.fakes import FakeLLM, tool_call
 
 SCHEMA = {"type": "object", "properties": {}, "required": []}
@@ -80,7 +80,7 @@ def test_time_aware_seeds_memory_in_init():
 
     seeded = system_memories(memory)[0]
     assert "Right now, it is" in seeded
-    assert "America/Chicago timezone" in seeded
+    assert "America/Los_Angeles timezone" in seeded
     assert "(ISO: " in seeded
     # and it is in front of the model on the very first turn
     assert any(seeded in message["content"] for message in llm.calls[0].messages)
@@ -88,6 +88,7 @@ def test_time_aware_seeds_memory_in_init():
 
 def test_time_aware_refreshes_the_time_in_every_process_prompt(monkeypatch):
     """Not 'the time is in the prompt' -- 'the time is *re-read* each iteration'."""
+    monkeypatch.setenv("AGENT_TIMEZONE", "America/Chicago")
     base = datetime(2026, 9, 21, 16, 58, tzinfo=ZoneInfo("America/Chicago"))
     ticks = iter([base, base, base + timedelta(minutes=5), base + timedelta(minutes=11)])
 
@@ -120,9 +121,9 @@ def test_time_aware_takes_the_timezone_from_the_action_context():
     assert "(Asia/Tokyo)" in llm.calls[0].messages[0]["content"]
 
 
-def test_time_aware_defaults_to_america_chicago_and_honours_agent_timezone(monkeypatch):
+def test_time_aware_defaults_to_los_angeles_and_honours_agent_timezone(monkeypatch):
     context = build_context(FakeLLM([]))
-    assert time_aware_module.resolve_time_zone(context)[0] == "America/Chicago"
+    assert time_aware_module.resolve_time_zone(context)[0] == "America/Los_Angeles"
 
     monkeypatch.setenv("AGENT_TIMEZONE", "Europe/Paris")
     assert time_aware_module.resolve_time_zone(context)[0] == "Europe/Paris"
@@ -295,7 +296,7 @@ def test_logging_leaves_the_run_identical():
 
 
 def test_logging_defaults_to_the_standard_library_logger(caplog):
-    with caplog.at_level("INFO", logger="hello_agent.capabilities.logging"):
+    with caplog.at_level("INFO", logger="hal9000.capabilities.logging"):
         LoggingCapability().log("process_response", iteration=1)
 
     assert "process_response iteration=1" in caplog.text

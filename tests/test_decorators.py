@@ -6,10 +6,10 @@ from typing import Any
 
 import pytest
 
-from hello_agent.core.action_context import ActionContext
-from hello_agent.core.actions import PythonActionRegistry
-from hello_agent.core.environment import PythonEnvironment
-from hello_agent.tools.decorators import get_json_type, get_tool_metadata, register_tool
+from hal9000.core.action_context import ActionContext
+from hal9000.core.actions import PythonActionRegistry
+from hal9000.core.environment import PythonEnvironment
+from hal9000.tools.decorators import get_json_type, get_tool_metadata, register_tool
 
 
 def test_name_and_description_come_from_the_function(clean_tool_registry):

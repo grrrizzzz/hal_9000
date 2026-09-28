@@ -1,0 +1,19 @@
+# HAL 9000 solar site. Secrets and entity IDs live in .env, not here.
+site:
+  name: Oceanside array
+  latitude: 33.25
+  longitude: -117.30
+  altitude_m: 20
+  timezone: America/Los_Angeles
+  tilt_deg: 33
+  azimuth_deg: 180          # compass (180 = due south). Open-Meteo uses 0 = south; converted in code.
+  dc_kw: 2.47
+  inverter: Delta SOLIVIA 3.8 NA G4 TL
+  install_year: 2015
+  degradation_factor: 0.945  # ~5.5% cumulative panel degradation
+  bootstrap_performance_ratio: 0.85   # before degradation; used until the fitted model exists
+run:
+  local_time: "20:00"
+  announce_on_completion: true
+# SOLAR_SCALE and SOLAR_FIXED_AT (in .env) correct Emporia solar history recorded
+# before the 240 V multiplier was fixed (2026-09-27 ~18:35). See plan §2.1.

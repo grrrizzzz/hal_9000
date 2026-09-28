@@ -12,14 +12,14 @@ import json
 
 import pytest
 
-from hello_agent.core import agent as agent_module
-from hello_agent.core.action_context import ActionContext
-from hello_agent.core.actions import Action, ActionRegistry
-from hello_agent.core.agent import Agent
-from hello_agent.core.agent_language import AgentFunctionCallingActionLanguage
-from hello_agent.core.environment import PythonEnvironment
-from hello_agent.core.goals import Goal
-from hello_agent.core.memory import Memory
+from hal9000.core import agent as agent_module
+from hal9000.core.action_context import ActionContext
+from hal9000.core.actions import Action, ActionRegistry
+from hal9000.core.agent import Agent
+from hal9000.core.agent_language import AgentFunctionCallingActionLanguage
+from hal9000.core.environment import PythonEnvironment
+from hal9000.core.goals import Goal
+from hal9000.core.memory import Memory
 from tests.fakes import FakeLLM, tool_call
 
 SCHEMA = {"type": "object", "properties": {}, "required": []}

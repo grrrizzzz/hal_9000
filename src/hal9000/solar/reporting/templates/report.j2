@@ -1,0 +1,19 @@
+{%- if production_missing %}Solar report for {{ day_name }}: production data is missing. {{ production_missing }}. Check Home Assistant and the Emporia monitor.
+{%- else -%}
+Solar report for {{ day_name }}. The panels produced {{ f.production_kwh }} kilowatt-hours
+{%- if band == "sensor_fault" %}, but the solar sensor is reading less than the house exported, so that figure is wrong. Check the Emporia solar channel.
+{%- elif band == "no_data" %}.
+{%- elif band == "unassessed" %}. {% if weather_missing %}Weather data was unavailable, so performance could not be judged.{% else %}There was too little sun to judge performance.{% endif %}
+{%- elif f.expected_kwh %}, against {{ f.expected_kwh }} expected for the weather, which is {{ f.performance_pct }}.
+{%- else %}.
+{%- endif %}
+{%- if band == "zero" %} Output was near zero: check the inverter first.
+{%- elif band == "severe" %} That is far below expectation{% if anomaly_text %}: {{ anomaly_text }}{% endif %}.
+{%- elif band == "low" %} That is below expectation{% if anomaly_text %}: {{ anomaly_text }}{% endif %}.
+{%- endif %}
+{%- if verdict_text %} {{ verdict_text }}{% endif %}
+{%- if f.savings_usd %} Today's solar was worth {{ f.savings_usd }}.
+{%- elif savings_absent %} Savings are not included: {{ savings_absent }}.
+{%- endif %}
+{%- if trending %} Note: {{ trending }} is trending toward net export, which affects the savings model.{% endif %}
+{%- endif %}

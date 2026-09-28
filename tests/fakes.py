@@ -1,6 +1,6 @@
 """Deterministic stand-ins for the LLM, so the suite never needs a key.
 
-Because :func:`hello_agent.llm.generate_response` is just
+Because :func:`hal9000.llm.generate_response` is just
 ``(Prompt, tier) -> str``, faking it needs no mocking library and no HTTP
 interception: a list of strings is a complete LLM.
 """
@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 
-from hello_agent.core.prompt import Prompt
+from hal9000.core.prompt import Prompt
 
 __all__ = ["FakeLLM", "tool_call"]
 

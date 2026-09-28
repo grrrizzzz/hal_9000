@@ -10,14 +10,14 @@ from __future__ import annotations
 
 import json
 
-from hello_agent.core.actions import Action, ActionRegistry
-from hello_agent.core.agent import Agent
-from hello_agent.core.agent_language import AgentFunctionCallingActionLanguage
-from hello_agent.core.capabilities import Capability
-from hello_agent.core.environment import PythonEnvironment
-from hello_agent.core.goals import Goal
-from hello_agent.core.memory import Memory
-from hello_agent.core.prompt import Prompt
+from hal9000.core.actions import Action, ActionRegistry
+from hal9000.core.agent import Agent
+from hal9000.core.agent_language import AgentFunctionCallingActionLanguage
+from hal9000.core.capabilities import Capability
+from hal9000.core.environment import PythonEnvironment
+from hal9000.core.goals import Goal
+from hal9000.core.memory import Memory
+from hal9000.core.prompt import Prompt
 from tests.fakes import FakeLLM, tool_call
 
 SCHEMA = {"type": "object", "properties": {}, "required": []}

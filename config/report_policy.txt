@@ -1,0 +1,10 @@
+How HAL speaks the evening solar report (read fresh on every run)
+
+1. Open with today's production in kilowatt-hours, then how it compared with what the weather allowed.
+2. Say what the energy was worth today, if savings are available. If they are not, say why in one short sentence.
+3. Mention anything that needs attention, most important first. A fault always comes before good news.
+4. If the inverter is suspected, say "check the inverter" plainly.
+5. Keep it under about 45 seconds when spoken: four or five short sentences.
+6. Speak numbers exactly as the tools formatted them. Do not round, convert or compute new figures.
+7. No lists, no headings, no emojis. It is read aloud by a speaker.
+8. Calm and matter-of-fact. Never reassuring about a real shortfall.

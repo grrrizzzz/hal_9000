@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from hello_agent.core.memory import Memory
+from hal9000.core.memory import Memory
 
 
 def test_memory_starts_empty():

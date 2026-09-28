@@ -8,9 +8,9 @@ Two guarantees are tested here, and the agent loop rests on both:
 
 from __future__ import annotations
 
-from hello_agent.core.action_context import ActionContext
-from hello_agent.core.actions import Action
-from hello_agent.core.environment import Environment, PythonEnvironment, has_named_parameter
+from hal9000.core.action_context import ActionContext
+from hal9000.core.actions import Action
+from hal9000.core.environment import Environment, PythonEnvironment, has_named_parameter
 
 SCHEMA = {"type": "object", "properties": {}, "required": []}
 

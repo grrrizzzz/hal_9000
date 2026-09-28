@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import importlib
 
-from hello_agent.core import registry
-from hello_agent.core.actions import PythonActionRegistry
-from hello_agent.tools import self_prompting, system
-from hello_agent.tools.decorators import register_tool
+from hal9000.core import registry
+from hal9000.core.actions import PythonActionRegistry
+from hal9000.tools import self_prompting, system
+from hal9000.tools.decorators import register_tool
 
 #: Everything T3 owns. Later waves add tools; these must always be present.
 T3_TOOLS = {
