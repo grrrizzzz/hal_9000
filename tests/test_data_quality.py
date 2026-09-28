@@ -252,3 +252,38 @@ def test_recovery_does_not_clear_on_a_partial_day(hal_env, write_fixture):
     assert [a["alert_key"] for a in open_database(config.settings()).open_alerts()] == [
         "production_low"
     ]
+
+
+# Real Home Assistant hourly statistics for 2026-09-27, the day the Emporia
+# multiplier was fixed at 18:35 (the 18:00 bucket holds the +3.26 kWh rescale
+# jump). 23 hours: the run happened before the 23:00 bucket was compiled.
+REAL_2026_09_27_SOLAR = [
+    0, 0, 0, 0, 0, 0, 0.00053, 0.04558, 0.15726, 0.24478, 0.50518, 0.44407, 0.61794,
+    0.44701, 0.32171, 0.21422, 0.18699, 0.07265, 3.26477, 0.00016, 0, 0, 0,
+]  # fmt: skip
+REAL_2026_09_27_IMPORT = [
+    7.48389, 9.55392, 9.59273, 3.1718, 1.20256, 0.61851, 0.63701, 0.46332, 0.33187,
+    0.15653, 0.02549, 0.44171, 0.7508, 0.4891, 0.45119, 1.08221, 1.00082, 1.11944,
+    1.59418, 2.54842, 3.55345, 2.50826, 0.78583,
+]  # fmt: skip
+
+
+def test_real_transition_day(hal_env, write_fixture):
+    day = date(2026, 9, 27)
+    fx = fixture(day, [0.0] * 24, [0.0] * 24, [0.0] * 24, 0.9)
+    start = datetime(2026, 9, 27, tzinfo=TZ)
+    result = fx["ha"][0]["result"]
+    for entity, values in ((SOLAR, REAL_2026_09_27_SOLAR), (IMPORT, REAL_2026_09_27_IMPORT)):
+        result[entity] = [
+            [(start + timedelta(hours=h)).astimezone(UTC).isoformat(), v]
+            for h, v in enumerate(values)
+        ]
+    result[EXPORT] = result[EXPORT][:23]
+    fx["now"] = "2026-09-28T08:00:00-07:00"
+    run = run_evening(RunOptions(replay=write_fixture(fx), no_llm=True))
+    # pre-fix hours doubled, the rescale jump dropped, the gap not counted as zero
+    assert run.report_text.startswith("Solar report for Sunday. The panels produced 6.5")
+    assert run.band not in ("sensor_fault", "partial_data", "zero")
+    db = open_database(config.settings())
+    flags = db.hourly(day)[0]["flags"]
+    assert {"transition_day", "data_artifact", "missing_data"} <= set(flags)

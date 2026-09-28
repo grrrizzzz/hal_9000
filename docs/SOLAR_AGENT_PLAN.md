@@ -371,7 +371,9 @@ Values are stored already formatted for speech (kWh to 1 decimal, dollars to cen
 | severe | < 0.60 | triage |
 | zero | ≤ 0.05, or production data flat-lined during daylight | triage; inverter-first alert (critical) |
 | unassessed | weather unavailable | no band; report production only |
-| sensor_fault | solar < grid export in any hour | no band and no triage; report the sensor problem (low-severity alert, deduplicated) |
+| sensor_fault | solar < grid export in any hour that has solar data | no band and no triage; report the sensor problem (low-severity alert, deduplicated) |
+| partial_data | daylight hours with too few solar buckets (fewer than 10 of 12 five-minute buckets) hide more than 40% of the day's expected energy | no band and no triage; say the data was incomplete. Below 40%, the missing hours are left out of both actual and expected and the report says so |
+| no_data | Home Assistant unreachable or no solar statistics at all | report that production data is missing; never zero |
 
 ---
 

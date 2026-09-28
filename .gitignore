@@ -1,6 +1,8 @@
 # Secrets and local runtime state
 .env
 guestbook.json
+# HAL runtime state: SQLite history, transcripts, recorded fixtures, health.json
+/data/
 
 # Python
 __pycache__/

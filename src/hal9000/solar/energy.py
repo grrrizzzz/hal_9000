@@ -132,7 +132,6 @@ def fold_statistics(
                     artifacts.append(f"{entity} negative change {value:.3f} at {local:%H:%M}")
                 value = 0.0
             if is_solar:
-                solar_buckets[hour] += 1
                 if fixed_at is not None and local < fixed_at and settings.solar_scale != 1.0:
                     value *= settings.solar_scale
                     scaled.add(hour)
@@ -141,7 +140,8 @@ def fold_statistics(
                         f"solar jump of {value:.2f} kWh at {local:%H:%M} exceeds the "
                         f"{ceiling:.2f} kWh physical limit; dropped"
                     )
-                    continue
+                    continue  # a dropped bucket is missing data, so it isn't counted
+                solar_buckets[hour] += 1
             target[hour] += value
 
     fold(settings.entity_solar, solar, True)
