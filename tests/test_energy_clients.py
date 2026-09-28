@@ -321,11 +321,13 @@ def test_ha_bad_token_and_error_reply(monkeypatch):
 def test_ha_rest_calls(monkeypatch):
     calls = []
 
-    def fake_post(url, headers, json, timeout):
+    def fake_post(url, headers, json, timeout, trust_env):
+        assert trust_env is False  # the LAN call must bypass any proxy
         calls.append((url, json, headers["Authorization"]))
         return httpx.Response(200, json=[], request=httpx.Request("POST", url))
 
-    def fake_get(url, headers, timeout):
+    def fake_get(url, headers, timeout, trust_env):
+        assert trust_env is False
         body = {"message": "API running."} if url.endswith("/api/") else {"state": "idle"}
         return httpx.Response(200, json=body, request=httpx.Request("GET", url))
 

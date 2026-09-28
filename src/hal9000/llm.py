@@ -80,7 +80,7 @@ def generate_response(
         "model": model,
         "messages": prompt.messages,
         "tools": prompt.tools or None,
-        "max_tokens": config.max_tokens(),
+        "max_tokens": config.max_tokens(tier),
     }
     if prompt.tools:
         kwargs["parallel_tool_calls"] = False

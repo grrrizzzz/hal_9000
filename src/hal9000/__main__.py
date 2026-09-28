@@ -166,8 +166,11 @@ def cmd_check(args) -> int:
                     failures += 1
             energy = fetch_day_energy(ha, now.date(), settings, site, now)
             totals = energy.totals()
+            has_data = energy.hours_with_data > 0
+            if not has_data and now.hour >= 1:
+                failures += 1
             _line(
-                energy.hours_with_data > 0,
+                has_data if (has_data or now.hour >= 1) else None,
                 "  statistics (websocket)",
                 f"today so far: solar {totals['solar']:.2f} kWh, import {totals['import']:.2f}, "
                 f"export {totals['export']:.2f} ({energy.resolution}); "

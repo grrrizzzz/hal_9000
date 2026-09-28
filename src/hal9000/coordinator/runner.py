@@ -228,7 +228,8 @@ def run_evening(opts: RunOptions | None = None) -> RunResult:
     if opts.shadow:
         features.shadow_mode = True
     db = open_database(settings)
-    run_id = f"{day.isoformat()}-{now.strftime('%H%M%S')}"
+    # the wall clock, not ``now``: reruns of the same --date get their own id
+    run_id = f"{day.isoformat()}-{datetime.now(tz):%H%M%S%f}"[:-3]
     delivery = Delivery(
         settings=settings,
         ha=ha,

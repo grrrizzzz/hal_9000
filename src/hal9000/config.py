@@ -76,7 +76,9 @@ _NO_PROVIDER_MESSAGE = (
     "or run with --no-llm for the deterministic report."
 )
 
-DEFAULT_MAX_TOKENS = 4096
+#: Output ceiling per call. Reasoning tokens count toward it, so the powerful
+#: tier (medium effort, long triage prompts) gets far more room.
+DEFAULT_MAX_TOKENS = {"fast": 8192, "powerful": 16384}
 DEFAULT_MAX_ITERATIONS = 12
 DEFAULT_MAX_DURATION_SECONDS = 600
 
@@ -103,9 +105,12 @@ def _env_flag(name: str) -> bool:
     return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def max_tokens() -> int:
-    """Output token ceiling per LLM call (reasoning tokens count toward it)."""
-    return _env_int("AGENT_MAX_TOKENS", DEFAULT_MAX_TOKENS)
+def max_tokens(tier: str = "fast") -> int:
+    """Output token ceiling per LLM call (reasoning tokens count toward it).
+
+    ``AGENT_MAX_TOKENS`` overrides both tiers.
+    """
+    return _env_int("AGENT_MAX_TOKENS", DEFAULT_MAX_TOKENS.get(tier, DEFAULT_MAX_TOKENS["fast"]))
 
 
 def max_iterations() -> int:

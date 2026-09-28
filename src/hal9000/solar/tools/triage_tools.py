@@ -79,22 +79,38 @@ def get_intraday_curve(resolution_min: int = 15, _run: RunContext = None) -> dic
         raise ToolInputError("resolution_min must be 5, 15 or 60")
     tz = ZoneInfo(run.site.timezone)
     start = datetime(run.day.year, run.day.month, run.day.day, tzinfo=tz)
-    points = run.ha.statistics(
-        [run.settings.entity_solar], start, start + timedelta(days=1), "5minute"
+    entity = run.settings.entity_solar
+    series = run.ha.statistics([entity], start, start + timedelta(days=1), "5minute").get(
+        entity, []
     )
-    series = points.get(run.settings.entity_solar, [])
+    step = 5
+    note = None
+    if not series:
+        # Home Assistant purges 5-minute statistics after about 10 days
+        series = run.ha.statistics([entity], start, start + timedelta(days=1), "hour").get(
+            entity, []
+        )
+        step = 60
+        resolution_min = 60
+        note = "5-minute data has been purged for this date; hourly points only."
+    if not series:
+        return {
+            "curve": {},
+            "note": "No solar statistics exist for this date. That is missing data, "
+            "not zero output.",
+        }
     fixed = run.settings.solar_fixed_at
-    ceiling = run.site.max_kwh_per_5min
+    ceiling = run.site.dc_kw * 1.2 * step / 60
     buckets: dict[str, float] = {}
     zero_minutes = 0
     for moment, change in series:
         local = moment.astimezone(tz)
-        if change > ceiling or change < 0:
-            continue
         if fixed is not None and local < fixed:
             change *= run.settings.solar_scale
+        if change > ceiling or change < 0:
+            continue
         if 7 <= local.hour < 17 and change <= 0.001:
-            zero_minutes += 5
+            zero_minutes += step
         slot = (
             local.replace(minute=(local.minute // resolution_min) * resolution_min)
             if resolution_min < 60
@@ -107,6 +123,7 @@ def get_intraday_curve(resolution_min: int = 15, _run: RunContext = None) -> dic
     run.store.put("triage_max_kw", fmt.plain(round(max_kw, 1)))
     run.store.put("triage_zero_minutes_7_to_17", fmt.plain(zero_minutes))
     return {
+        **({"note": note} if note else {}),
         "unit": "kW average per interval",
         "curve": curve,
         "max_kw": run.store.figure("triage_max_kw"),
@@ -141,10 +158,10 @@ def get_sensor_history(sensor: str, days: int = 14, _run: RunContext = None) -> 
     fixed = run.settings.solar_fixed_at
     for moment, change in points:
         local = moment.astimezone(tz)
-        if change < 0 or change > run.site.dc_kw * 1.2 and sensor == "solar":
-            continue
         if sensor == "solar" and fixed is not None and local < fixed:
             change *= run.settings.solar_scale
+        if change < 0 or (sensor == "solar" and change > run.site.dc_kw * 1.2):
+            continue
         key = local.date().isoformat()
         daily[key] = daily.get(key, 0.0) + change
     out = {}

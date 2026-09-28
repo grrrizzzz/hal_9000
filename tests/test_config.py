@@ -88,11 +88,12 @@ def test_rates_known_and_pessimistic_default():
 
 
 def test_limits_have_defaults_and_overrides(monkeypatch):
-    assert config.max_tokens() == 4096
+    assert config.max_tokens("fast") == 8192
+    assert config.max_tokens("powerful") == 16384
     assert config.max_iterations() == 12
     monkeypatch.setenv("AGENT_MAX_TOKENS", "2000")
     monkeypatch.setenv("AGENT_MAX_ITERATIONS", "junk")
-    assert config.max_tokens() == 2000
+    assert config.max_tokens("powerful") == 2000
     assert config.max_iterations() == 12
 
 

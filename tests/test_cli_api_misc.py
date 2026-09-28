@@ -243,6 +243,38 @@ def _range_payload(start: date, end: date) -> dict:
     return merged
 
 
+def test_calibrate_weather_chunks_never_straddle_the_forecast_window(hal_env):
+    from hal9000.coordinator.runner import open_database
+    from hal9000.solar import calibration
+    from hal9000.solar.clients.openmeteo import FORECAST_MAX_PAST_DAYS
+    from hal9000.solar.domain.sitecfg import load_site
+
+    today = date(2026, 9, 27)
+    calls = []
+
+    class Weather:
+        def fetch(self, start, end):
+            calls.append((start, end))
+            return _range_payload(start, end)
+
+    class EmptyHA:
+        def statistics(self, *a):
+            return {}
+
+    settings = config.settings()
+    for days in (85, 175, 300):
+        calls.clear()
+        calibration.calibrate(
+            EmptyHA(), Weather(), open_database(settings), settings,
+            load_site(settings.config_dir), days, today,
+        )  # fmt: skip
+        assert calls
+        first_forecast = today - timedelta(days=FORECAST_MAX_PAST_DAYS)
+        for start, fetch_end in calls:
+            chunk_last = fetch_end - timedelta(days=1)
+            assert start >= first_forecast or chunk_last < first_forecast
+
+
 def test_cli_calibrate_uses_real_clients(hal_env, monkeypatch, capsys):
     from hal9000 import __main__ as cli
     from hal9000.solar import calibration
@@ -420,10 +452,12 @@ def test_triage_tools_direct(run_ctx):
 
     handover = t.read_handover(_run=run_ctx)
     assert handover["figures"]["production_kwh"] == "13.0"
-    curve = t.get_intraday_curve(
-        60, _run=run_ctx
-    )  # fixture has hourly only -> empty 5-minute curve
+    curve = t.get_intraday_curve(15, _run=run_ctx)  # fixture has hourly only
+    assert "purged" in curve["note"] and curve["curve"]["12:00"] > 1.0
     assert "max_kw" in curve
+    run_ctx.ha = FixtureHA({"ha": []})
+    assert "missing data" in t.get_intraday_curve(15, _run=run_ctx)["note"]
+    run_ctx.ha = FixtureHA(clear_fx())
     with pytest.raises(ValueError):
         t.get_intraday_curve(7, _run=run_ctx)
     history = t.get_sensor_history("solar", 3, _run=run_ctx)

@@ -74,7 +74,7 @@ def test_tier_selects_the_model_and_tools_are_forwarded(captured, anthropic_env)
     assert captured["kwargs"]["model"] == "anthropic/claude-haiku-4-5"
     assert captured["kwargs"]["messages"] is prompt.messages
     assert captured["kwargs"]["tools"] == TOOLS
-    assert captured["kwargs"]["max_tokens"] == 4096
+    assert captured["kwargs"]["max_tokens"] == 8192
     assert captured["kwargs"]["parallel_tool_calls"] is False
 
     llm.generate_response(prompt)

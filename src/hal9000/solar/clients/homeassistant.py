@@ -80,7 +80,9 @@ class HAClient:
             "units": {"energy": "kWh"},
         }
         try:
-            with connect(self._ws_url(), open_timeout=self.timeout, max_size=2**24) as ws:
+            with connect(
+                self._ws_url(), open_timeout=self.timeout, max_size=2**24, proxy=None
+            ) as ws:
                 hello = json.loads(ws.recv(timeout=self.timeout))
                 if hello.get("type") != "auth_required":
                     raise HAUnavailable(f"Unexpected websocket greeting: {hello.get('type')}")
@@ -117,6 +119,7 @@ class HAClient:
                 headers=self._headers,
                 json=payload,
                 timeout=self.timeout,
+                trust_env=False,  # HA is on the LAN: never route it through a proxy
             )
             response.raise_for_status()
         except Exception as error:
@@ -124,7 +127,9 @@ class HAClient:
 
     def ping(self) -> str:
         try:
-            response = httpx.get(f"{self.base_url}/api/", headers=self._headers, timeout=10)
+            response = httpx.get(
+                f"{self.base_url}/api/", headers=self._headers, timeout=10, trust_env=False
+            )
             response.raise_for_status()
             return response.json().get("message", "ok")
         except Exception as error:
@@ -133,7 +138,10 @@ class HAClient:
     def state(self, entity_id: str) -> dict:
         try:
             response = httpx.get(
-                f"{self.base_url}/api/states/{entity_id}", headers=self._headers, timeout=10
+                f"{self.base_url}/api/states/{entity_id}",
+                headers=self._headers,
+                timeout=10,
+                trust_env=False,
             )
             response.raise_for_status()
             return response.json()

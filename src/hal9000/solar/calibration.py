@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 from hal9000.config import Settings
 from hal9000.solar.clients.homeassistant import HAProtocol
-from hal9000.solar.clients.openmeteo import WeatherProtocol
+from hal9000.solar.clients.openmeteo import FORECAST_MAX_PAST_DAYS, WeatherProtocol
 from hal9000.solar.domain.expectation import MIN_FIT_DAYS, ExpectationModel, fit_model
 from hal9000.solar.domain.sitecfg import Site
 from hal9000.solar.energy import UNFIT_FLAGS, fold_statistics
@@ -104,11 +104,14 @@ def calibrate(
     start = end - timedelta(days=days - 1)
     energy_days = backfill_energy(ha, db, settings, site, start, end)
     weather_days = 0
-    chunk = start
-    while chunk <= end:
-        chunk_end = min(chunk + timedelta(days=89), end)
+    # Walk back from the newest day in chunks the forecast endpoint's window
+    # divides evenly, so no chunk straddles the forecast/archive boundary.
+    step = FORECAST_MAX_PAST_DAYS
+    chunk_end = end
+    while chunk_end >= start:
+        chunk = max(chunk_end - timedelta(days=step - 1), start)
         weather_days += backfill_weather(weather, db, chunk, chunk_end, site.timezone)
-        chunk = chunk_end + timedelta(days=1)
+        chunk_end = chunk - timedelta(days=1)
     model = fit_from_db(db, site, start, end, today)
     return {
         "energy_days": energy_days,
