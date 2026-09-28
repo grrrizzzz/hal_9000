@@ -4,12 +4,18 @@ Radiation variables are **averages over the preceding hour**: the value stamped
 13:00 describes 12:00-13:00. :func:`hourly_for_day` re-buckets them so index
 ``h`` always means the hour *starting* at ``h``, matching every other hourly
 series in HAL. Open-Meteo's azimuth convention is 0 = south (compass 180).
+
+Requests ask for ``timezone=GMT``. With a local timezone Open-Meteo reports one
+UTC offset for the whole response and repeats or skips wall-clock hours on DST
+days; in UTC every stamp is unique, and :func:`hourly_for_day` converts the
+local day's hours to UTC instants before looking them up.
 """
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone, tzinfo
 from typing import Protocol
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -53,9 +59,10 @@ class OpenMeteoClient:
             "longitude": longitude,
             "tilt": tilt,
             "azimuth": openmeteo_azimuth,
-            "timezone": timezone,
+            "timezone": "GMT",
             "hourly": HOURLY_VARS,
         }
+        self.local_timezone = timezone  # the site's zone; requests themselves use GMT
         self.timeout = timeout
         self._today = today
 
@@ -77,14 +84,23 @@ class OpenMeteoClient:
         return payload
 
 
-def hourly_for_day(payload: dict, day: date) -> list[dict]:
-    """24 buckets for ``day``: ``poa``/``ghi`` in kWh/m2, ``cloud`` %, ``temp`` degC.
+def _payload_zone(payload: dict) -> tzinfo:
+    return timezone(timedelta(seconds=int(payload.get("utc_offset_seconds") or 0)))
 
-    Radiation stamped ``t`` is assigned to the hour starting ``t - 1h``. Temperature
-    is instantaneous, so each hour takes the mean of its two endpoints.
+
+def hourly_for_day(payload: dict, day: date, tz: str | tzinfo | None = None) -> list[dict]:
+    """24 buckets for local ``day``: ``poa``/``ghi`` in kWh/m2, ``cloud`` %, ``temp`` degC.
+
+    ``tz`` is the site's timezone (default: the payload's own offset). Radiation
+    stamped ``t`` is assigned to the hour starting ``t - 1h``. Temperature is
+    instantaneous, so each hour takes the mean of its two endpoints.
     """
     hourly = payload["hourly"]
-    times = [datetime.fromisoformat(t) for t in hourly["time"]]
+    stamp_zone = _payload_zone(payload)
+    local = ZoneInfo(tz) if isinstance(tz, str) else (tz or stamp_zone)
+    times = [
+        datetime.fromisoformat(t).replace(tzinfo=stamp_zone).astimezone(UTC) for t in hourly["time"]
+    ]
     gti = hourly.get("global_tilted_irradiance") or [None] * len(times)
     ghi = hourly.get("shortwave_radiation") or [None] * len(times)
     cloud = hourly.get("cloud_cover") or [None] * len(times)
@@ -93,12 +109,12 @@ def hourly_for_day(payload: dict, day: date) -> list[dict]:
 
     buckets = []
     for hour in range(24):
-        start = datetime(day.year, day.month, day.day, hour)
+        start = datetime(day.year, day.month, day.day, hour, tzinfo=local).astimezone(UTC)
         end = start + timedelta(hours=1)
         i_end = by_time.get(end)
         i_start = by_time.get(start)
         if i_end is None or gti[i_end] is None:
-            raise WeatherUnavailable(f"Open-Meteo data missing for {start.isoformat()}")
+            raise WeatherUnavailable(f"Open-Meteo data missing for {day.isoformat()} {hour}:00")
         temps = [temp[i] for i in (i_start, i_end) if i is not None and temp[i] is not None]
         buckets.append(
             {

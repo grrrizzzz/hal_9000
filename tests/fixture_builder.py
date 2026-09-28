@@ -70,7 +70,8 @@ def weather_payload(day: date, sky_factor: list[float] | float = 0.95, temp: flo
         d = day + timedelta(days=offset)
         clear = clearsky_poa_hourly(site, d)
         for h in range(24):
-            t = datetime(d.year, d.month, d.day, h)
+            # Open-Meteo is asked for GMT: stamps are UTC wall-clock times
+            t = datetime(d.year, d.month, d.day, h, tzinfo=TZ).astimezone(ZoneInfo("UTC"))
             times.append(t.strftime("%Y-%m-%dT%H:%M"))
             # value stamped h is the mean of the preceding hour (h-1 .. h)
             prev = h - 1
@@ -82,6 +83,8 @@ def weather_payload(day: date, sky_factor: list[float] | float = 0.95, temp: flo
     return {
         "latitude": 33.25,
         "longitude": -117.3,
+        "timezone": "GMT",
+        "utc_offset_seconds": 0,
         "hourly_units": {"global_tilted_irradiance": "W/m²"},
         "hourly": {
             "time": times,

@@ -138,7 +138,8 @@ def test_clear_day_llm_report(hal_env, write_fixture):
 def test_prose_instead_of_tool_still_delivers(hal_env, write_fixture):
     """The model answers in prose on step 2: HAL's completeness check covers it."""
     script = [tool_call("get_home_energy", date=D), "Everything looks fine today!"] + ["Done."] * 12
-    result, _ = run(write_fixture, clear_day(), script)
+    result, llm = run(write_fixture, clear_day(), script)
+    assert len(llm.calls) == 3  # two prose replies in a row end the loop
     assert result.report_delivered and result.record_written
     assert result.renderer == "fallback"
     assert result.status == "degraded"
@@ -178,6 +179,45 @@ def test_incomplete_report_is_sent_back(hal_env, write_fixture):
     )
     result, _ = run(write_fixture, clear_day(), script)
     assert result.renderer == "llm"
+
+
+def test_completeness_bounce_does_not_use_up_the_guard_chance(hal_env, write_fixture):
+    script = (
+        [
+            tool_call("get_home_energy", date=D),
+            tool_call("deliver_report", narrative="Production was fine."),  # incomplete
+        ]
+        + ROUTINE[1:]
+        + [
+            tool_call("deliver_report", narrative="About 12.5 kilowatt-hours."),  # unbacked
+            tool_call("deliver_report", narrative="The panels made 13.0 kilowatt-hours."),
+        ]
+    )
+    result, _ = run(write_fixture, clear_day(), script)
+    assert result.renderer == "llm" and result.status == "ok"
+
+
+def test_too_long_twice_falls_back(hal_env, write_fixture):
+    long = "Production was normal today. " * 40
+    script = ROUTINE + [
+        tool_call("deliver_report", narrative=long),
+        tool_call("deliver_report", narrative=long),
+    ]
+    result, _ = run(write_fixture, clear_day(), script)
+    assert result.renderer == "fallback"
+    assert any("too long" in r for r in result.degraded_reasons)
+
+
+def test_too_long_is_checked_even_after_a_guard_rejection(hal_env, write_fixture):
+    long = "Production was normal today. " * 40
+    script = ROUTINE + [
+        tool_call("deliver_report", narrative="About 12.5 kilowatt-hours."),
+        tool_call("deliver_report", narrative=long),
+        tool_call("deliver_report", narrative="The panels made 13.0 kilowatt-hours."),
+    ]
+    result, _ = run(write_fixture, clear_day(), script)
+    assert result.renderer == "llm"
+    assert len(result.report_text.split()) < 20
 
 
 def test_zero_output_triage_inverter_first(hal_env, write_fixture):

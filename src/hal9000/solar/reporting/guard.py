@@ -21,17 +21,28 @@ from hal9000.storage.run_store import RunStore
 __all__ = ["allowed_values", "completeness_problems", "find_unbacked_numerals"]
 
 _ALWAYS_ALLOWED = {Decimal(0), Decimal(1)}
+_UNIT_CLASS = {"money": ("money",), "percent": ("percent",), "energy": ("number",)}
 
 
-def allowed_values(store: RunStore, day: date) -> set[Decimal]:
-    values = set(store.numeric_values())
-    values |= _ALWAYS_ALLOWED
-    return values
+def allowed_values(store: RunStore, day: date) -> set[tuple[str, Decimal]]:
+    return set(store.numeric_values())
+
+
+def _backed(numeral, allowed: set[tuple[str, Decimal]]) -> bool:
+    if numeral.value in _ALWAYS_ALLOWED:
+        return True
+    classes = _UNIT_CLASS.get(numeral.unit, ("number", "money", "percent"))
+    return any((cls, numeral.value) in allowed for cls in classes)
 
 
 def find_unbacked_numerals(text: str, store: RunStore, day: date) -> list[str]:
+    """Numbers in ``text`` with no stored figure of the same value *and* unit.
+
+    "$13" does not match a 13.0 kWh figure; "97 kilowatt-hours" does not match 97%.
+    A bare number with no unit may match a figure of any unit.
+    """
     allowed = allowed_values(store, day)
-    return [n.text for n in extract_numerals(text) if n.value not in allowed]
+    return [n.text for n in extract_numerals(text) if not _backed(n, allowed)]
 
 
 def completeness_problems(store: RunStore, flags) -> list[str]:

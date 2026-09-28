@@ -11,7 +11,7 @@ from hal9000.solar.clients.homeassistant import HAProtocol
 from hal9000.solar.clients.openmeteo import WeatherProtocol
 from hal9000.solar.domain.expectation import MIN_FIT_DAYS, ExpectationModel, fit_model
 from hal9000.solar.domain.sitecfg import Site
-from hal9000.solar.energy import fold_statistics
+from hal9000.solar.energy import UNFIT_FLAGS, fold_statistics
 from hal9000.solar.pipeline import MODEL_KEY
 from hal9000.solar.weather import backfill_weather
 from hal9000.storage.db import Database
@@ -41,11 +41,7 @@ def backfill_energy(
         while day <= chunk_end:
             energy = fold_statistics(points, day, settings, site, "hour")
             if energy.hours_with_data >= 20:
-                flags = []
-                if energy.sensor_fault:
-                    flags.append("sensor_fault")
-                if energy.transition_day:
-                    flags.append("transition_day")
+                flags = energy.day_flags()
                 rows = [
                     {"solar": s, "import": i, "export": e, "flags": flags}
                     for s, i, e in zip(energy.solar, energy.grid_import, energy.grid_export)
@@ -68,7 +64,7 @@ def fit_from_db(
         if rows is None or weather is None:
             continue
         flags = rows[0]["flags"]
-        if "sensor_fault" in flags or "transition_day" in flags:
+        if UNFIT_FLAGS.intersection(flags):
             continue
         days.append(
             (
@@ -111,7 +107,7 @@ def calibrate(
     chunk = start
     while chunk <= end:
         chunk_end = min(chunk + timedelta(days=89), end)
-        weather_days += backfill_weather(weather, db, chunk, chunk_end)
+        weather_days += backfill_weather(weather, db, chunk, chunk_end, site.timezone)
         chunk = chunk_end + timedelta(days=1)
     model = fit_from_db(db, site, start, end, today)
     return {

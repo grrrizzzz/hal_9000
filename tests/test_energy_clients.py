@@ -145,7 +145,7 @@ def test_fetch_day_energy_falls_back_to_hourly(hal_env, site):
 def test_hourly_for_day_realigns_preceding_hour_means():
     day = date(2026, 9, 22)
     payload = weather_payload(day, 1.0)
-    rows = hourly_for_day(payload, day)
+    rows = hourly_for_day(payload, day, TZ)
     stamped = payload["hourly"]["global_tilted_irradiance"]
     # the value stamped 13:00 describes 12:00-13:00, so it lands in hour 12
     assert rows[12]["poa"] == pytest.approx(stamped[13] / 1000)
@@ -160,7 +160,40 @@ def test_hourly_for_day_missing_data_raises():
     ]
     payload["hourly"]["time"] = payload["hourly"]["time"][:10]
     with pytest.raises(WeatherUnavailable):
-        hourly_for_day(payload, date(2026, 9, 22))
+        hourly_for_day(payload, date(2026, 9, 22), TZ)
+
+
+def _utc_payload(start: datetime, hours: int) -> dict:
+    times = [(start + timedelta(hours=i)).strftime("%Y-%m-%dT%H:%M") for i in range(hours)]
+    return {
+        "timezone": "GMT",
+        "utc_offset_seconds": 0,
+        "hourly": {
+            "time": times,
+            "global_tilted_irradiance": [float(i) for i in range(hours)],
+            "shortwave_radiation": [0.0] * hours,
+            "cloud_cover": [0.0] * hours,
+            "temperature_2m": [20.0] * hours,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("day", "hour", "utc_end"),
+    [
+        (date(2026, 9, 22), 12, datetime(2026, 9, 22, 20)),  # PDT: 12:00 local = 19:00Z
+        (date(2026, 11, 1), 12, datetime(2026, 11, 1, 21)),  # fall back: PST after 2 am
+        (date(2026, 3, 8), 12, datetime(2026, 3, 8, 20)),  # spring forward: PDT after 2 am
+        (date(2026, 11, 1), 0, datetime(2026, 11, 1, 8)),  # still PDT at midnight
+    ],
+)
+def test_hourly_for_day_uses_utc_stamps_across_dst(day, hour, utc_end):
+    start = datetime(day.year, day.month, day.day) - timedelta(hours=2)
+    payload = _utc_payload(start, 60)
+    rows = hourly_for_day(payload, day, "America/Los_Angeles")
+    assert len(rows) == 24
+    index = int((utc_end - start).total_seconds() // 3600)
+    assert rows[hour]["poa"] == pytest.approx(index / 1000)
 
 
 def test_openmeteo_request_parameters_and_endpoint(monkeypatch, site):
@@ -183,6 +216,7 @@ def test_openmeteo_request_parameters_and_endpoint(monkeypatch, site):
     )
     client.fetch(date(2026, 9, 22), date(2026, 9, 23))
     assert seen["url"] == FORECAST_URL
+    assert seen["params"]["timezone"] == "GMT"
     assert seen["params"]["tilt"] == 33 and seen["params"]["azimuth"] == 0  # not the compass 180
     assert "global_tilted_irradiance" in seen["params"]["hourly"]
     assert client.url_for(date(2026, 1, 1)) == ARCHIVE_URL

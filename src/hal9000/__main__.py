@@ -114,22 +114,34 @@ def cmd_check(args) -> int:
     from hal9000.solar.domain.tariff import load_tariff
     from hal9000.solar.energy import fetch_day_energy
 
-    settings = config.settings()
+    try:
+        settings = config.settings()
+    except config.ConfigError as error:
+        _line(False, "settings (.env)", str(error))
+        return 1
     tz = ZoneInfo(settings.timezone)
     now = datetime.now(tz)
     failures = 0
     print(f"HAL 9000 {__version__} — connection check ({now:%Y-%m-%d %H:%M})")
 
-    site = load_site(settings.config_dir)
-    tariff = load_tariff(settings.config_dir)
-    rates = tariff.day_rates(now.date())
-    _line(
-        True,
-        "config",
-        f"site {site.dc_kw} kW at {site.tilt_deg}°/{site.azimuth_deg}°; "
-        f"today's rates {rates.rates} ({rates.season}"
-        f"{', provisional' if rates.provisional else ''})",
-    )
+    try:
+        site = load_site(settings.config_dir)
+    except Exception as error:
+        _line(False, "config/site.yaml", f"{type(error).__name__}: {error}")
+        return 1
+    try:
+        tariff = load_tariff(settings.config_dir)
+        rates = tariff.day_rates(now.date())
+        _line(
+            True,
+            "config",
+            f"site {site.dc_kw} kW at {site.tilt_deg}°/{site.azimuth_deg}°; "
+            f"today's rates {rates.rates} ({rates.season}"
+            f"{', provisional' if rates.provisional else ''})",
+        )
+    except Exception as error:
+        _line(False, "config/tariff.yaml", f"{type(error).__name__}: {error}")
+        failures += 1
     _line(True, "solar scale", f"x{settings.solar_scale} before {settings.solar_fixed_at}")
 
     if not settings.ha_configured:
@@ -173,7 +185,7 @@ def cmd_check(args) -> int:
             site.latitude, site.longitude, site.tilt_deg, site.openmeteo_azimuth, site.timezone
         )
         payload = client.fetch(now.date(), now.date() + timedelta(days=1))
-        rows = hourly_for_day(payload, now.date())
+        rows = hourly_for_day(payload, now.date(), site.timezone)
         _line(
             True,
             "Open-Meteo",

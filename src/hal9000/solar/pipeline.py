@@ -55,8 +55,9 @@ def gather_energy(run: RunContext, day: date | None = None, store: bool = True) 
     if run.ha is None:
         raise RuntimeError("Home Assistant client is not configured")
     energy = fetch_day_energy(run.ha, day, run.settings, run.site, run.now)
+    flags = energy.day_flags()
     rows = [
-        {"solar": s, "import": i, "export": e, "flags": []}
+        {"solar": s, "import": i, "export": e, "flags": flags}
         for s, i, e in zip(energy.solar, energy.grid_import, energy.grid_export)
     ]
     if energy.hours_with_data > 0:
@@ -96,6 +97,12 @@ def energy_summary(run: RunContext) -> dict:
         "data_artifacts": energy.artifacts,
         "transition_day": energy.transition_day,
     }
+    if energy.missing_solar_hours:
+        summary["missing_solar_hours"] = energy.missing_solar_hours
+        summary["missing_note"] = (
+            "Some hours have little or no solar data. That is missing data, not zero "
+            "production; the performance check leaves those hours out."
+        )
     if energy.sensor_fault:
         summary["note"] = (
             "Solar reads below grid export in some hours, which is impossible. The solar "
@@ -112,7 +119,7 @@ def gather_weather(run: RunContext, day: date | None = None, store: bool = True)
     day = day or run.day
     if run.weather is None:
         raise RuntimeError("Open-Meteo client is not configured")
-    rows = day_weather(run.weather, run.db, day, run.now.date())
+    rows = day_weather(run.weather, run.db, day, run.now.date(), run.site.timezone)
     if store:
         insolation = sum(r["poa"] for r in rows)
         clear = sum(clearsky_poa_hourly(run.site, day))
@@ -142,6 +149,9 @@ def weather_summary(run: RunContext) -> dict:
 
 
 # ----------------------------------------------------------- performance
+PARTIAL_DATA_FRACTION = 0.40
+
+
 def assess_performance(run: RunContext) -> dict:
     energy: DayEnergy | None = run.store.data("energy")
     weather = run.store.data("weather")
@@ -173,10 +183,30 @@ def assess_performance(run: RunContext) -> dict:
     expected_hourly = model.predict_hourly(poa, temp)
     # compare like with like: only hours the production data covers
     expected_hourly = [e if h < through_hour else 0.0 for h, e in enumerate(expected_hourly)]
-    expected = sum(expected_hourly)
-    actual = sum(energy.solar)
-    band, ratio = band_for(actual, expected, run.thresholds)
     s = run.store
+    # Missing data is not zero production: hours with too few solar buckets are
+    # left out of both sides of the comparison.
+    # Night-time gaps are harmless: only hours that should have seen sun count.
+    missing = {h for h in energy.missing_solar_hours if expected_hourly[h] > 0.01}
+    expected_missing = sum(expected_hourly[h] for h in missing)
+    expected_total = sum(expected_hourly)
+    if missing:
+        s.put("missing_solar_hours", str(len(missing)))
+        s.put_data("missing_solar_hours", sorted(missing))
+    if expected_total > 0 and expected_missing / expected_total > PARTIAL_DATA_FRACTION:
+        s.put_data("expected_hourly", expected_hourly)
+        s.put_data("band", "partial_data")
+        s.put("expected_kwh", fmt.kwh(expected_total))
+        return {
+            "band": "partial_data",
+            "missing_solar_hours": s.figure("missing_solar_hours"),
+            "note": "Too much of the day's solar data is missing to judge performance. "
+            "Missing data is not zero production; say the data was incomplete.",
+        }
+    expected_hourly = [0.0 if h in missing else e for h, e in enumerate(expected_hourly)]
+    expected = sum(expected_hourly)
+    actual = sum(v for h, v in enumerate(energy.solar) if h not in missing)
+    band, ratio = band_for(actual, expected, run.thresholds)
     s.put_data("expected_hourly", expected_hourly)
     s.put_data("band", band)
     s.put_data("ratio", ratio)
@@ -197,6 +227,14 @@ def assess_performance(run: RunContext) -> dict:
             "zero": "no meaningful output: the inverter is the leading suspect",
             "unassessed": "too little sun expected to judge",
         }.get(band, ""),
+        **(
+            {
+                "missing_solar_hours": s.figure("missing_solar_hours"),
+                "missing_note": "hours with missing solar data were left out of the comparison",
+            }
+            if missing
+            else {}
+        ),
     }
 
 
@@ -288,6 +326,8 @@ def anomaly_profile(run: RunContext) -> dict:
         raise RuntimeError("Call get_home_energy and assess_performance first.")
     profile = classify_profile(energy.solar, expected_hourly)
     run.store.put_data("anomaly", profile.kind)
+    # the description is deterministic text; any number in it may be quoted
+    run.store.put("anomaly_description", profile.description)
     if profile.worst_hour is not None:
         run.store.put("anomaly_hour", f"{profile.worst_hour}:00")
     hours = {
@@ -376,6 +416,8 @@ def build_record(run: RunContext, kind: str = "provisional") -> NightlyRecord:
         degraded=bool(run.flags.degraded_reasons),
         sensor_fault=bool(energy and energy.sensor_fault),
         transition_day=bool(energy and energy.transition_day),
+        missing_solar_hours=len(energy.missing_solar_hours) if energy else 0,
+        production_missing=energy is None or not energy.hours_with_data,
     )
 
 

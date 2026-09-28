@@ -13,7 +13,15 @@ import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 
-__all__ = ["Numeral", "extract_numerals", "mask_times_and_dates", "to_decimal"]
+__all__ = [
+    "Numeral",
+    "UNIT_ENERGY",
+    "UNIT_MONEY",
+    "UNIT_PERCENT",
+    "extract_numerals",
+    "mask_times_and_dates",
+    "to_decimal",
+]
 
 _UNITS = {
     "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6,
@@ -40,20 +48,41 @@ _ONE_IDIOMS = re.compile(
 
 _MONTHS = "january|february|march|april|may|june|july|august|september|october|november|december"
 _NUMBER_WORD = "|".join(sorted(list(_UNITS) + list(_TENS), key=len, reverse=True))
+_ORDINAL = (
+    "first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|eleventh|twelfth|"
+    "thirteenth|fourteenth|fifteenth|sixteenth|seventeenth|eighteenth|nineteenth|twentieth|"
+    "thirtieth"
+)
+_CLOCK = r"(?:a\.m\.|p\.m\.|am\b|pm\b|o'clock)"
+_NUM = rf"(?:\d{{1,2}}|(?:{_NUMBER_WORD})(?:[ -](?:{_NUMBER_WORD}))?)"
 _TIME_PATTERNS = [
     re.compile(r"\b\d{1,2}:\d{2}\s*(?:a\.?m\.?|p\.?m\.?)?", re.I),
-    re.compile(r"\b\d{1,2}\s*(?:a\.m\.|p\.m\.|am\b|pm\b|o'clock)", re.I),
+    # ranges: "4 to 9 pm", "between 4 and 9 pm", "4-9 pm", "four to nine p.m."
     re.compile(
-        rf"\b(?:{_NUMBER_WORD})(?:[ -](?:{_NUMBER_WORD}))?\s*(?:a\.m\.|p\.m\.|am\b|pm\b|o'clock)",
+        rf"(?<![:\d])\b{_NUM}\s*(?:-|–|to|and|through|until)\s*{_NUM}(?::\d{{2}})?\s*{_CLOCK}",
         re.I,
     ),
+    re.compile(rf"\b{_NUM}\s*{_CLOCK}", re.I),
+    # dates: "September 22, 2026", "September twenty-seventh", "2026-09-22"
     re.compile(rf"\b(?:{_MONTHS})\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s*\d{{4}})?", re.I),
+    re.compile(rf"\b(?:{_MONTHS})\s+(?:the\s+)?(?:(?:twenty|thirty)[ -])?(?:{_ORDINAL})\b", re.I),
     re.compile(r"\b\d{4}-\d{2}-\d{2}\b"),
+    # durations of a window: "7-day average", "last 30 days", "seven days"
+    re.compile(rf"\b{_NUM}(?:[ -]day\b| days\b| weeks?\b)", re.I),
+]
+
+UNIT_MONEY = "money"
+UNIT_PERCENT = "percent"
+UNIT_ENERGY = "energy"
+_UNIT_WORDS = [
+    (re.compile(r"^\s*(?:%|percent\b|per cent\b)", re.I), UNIT_PERCENT),
+    (re.compile(r"^\s*(?:dollars?\b|cents?\b|bucks?\b)", re.I), UNIT_MONEY),
+    (re.compile(r"^\s*(?:kilowatt|kwh\b|kw\b|watt|megawatt)", re.I), UNIT_ENERGY),
 ]
 
 
 def mask_times_and_dates(text: str) -> str:
-    """Blank out clock times ("8 pm", "12:00") and dates ("September 22, 2026").
+    """Blank out clock times, time ranges, dates and window lengths.
 
     They are not quantities, so they neither need backing nor back anything.
     """
@@ -66,6 +95,7 @@ def mask_times_and_dates(text: str) -> str:
 class Numeral:
     text: str
     value: Decimal
+    unit: str | None = None  # money | percent | energy | None (bare number)
 
 
 def to_decimal(text: str) -> Decimal | None:
@@ -75,6 +105,14 @@ def to_decimal(text: str) -> Decimal | None:
         return Decimal(cleaned)
     except InvalidOperation:
         return None
+
+
+def _unit_after(text: str, end: int) -> str | None:
+    tail = text[end : end + 30]
+    for pattern, unit in _UNIT_WORDS:
+        if pattern.match(tail):
+            return unit
+    return None
 
 
 def _words_to_number(words: list[str]) -> Decimal | None:
@@ -109,33 +147,47 @@ def _words_to_number(words: list[str]) -> Decimal | None:
 
 
 def extract_numerals(text: str) -> list[Numeral]:
-    """All quantities in ``text``, digits and words. Clock times and dates are skipped."""
+    """All quantities in ``text``, digits and words, with their unit when stated.
+
+    Clock times, time ranges, dates and window lengths are skipped.
+    """
     text = mask_times_and_dates(text)
     found: list[Numeral] = []
     for match in _DIGIT_RE.finditer(text):
-        value = to_decimal(match.group())
-        if value is not None:
-            found.append(Numeral(match.group(), value))
+        token = match.group()
+        value = to_decimal(token)
+        if value is None:
+            continue
+        if token.startswith("$"):
+            unit = UNIT_MONEY
+        elif token.endswith("%"):
+            unit = UNIT_PERCENT
+        else:
+            unit = _unit_after(text, match.end())
+        found.append(Numeral(token, value, unit))
 
     masked = _ONE_IDIOMS.sub(lambda m: " " * len(m.group()), text)
     masked = _DIGIT_RE.sub(lambda m: " " * len(m.group()), masked)
-    tokens = [t.lower() for t in re.findall(r"[A-Za-z]+|[^\sA-Za-z]", masked.replace("-", " "))]
-    run: list[str] = []
+    masked = masked.replace("-", " ")
+    run: list[tuple[str, int]] = []
 
     def flush():
-        while run and run[-1] in {"and", "point"}:
+        while run and run[-1][0] in {"and", "point"}:
             run.pop()
-        while run and run[0] in {"and", "point"}:
+        while run and run[0][0] in {"and", "point"}:
             run.pop(0)
         if run:
-            value = _words_to_number(run)
+            value = _words_to_number([w for w, _ in run])
             if value is not None:
-                found.append(Numeral(" ".join(run), value))
+                found.append(
+                    Numeral(" ".join(w for w, _ in run), value, _unit_after(masked, run[-1][1]))
+                )
         run.clear()
 
-    for token in tokens:
+    for match in re.finditer(r"[A-Za-z]+|[^\sA-Za-z]", masked):
+        token = match.group().lower()
         if token in _WORD_NUMBER:
-            run.append(token)
+            run.append((token, match.end()))
         else:
             flush()
     flush()

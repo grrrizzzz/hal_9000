@@ -232,10 +232,31 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def _parse_fixed_at(raw: str) -> datetime | None:
+    """``SOLAR_FIXED_AT`` must be an ISO timestamp with a UTC offset.
+
+    A naive time can't be compared with the timezone-aware statistics, and a
+    typo must not silently switch the scale correction off.
+    """
+    if not raw:
+        return None
+    try:
+        value = datetime.fromisoformat(raw)
+    except ValueError as error:
+        raise ConfigError(
+            f"SOLAR_FIXED_AT={raw!r} is not an ISO timestamp "
+            "(expected e.g. 2026-09-27T18:35:00-07:00)"
+        ) from error
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ConfigError(
+            f"SOLAR_FIXED_AT={raw!r} has no UTC offset (expected e.g. 2026-09-27T18:35:00-07:00)"
+        )
+    return value
+
+
 def settings() -> Settings:
     """Read :class:`Settings` from the environment now."""
-    fixed_raw = _env("SOLAR_FIXED_AT")
-    fixed_at = datetime.fromisoformat(fixed_raw) if fixed_raw else None
+    fixed_at = _parse_fixed_at(_env("SOLAR_FIXED_AT"))
     root = _repo_root()
     return Settings(
         ha_base_url=_env("HA_BASE_URL").rstrip("/"),

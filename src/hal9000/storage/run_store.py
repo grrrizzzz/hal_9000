@@ -34,12 +34,19 @@ class RunStore:
     def has(self, key: str) -> bool:
         return key in self._figures
 
-    def numeric_values(self) -> set[Decimal]:
-        """Every number that appears in any stored figure."""
-        values: set[Decimal] = set()
+    def numeric_values(self) -> set[tuple[str, Decimal]]:
+        """Every ``(unit_class, value)`` in any stored figure.
+
+        Unit classes: ``money`` ("$1.37"), ``percent`` ("74%"), ``number``
+        (kWh and every other plain figure).
+        """
+        values: set[tuple[str, Decimal]] = set()
         for display in self._figures.values():
             for numeral in extract_numerals(display):
-                values.add(numeral.value)
+                if numeral.unit in ("money", "percent"):
+                    values.add((numeral.unit, numeral.value))
+                else:
+                    values.add(("number", numeral.value))
         return values
 
     # data --------------------------------------------------------------

@@ -59,10 +59,20 @@ def get_home_energy(date: str, _run: RunContext = None) -> dict:
         date: The run date, YYYY-MM-DD (given in your briefing).
     """
     _check_date(_run, date)
-    pipeline.gather_energy(_run)
+    try:
+        pipeline.gather_energy(_run)
+    except Exception as error:
+        _run.flags.production_missing_reason = "Home Assistant could not be reached"
+        _run.store.put_data("band", "no_data")
+        _run.degrade(f"production data unavailable: {error}")
+        _run.note("get_home_energy", "failed")
+        raise
     summary = pipeline.energy_summary(_run)
     _run.note("get_home_energy", f"{summary['production_kwh']} kWh")
     return summary
+
+
+MAX_REPORT_WORDS = 140
 
 
 @register_tool(tags=["source"])
@@ -296,33 +306,43 @@ def deliver_report(narrative: str, _run: RunContext = None) -> dict:
         narrative: The report text, as it should be spoken.
     """
     run = _run
+
+    def fallback(reason: str) -> dict:
+        pipeline.ensure_core_steps(run)
+        run.flags.report_text = render_fallback(run)
+        run.flags.renderer = "fallback"
+        run.flags.delivered = True
+        run.degrade(reason)
+        run.note("deliver_report", f"fallback: {reason}")
+        return {"delivered": True, "renderer": "fallback", "note": "Standard report sent."}
+
+    # Each check gets one correction, counted separately, so a completeness
+    # bounce doesn't use up the numeric guard's second chance.
     problems = completeness_problems(run.store, run.flags)
-    if problems and run.flags.guard_failures == 0:
-        run.flags.guard_failures += 1
+    if problems:
+        run.flags.completeness_bounces += 1
+        if run.flags.completeness_bounces >= 2:
+            return fallback("report still incomplete after one correction")
         return {"delivered": False, "error": "Report is incomplete: " + "; ".join(problems)}
     bad = find_unbacked_numerals(narrative, run.store, run.day)
-    if bad or problems:
+    if bad:
         run.flags.guard_failures += 1
         if run.flags.guard_failures >= 2:
-            pipeline.ensure_core_steps(run)
-            run.flags.report_text = render_fallback(run)
-            run.flags.renderer = "fallback"
-            run.flags.delivered = True
-            run.degrade("numeric guard rejected the narrative twice")
-            run.note("deliver_report", "fallback after two rejections")
-            return {"delivered": True, "renderer": "fallback", "note": "Standard report sent."}
+            return fallback("numeric guard rejected the narrative twice")
         return {
             "delivered": False,
             "error": (
                 f"These numbers are not backed by tool results: {bad}. Use only these "
-                f"figures, spoken exactly: {sorted(set(run.store.figures().values()))[:60]}"
+                f"figures, spoken exactly and with their own units: "
+                f"{sorted(set(run.store.figures().values()))[:60]}"
             ),
         }
     words = len(narrative.split())
-    if words > 140:
-        run.flags.guard_failures += 1
-        if run.flags.guard_failures < 2:
-            return {"delivered": False, "error": f"Too long ({words} words). Keep it under 110."}
+    if words > MAX_REPORT_WORDS:
+        run.flags.length_bounces += 1
+        if run.flags.length_bounces >= 2:
+            return fallback(f"narrative too long twice ({words} words)")
+        return {"delivered": False, "error": f"Too long ({words} words). Keep it under 110."}
     run.flags.report_text = narrative.strip()
     run.flags.renderer = "llm"
     run.flags.delivered = True

@@ -28,7 +28,9 @@ class RunFlags:
     delivered: bool = False
     renderer: str | None = None
     report_text: str | None = None
-    guard_failures: int = 0
+    guard_failures: int = 0  # numeric-guard rejections
+    completeness_bounces: int = 0
+    length_bounces: int = 0
     record_written: bool = False
     telegram_sent: int = 0
     triage_ran: bool = False

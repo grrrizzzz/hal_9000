@@ -90,6 +90,15 @@ def store():
         ("Three hours of dropout.", ["three"]),
         ("1,100 watts peak.", ["1,100"]),
         ("Value was $0.99.", ["$0.99"]),
+        # unit-aware: a value is backed only by a figure of the same unit
+        ("That saved $8.2.", ["$8.2"]),  # 8.2 is kWh, not dollars
+        ("It made 74 kilowatt-hours.", ["74"]),  # 74 is a percent
+        ("That is 1.37 percent.", ["1.37"]),  # 1.37 is dollars
+        ("Seventy-four kilowatt-hours.", ["seventy four"]),
+        ("On-peak runs from 4 to 9 pm.", []),
+        ("Above the 7-day average.", []),
+        ("Over the last 30 days.", []),
+        ("September twenty-second was sunny.", []),
     ],
 )
 def test_guard_cases(store, narrative, unbacked):
@@ -114,6 +123,6 @@ def test_run_store_basics():
     s.put_data("x", [1, 2])
     assert s.figures() == {"a": "1.5", "b": "$2.00"}
     assert s.figures("a") == {"a": "1.5"}
-    assert s.numeric_values() == {Decimal("1.5"), Decimal("2.00")}
+    assert s.numeric_values() == {("number", Decimal("1.5")), ("money", Decimal("2.00"))}
     assert s.data("x") == [1, 2] and s.data("missing", 7) == 7
     assert s.snapshot()["data_keys"] == ["x"]

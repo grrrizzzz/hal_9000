@@ -3,6 +3,7 @@
 Solar report for {{ day_name }}. The panels produced {{ f.production_kwh }} kilowatt-hours
 {%- if band == "sensor_fault" %}, but the solar sensor is reading less than the house exported, so that figure is wrong. Check the Emporia solar channel.
 {%- elif band == "no_data" %}.
+{%- elif band == "partial_data" %}, but too much of today's solar data is missing to judge performance. Missing data is not zero production; check the Emporia monitor's connection.
 {%- elif band == "unassessed" %}. {% if weather_missing %}Weather data was unavailable, so performance could not be judged.{% else %}There was too little sun to judge performance.{% endif %}
 {%- elif f.expected_kwh %}, against {{ f.expected_kwh }} expected for the weather, which is {{ f.performance_pct }}.
 {%- else %}.
@@ -11,6 +12,7 @@ Solar report for {{ day_name }}. The panels produced {{ f.production_kwh }} kilo
 {%- elif band == "severe" %} That is far below expectation{% if anomaly_text %}: {{ anomaly_text }}{% endif %}.
 {%- elif band == "low" %} That is below expectation{% if anomaly_text %}: {{ anomaly_text }}{% endif %}.
 {%- endif %}
+{%- if f.missing_solar_hours and band != "partial_data" %} Some hours of solar data were missing and were left out of the comparison.{% endif %}
 {%- if verdict_text %} {{ verdict_text }}{% endif %}
 {%- if f.savings_usd %} Today's solar was worth {{ f.savings_usd }}.
 {%- elif savings_absent %} Savings are not included: {{ savings_absent }}.

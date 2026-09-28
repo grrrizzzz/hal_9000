@@ -122,6 +122,8 @@ class NightlyRecord(BaseModel):
     degraded: bool = False
     sensor_fault: bool = False
     transition_day: bool = False
+    missing_solar_hours: int = 0
+    production_missing: bool = False
 
 
 class RunResult(BaseModel):

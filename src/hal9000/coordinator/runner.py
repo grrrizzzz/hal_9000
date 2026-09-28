@@ -119,21 +119,52 @@ def _finalize_yesterday(run: RunContext) -> None:
     run.note("finalize_yesterday", f"{yesterday.isoformat()} final record saved")
 
 
+_PRODUCTION_ALERT = ("production", "inverter", "output", "shading", "degradation", "dropout")
+
+
+def _alert_class(key: str) -> str | None:
+    """Which kind of evidence can clear an alert: "sensor", "production" or None."""
+    key = key.lower()
+    if "net" in key.split("_") or key.startswith("net"):
+        return None  # net position is a monthly trend: a good day doesn't clear it
+    if "sensor" in key:
+        return "sensor"
+    if any(word in key for word in _PRODUCTION_ALERT):
+        return "production"
+    return None  # unknown keys stay open until a person or the agent closes them
+
+
 def _recovery_notices(run: RunContext) -> None:
+    """Close alerts that today's data shows are resolved, and say so.
+
+    Production and inverter alerts close only on a ``normal`` day. Sensor alerts
+    close when the sensor reads sanely all day. Net-position and unrecognised
+    alerts are never auto-closed.
+    """
     band = run.store.data("band")
     energy = run.store.data("energy")
-    if band != "normal" or (energy is not None and energy.sensor_fault):
-        return
+    sensor_ok = (
+        energy is not None
+        and energy.hours_with_data > 0
+        and not energy.sensor_fault
+        and not energy.missing_solar_hours
+    )
+    production_ok = band == "normal" and sensor_ok
     for alert in run.db.open_alerts():
         key = alert["alert_key"]
         if key in run.flags.alerts_raised:
             continue
+        kind = _alert_class(key)
+        if kind == "production" and production_ok:
+            message = f"Resolved: {key.replace('_', ' ')}. Production is back to normal."
+        elif kind == "sensor" and sensor_ok:
+            message = f"Resolved: {key.replace('_', ' ')}. The solar sensor is reading normally."
+        else:
+            continue
         run.db.close_alert(key)
         run.flags.alerts_cleared.append(key)
         try:
-            run.delivery.send_alert(
-                f"Resolved: {key.replace('_', ' ')} — production is back to normal.", "info"
-            )
+            run.delivery.send_alert(message, "info")
         except Exception:
             pass
 
@@ -250,7 +281,9 @@ def run_evening(opts: RunOptions | None = None) -> RunResult:
 
     # 3. the agent
     memory: Memory | None = None
-    meter = Meter(db, run_id, settings.run_soft_cap_usd, settings.run_hard_cap_usd, run.flags)
+    meter = Meter(
+        db, run_id, settings.run_soft_cap_usd, settings.run_hard_cap_usd, run.flags, tz=tz
+    )
     iterations = 0
     if use_agent:
         generate = opts.generate_response
@@ -296,20 +329,33 @@ def run_evening(opts: RunOptions | None = None) -> RunResult:
     # 5. announce
     announce_status = run.delivery.announce(run.flags.report_text)
     run.note("announce", announce_status)
+    intentionally_silent = announce_status == "logged"  # shadow mode or --no-announce
+    announced = announce_status in ("played", "telegram")
+    if announce_status == "telegram":
+        run.degrade("speaker unavailable; report sent to Telegram instead")
+    elif not announced and not intentionally_silent:
+        run.degrade(f"report was not delivered anywhere (announce: {announce_status})")
 
     # 6. books
-    cost = db.run_cost(run_id)
+    try:
+        cost = db.run_cost(run_id)
+    except Exception:
+        cost = 0.0
     status = "ok" if not run.flags.degraded_reasons else "degraded"
-    transcript = _save_transcript(
-        run, memory, {"cost_usd": cost, "announce": announce_status}, (ha, weather)
-    )
+    try:
+        transcript = _save_transcript(
+            run, memory, {"cost_usd": cost, "announce": announce_status}, (ha, weather)
+        )
+    except Exception as error:
+        _LOG.warning("transcript not saved: %s", error)
+        transcript = None
     result = RunResult(
         run_id=run_id,
         date=day.isoformat(),
         status=status,
         report_delivered=run.flags.delivered,
         record_written=run.flags.record_written,
-        announced=announce_status in ("played", "logged", "telegram"),
+        announced=announced or intentionally_silent,
         renderer=run.flags.renderer,
         report_text=run.flags.report_text,
         band=run.store.data("band"),
@@ -319,7 +365,10 @@ def run_evening(opts: RunOptions | None = None) -> RunResult:
         transcript_path=transcript,
         trace=run.trace,
     )
-    db.finish_run(run_id, status, result.model_dump())
+    try:
+        db.finish_run(run_id, status, result.model_dump())
+    except Exception as error:
+        _LOG.warning("run not recorded as finished: %s", error)
     try:
         _write_health(settings, db, result)
     except Exception:

@@ -26,12 +26,20 @@ from hal9000.config import Settings
 from hal9000.solar.clients.homeassistant import HAProtocol
 from hal9000.solar.domain.sitecfg import Site
 
-__all__ = ["DayEnergy", "fetch_day_energy", "fold_statistics", "FIVE_MINUTE_RETENTION_DAYS"]
+__all__ = [
+    "UNFIT_FLAGS",
+    "DayEnergy",
+    "fetch_day_energy",
+    "fold_statistics",
+    "FIVE_MINUTE_RETENTION_DAYS",
+]
 
 #: Home Assistant keeps 5-minute statistics for about 10 days by default.
 FIVE_MINUTE_RETENTION_DAYS = 9
 SANITY_TOLERANCE_KWH = 0.02
 SANITY_TOLERANCE_FRACTION = 0.05
+#: days with any of these flags are left out of calibration
+UNFIT_FLAGS = frozenset({"sensor_fault", "transition_day", "missing_data"})
 
 
 @dataclass
@@ -48,6 +56,9 @@ class DayEnergy:
     scaled_hours: list[int] = field(default_factory=list)
     transition_day: bool = False
     hours_with_data: int = 0
+    #: hours (fully before ``through``) with too few solar buckets to trust:
+    #: fewer than 10 of 12 five-minute buckets, or no hourly bucket
+    missing_solar_hours: list[int] = field(default_factory=list)
 
     @property
     def household(self) -> list[float]:
@@ -58,6 +69,23 @@ class DayEnergy:
     @property
     def sensor_fault(self) -> bool:
         return bool(self.sensor_fault_hours)
+
+    def day_flags(self) -> list[str]:
+        """Day-level data-quality flags, stored with every hourly row.
+
+        A day carrying any of :data:`UNFIT_FLAGS` is never used to calibrate the
+        expectation model.
+        """
+        flags = []
+        if self.sensor_fault:
+            flags.append("sensor_fault")
+        if self.transition_day:
+            flags.append("transition_day")
+        if self.missing_solar_hours:
+            flags.append("missing_data")
+        if self.artifacts:
+            flags.append("data_artifact")
+        return flags
 
     def totals(self) -> dict[str, float]:
         return {
@@ -88,6 +116,7 @@ def fold_statistics(
     artifacts: list[str] = []
     scaled: set[int] = set()
     seen_hours: set[int] = set()
+    solar_buckets = [0] * 24
     fixed_at = settings.solar_fixed_at
 
     def fold(entity: str, target: list[float], is_solar: bool) -> None:
@@ -103,23 +132,33 @@ def fold_statistics(
                     artifacts.append(f"{entity} negative change {value:.3f} at {local:%H:%M}")
                 value = 0.0
             if is_solar:
+                solar_buckets[hour] += 1
+                if fixed_at is not None and local < fixed_at and settings.solar_scale != 1.0:
+                    value *= settings.solar_scale
+                    scaled.add(hour)
                 if value > ceiling:
                     artifacts.append(
                         f"solar jump of {value:.2f} kWh at {local:%H:%M} exceeds the "
                         f"{ceiling:.2f} kWh physical limit; dropped"
                     )
                     continue
-                if fixed_at is not None and local < fixed_at and settings.solar_scale != 1.0:
-                    value *= settings.solar_scale
-                    scaled.add(hour)
             target[hour] += value
 
     fold(settings.entity_solar, solar, True)
     fold(settings.entity_grid_import, grid_import, False)
     fold(settings.entity_grid_export, grid_export, False)
 
+    needed = 10 if period == "5minute" else 1
+    missing = [
+        hour
+        for hour in range(24)
+        if day_start + timedelta(hours=hour + 1) <= through and solar_buckets[hour] < needed
+    ]
+
     fault_hours = []
     for hour in range(24):
+        if hour in missing:
+            continue  # absent solar buckets are missing data, not a faulty reading
         tolerance = max(SANITY_TOLERANCE_KWH, SANITY_TOLERANCE_FRACTION * grid_export[hour])
         if grid_export[hour] - solar[hour] > tolerance:
             fault_hours.append(hour)
@@ -138,6 +177,7 @@ def fold_statistics(
         scaled_hours=sorted(scaled),
         transition_day=transition,
         hours_with_data=len(seen_hours),
+        missing_solar_hours=missing,
     )
 
 

@@ -178,3 +178,34 @@ def test_monthly_precheck(db):
     assert not status.skip_agent and not status.triage_enabled
     db.add_ledger("r", "solar", {"model": "m"}, 2.0)
     assert monthly_precheck(db, today, 10.0).skip_agent
+
+
+def test_ledger_rows_use_local_time_so_month_end_runs_count_in_their_month(tmp_path):
+    """20:00 on Sep 30 in California is Oct 1 in UTC; the spend belongs to September."""
+    from datetime import datetime as real_datetime
+    from zoneinfo import ZoneInfo
+
+    from hal9000.cost import metering
+    from hal9000.cost.metering import Meter
+    from hal9000.storage.db import Database
+
+    la = ZoneInfo("America/Los_Angeles")
+
+    class FrozenDatetime(real_datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return real_datetime(2026, 9, 30, 20, 0, tzinfo=la).astimezone(tz)
+
+    db = Database(tmp_path / "l.db")
+    import pytest
+
+    mp = pytest.MonkeyPatch()
+    mp.setattr(metering, "datetime", FrozenDatetime)
+    try:
+        Meter(db, "r", 1.0, 2.0, tz=la).record(
+            {"model": "openai/gpt-5-mini", "prompt": 1000, "completion": 100}, "solar"
+        )
+    finally:
+        mp.undo()
+    assert db.month_cost(2026, 9) > 0
+    assert db.month_cost(2026, 10) == 0

@@ -16,7 +16,7 @@ from __future__ import annotations
 import inspect
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 
 from hal9000 import config
 from hal9000.core.prompt import Prompt
@@ -49,7 +49,9 @@ class Meter:
         soft_cap: float,
         hard_cap: float,
         flags=None,
+        tz=None,
     ):
+        self.tz = tz  # ledger rows are stamped in local time so months match the bill
         self.db = db
         self.run_id = run_id
         self.soft_cap = soft_cap
@@ -62,7 +64,8 @@ class Meter:
         usd = usage_cost(usage)
         self.spent += usd
         self.calls += 1
-        self.db.add_ledger(self.run_id, agent, usage, usd)
+        at = datetime.now(self.tz).isoformat(timespec="seconds") if self.tz else None
+        self.db.add_ledger(self.run_id, agent, usage, usd, at=at)
         if self.flags is not None and self.spent >= self.soft_cap:
             self.flags.soft_cap_hit = True
         return usd

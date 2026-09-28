@@ -86,7 +86,12 @@ class Delivery:
         return False
 
     def announce(self, text: str) -> str:
-        """Play the report on the speaker. Returns "played", "logged" or "telegram"."""
+        """Play the report on the speaker.
+
+        Returns "played", "logged" (shadow / announcing disabled), "telegram"
+        (speaker failed, Telegram fallback sent), "telegram_logged" (speaker
+        failed, Telegram not configured: printed only) or "failed" (both failed).
+        """
         speaker = self.speaker or self.settings.entity_speaker
         if self.shadow or not self.announce_enabled:
             self.outbox.append(OutboxItem("sonos", text, "logged"))
@@ -102,5 +107,5 @@ class Delivery:
         except Exception as error:
             _LOG.warning("Announcement failed (%s); sending to Telegram", error)
             self.outbox.append(OutboxItem("sonos", text, "failed"))
-            self._telegram(f"Evening solar report (speaker unavailable): {text}")
-            return "telegram"
+            status = self._telegram(f"Evening solar report (speaker unavailable): {text}")
+            return {"sent": "telegram", "logged": "telegram_logged"}.get(status, "failed")

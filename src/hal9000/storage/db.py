@@ -258,13 +258,16 @@ class Database:
             )
 
     # --------------------------------------------------------------- ledger
-    def add_ledger(self, run_id: str, agent: str, usage: dict, usd: float) -> None:
+    def add_ledger(
+        self, run_id: str, agent: str, usage: dict, usd: float, at: str | None = None
+    ) -> None:
+        """Record one LLM call. ``at`` should be local time (the month is read from it)."""
         with self._lock, self._conn:
             self._conn.execute(
                 """INSERT INTO ledger (at, run_id, agent, model, prompt_tokens, cached_tokens,
                    completion_tokens, reasoning_tokens, usd) VALUES (?,?,?,?,?,?,?,?,?)""",
                 (
-                    _now(),
+                    at or _now(),
                     run_id,
                     agent,
                     usage.get("model", "?"),

@@ -320,7 +320,14 @@ def test_delivery_announce_falls_back_to_telegram(monkeypatch):
     tg = RecordingTelegram()
     assert Delivery(s, ha=BrokenHA(), telegram=tg).announce("Report.") == "telegram"
     assert "speaker unavailable" in tg.sent[0][1]
-    assert Delivery(s, ha=None, telegram=None).announce("Report.") == "telegram"
+    # speaker failed and Telegram not wired: printed only, which is not delivery
+    assert Delivery(s, ha=None, telegram=None).announce("Report.") == "telegram_logged"
+
+    class BrokenTelegram:
+        def send(self, *a):
+            raise RuntimeError("telegram down")
+
+    assert Delivery(s, ha=BrokenHA(), telegram=BrokenTelegram()).announce("R.") == "failed"
     assert Delivery(s, ha=None, telegram=None, announce_enabled=False).announce("x") == "logged"
 
 
@@ -515,8 +522,8 @@ def test_weather_cache(hal_env, tmp_path):
 
     client = CountingWeather()
     day = date(2026, 9, 1)
-    day_weather(client, db, day, date(2026, 9, 22))
-    day_weather(client, db, day, date(2026, 9, 22))
+    day_weather(client, db, day, date(2026, 9, 22), "America/Los_Angeles")
+    day_weather(client, db, day, date(2026, 9, 22), "America/Los_Angeles")
     assert CountingWeather.calls == 1  # the second read came from the cache
 
 

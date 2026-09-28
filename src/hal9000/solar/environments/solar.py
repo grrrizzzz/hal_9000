@@ -19,7 +19,9 @@ from hal9000.core.capabilities import Capability
 from hal9000.core.environment import PythonEnvironment
 from hal9000.core.prompt import Prompt
 
-__all__ = ["RunCapability", "SolarEnvironment", "TOOL_BUDGETS"]
+__all__ = ["MAX_STRIKES", "RunCapability", "SolarEnvironment", "TOOL_BUDGETS"]
+
+MAX_STRIKES = 2
 
 #: Maximum *calls* per run for side-effecting tools.
 TOOL_BUDGETS = {
@@ -95,10 +97,12 @@ class RunCapability(Capability):
         self.iterations = 0
         self.last_calls: list[str] = []
         self.nudge: str | None = None
+        self.strikes = 0  # consecutive replies that weren't a known tool call
 
     def init(self, agent, action_context) -> None:
         self.iterations = 0
         self.last_calls = []
+        self.strikes = 0
 
     def start_agent_loop(self, agent, action_context) -> bool:
         return not self.run.flags.hard_cap_hit
@@ -133,6 +137,10 @@ class RunCapability(Capability):
 
     def process_result(self, agent, action_context, response, action_def, action, result):
         name = action.get("tool", "?")
+        # Prose, or a tool that doesn't exist: one is feedback, two in a row means
+        # the model has stopped working the problem, so the loop ends and the
+        # coordinator's completeness step takes over.
+        self.strikes = self.strikes + 1 if action_def is None else 0
         if isinstance(result, dict) and not result.get("tool_executed", True):
             self.run.note(f"{self.label}:{name}", f"error: {str(result.get('error'))[:80]}")
         return result
@@ -141,4 +149,7 @@ class RunCapability(Capability):
         self.iterations += 1
 
     def should_terminate(self, agent, action_context, response: str) -> bool:
+        if self.strikes >= MAX_STRIKES:
+            self.run.note(f"{self.label}:loop", "stopped after two replies with no tool call")
+            return True
         return bool(self.done())
