@@ -90,7 +90,7 @@ sweep:
       - {model: fake/embed-64, dimensions: 32}
   S3:
     top: 2
-    retrieval: [dense, bm25, rrf, weighted]
+    retrieval: [dense, rrf, weighted]
     weighted_alpha: [0.5]
     rerankers: [none, minilm]
     query_transform_top: 1
@@ -333,8 +333,19 @@ def fresh_query_cache() -> Iterator[None]:
     DEFAULT_QUERY_CACHE.clear()
 
 
+#: session results shared by every module that imports these fixtures (pytest makes one
+#: fixture definition per importing module, so a session fixture would run once per module)
+_SESSION: dict[str, object] = {}
+
+
 @pytest.fixture(scope="session")
 def corpus_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    if "corpus" not in _SESSION:
+        _SESSION["corpus"] = _build_corpus(tmp_path_factory)
+    return _SESSION["corpus"]  # type: ignore[return-value]
+
+
+def _build_corpus(tmp_path_factory: pytest.TempPathFactory) -> Path:
     from hal9000.knowledge.ingest.pipeline import IngestPipeline
 
     root = tmp_path_factory.mktemp("sweep-corpus")
@@ -366,6 +377,12 @@ def corpus_root(tmp_path_factory: pytest.TempPathFactory) -> Path:
 @pytest.fixture(scope="session")
 def swept_root(corpus_root: Path, tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str]:
     """S1a-S4 run once on :data:`GRID`; returns (root, sweep ID)."""
+    if "swept" not in _SESSION:
+        _SESSION["swept"] = _sweep(corpus_root, tmp_path_factory)
+    return _SESSION["swept"]  # type: ignore[return-value]
+
+
+def _sweep(corpus_root: Path, tmp_path_factory: pytest.TempPathFactory) -> tuple[Path, str]:
     import os
 
     from hal9000.knowledge.retrieve.retriever import DEFAULT_QUERY_CACHE

@@ -18,8 +18,10 @@ ranked by simplicity: the plan gives no order for it, so the point estimate
 decides.
 
 **Decision** (:func:`recommend`). Candidates are the finished dev runs of
-stages S1a-S4 that the chat can be configured with (the S4 *k* variants are
-T9 measurements: ``config/knowledge.yaml`` has no *k*). Local retrieval p95
+the sweep's last retrieval stage (normally the S4 baselines: the finalists,
+which were calibrated, answered in S5 and measured in S6; earlier stages'
+configurations lost to them on the way). The S4 *k* variants are T9
+measurements, not candidates: ``config/knowledge.yaml`` has no *k*. Local retrieval p95
 must be within ``p95_local_retrieval_ms`` (300 ms): measured on the Pi (S6
 runs, matched by configuration) when any Pi numbers exist, else the Mac
 numbers of every configuration, flagged as such. The winner of the ranking is
@@ -90,6 +92,11 @@ def identity(config: Mapping) -> tuple:
         else config.get(key)
         for key in IDENTITY_KEYS
     )
+
+
+def _label(run: EvalRun) -> str:
+    """Exact ties are broken by configuration name (stable across stages), then run ID."""
+    return f"{run.config.get('name') or ''}\x00{run.id}"
 
 
 def _recall(run: EvalRun, budget: int) -> MetricCI | None:
@@ -168,11 +175,11 @@ class Ranker:
             value = self.point(run, metric)
             (unscored.append(run) if value is None else scored.append((run, value)))
         order: list[Ranked] = []
-        remaining = sorted(scored, key=lambda p: p[0].id)
+        remaining = sorted(scored, key=lambda p: _label(p[0]))
         while remaining:
-            leader, lead_value = max(
+            leader, _ = min(
                 remaining,
-                key=lambda p: (p[1], tuple(-x for x in self.simplicity_key(p[0].config))),
+                key=lambda p: (-p[1], self.simplicity_key(p[0].config), _label(p[0])),
             )
             contenders = [
                 (run, value)
@@ -182,7 +189,7 @@ class Ranker:
             ]
             pick, value = min(
                 contenders,
-                key=lambda p: (self.simplicity_key(p[0].config), -p[1], p[0].id),
+                key=lambda p: (self.simplicity_key(p[0].config), -p[1], _label(p[0])),
             )
             tied = tuple(r.id for r, _ in contenders if r is not leader)
             order.append(Ranked(pick, value, tied, over=leader.id if pick is not leader else None))
@@ -287,11 +294,15 @@ def recommend(
     """Apply plan §8.6 to a sweep's runs (and any S6 runs among them)."""
     ranker = Ranker(scoring, budget=budget)
     finished = [r for r in runs if r.finished_at is not None and r.metrics is not None]
-    candidates = [
+    from hal9000.knowledge.obs.collector import stage_order
+
+    retrieval = [
         r
         for r in finished
         if r.split == "dev" and r.stage in RETRIEVAL_STAGES and r.config.get("k") is None
     ]
+    last = max((r.stage for r in retrieval), key=stage_order, default=None)
+    candidates = [r for r in retrieval if r.stage == last]
     pi_runs = [r for r in finished if r.stage == "S6" and r.host == "pi"]
     pi_p95: dict[tuple, float] = {}
     for run in pi_runs:
@@ -308,11 +319,9 @@ def recommend(
             return p95, "pi" if p95 is not None else None
         return run.metrics.latency_ms_p95, run.host or None
 
-    # one run per configuration: the latest stage's (they are re-runs of the same thing)
+    # one run per configuration (a stage may hold the same one twice)
     latest: dict[tuple, EvalRun] = {}
-    from hal9000.knowledge.obs.collector import stage_order
-
-    for run in sorted(candidates, key=lambda r: (stage_order(r.stage), r.id)):
+    for run in sorted(candidates, key=lambda r: r.id):
         latest[identity(run.config)] = run
     pool = list(latest.values())
 

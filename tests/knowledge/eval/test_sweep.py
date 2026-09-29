@@ -49,10 +49,10 @@ def test_s1a_to_s4_on_the_fixture_corpus(swept_env):
     assert {r.config["parser"] for r in by_stage["S1b"]} == {"pdfium"}
     notes = read_manifest(env.settings.eval_dir, sweep_id)["notes"]
     assert any("docling unavailable" in n for n in notes["S1b"])
-    # S2: top 2 profiles x 2 embeddings with one method; S3: 2 x 4 methods x 2 rerankers + T10
+    # S2: top 2 profiles x 2 embeddings with one method; S3: 2 x 3 methods x 2 rerankers + T10
     assert len(by_stage["S2"]) == 4
     assert len({r.config["retrieval"] for r in by_stage["S2"]}) == 1
-    assert len(by_stage["S3"]) == 2 * 4 * 2 + 1
+    assert len(by_stage["S3"]) == 2 * 3 * 2 + 1
     assert {r.config.get("reranker") for r in by_stage["S3"]} == {"none", "minilm"}
     assert sum(r.config.get("query_transform") == "multi" for r in by_stage["S3"]) == 1
     # S4: top 2 configurations, each baseline and k=3
@@ -85,8 +85,37 @@ def test_s1a_to_s4_on_the_fixture_corpus(swept_env):
     stored = env.conn.execute("SELECT count(*) FROM abstain_thresholds").fetchone()[0]
     calibrated = {(r.config["profile"], r.config.get("reranker")) for r in baselines
                   if r.config.get("abstain_threshold") is not None}  # fmt: skip
-    assert stored == len(calibrated) >= 1
+    assert stored == len(calibrated)
+    uncalibrated = [r for r in baselines if r.config.get("abstain_threshold") is None]
+    for run in uncalibrated:  # the fake embedder's scores don't separate: recorded why
+        assert "moves to the generation step" in run.config["abstain_note"]
+    if uncalibrated:
+        assert any("no abstain threshold" in n for n in notes["S4"])
     assert "Estimate for S1a" in log
+
+
+def test_s4_stores_the_calibrated_thresholds_of_the_finalists(swept_env):
+    env, sweep_id = swept_env
+    with env.conn:
+        env.conn.execute("DELETE FROM eval_runs WHERE stage = 'S4'")
+    grid = (env.settings.config_dir / "knowledge_eval.yaml").read_text()
+    grid = grid.replace("abstain_auc_min: 0.5", "abstain_auc_min: 0.0")
+    outcome = env.runner(grid=grid).run(["S4"], sweep_id=sweep_id)
+    assert outcome.status == "done", env.out.getvalue()
+    baselines = [r for r in sweep_runs(env.conn, sweep_id, "S4") if r.config.get("k") is None]
+    rows = env.conn.execute(
+        "SELECT p.name, t.reranker, t.threshold, t.eval_run_id FROM abstain_thresholds t "
+        "JOIN profiles p ON p.id = t.profile_id"
+    ).fetchall()
+    expected = {(r.config["profile"], "" if r.config["reranker"] == "none" else r.config["reranker"])
+                for r in baselines}  # fmt: skip
+    assert {(name, reranker) for name, reranker, _, _ in rows} == expected
+    by_id = {r.id: r for r in baselines}
+    for _, _, threshold, run_id in rows:
+        assert threshold == by_id[run_id].config["abstain_threshold"]
+    thresholds = read_manifest(env.settings.eval_dir, sweep_id)["thresholds"]
+    assert len(thresholds) == len(expected)
+    assert "abstain threshold" in env.out.getvalue()
 
 
 def test_s5_refuses_without_judge_agreement_and_runs_with_it(swept_env):

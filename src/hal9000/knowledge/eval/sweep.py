@@ -1224,6 +1224,9 @@ class SweepRunner:
 
     # ------------------------------------------------------------ S5
     def _judge_gate(self, force: bool) -> dict[str, Any]:
+        """Judge agreement with Mike's labels on this sweep's calibration answers
+        (``judge-prep`` on one of its runs), or on every label when it has none: the
+        rubric is pinned, so any calibration measures the same judge."""
         from hal9000.knowledge.eval.judge import agreement
         from hal9000.knowledge.eval.store import list_judge_labels
 

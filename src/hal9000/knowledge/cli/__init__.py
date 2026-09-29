@@ -11,7 +11,7 @@ module                  commands                            owner
 ``cli/ingest.py``       ``ingest``                          KWP3
 ``cli/gold.py``         ``gold generate|export|import``     KWP5
 ``cli/eval.py``         ``eval sweep|judge-prep|latency|    KWP5
-                        export|report|regression``
+                        choose|export|report|regression``
 ``cli/serve.py``        ``serve``                           KWP6
 ``cli/ask.py``          ``ask``                             KWP6
 ``cli/ops.py``          ``profile list|activate``,          KWP10
@@ -131,6 +131,16 @@ def register(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     latency.add_argument("--end-to-end", type=int, default=30, help="live end-to-end questions")
     latency.add_argument("--ingest-test", metavar="SHA", help="timed scratch ingest of this file")
     _yes(latency)
+    choose = _command(
+        ev_cmds,
+        "choose",
+        "eval",
+        "record the chosen configuration (gate G-K2): activate it, write config/knowledge.yaml",
+        "eval choose",
+    )
+    choose.add_argument("run", metavar="RUN", help="the sweep ID")
+    choose.add_argument("--config", required=True, metavar="NAME", help="configuration or run ID")
+    _yes(choose)
     for name, help_text in (
         ("export", "aggregates and per-question scores, no document text"),
         ("report", "write docs/KNOWLEDGE_EVAL_REPORT.md (aggregates only)"),
