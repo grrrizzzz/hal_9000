@@ -342,3 +342,62 @@ def test_env_example_documents_the_deployment_keys():
     # placeholders only: the secrets have no value
     for name in ("GRAFANA_ADMIN_PASSWORD", "KB_PASSCODE"):
         assert re.search(rf"^{name}=\s*(#|$)", text, re.M), name
+
+
+# ---------------------------------------------------- the committed default
+def test_the_committed_default_profile_is_a_valid_profile_name():
+    from hal9000.knowledge.chunking.profiles import parse_profile_name
+    from hal9000.knowledge.config import load_knowledge_file
+
+    name = load_knowledge_file(REPO / "config" / "knowledge.yaml").active_profile
+    assert name == "pdfium.structure-768.hdr.te3s-1536"  # the plan's baseline (G-K1)
+    profile = parse_profile_name(name)
+    assert profile.name == name  # canonical spelling
+    assert (profile.parser, profile.chunker, profile.size, profile.header) == (
+        "pdfium",
+        "structure",
+        768,
+        True,
+    )
+    assert (profile.embed_model, profile.dimensions) == ("openai/text-embedding-3-small", 1536)
+
+
+def test_the_first_ingest_builds_and_activates_the_committed_default(tmp_path):
+    """G-K1 §2.4: `kb ingest` into an empty library leaves the default profile active,
+    so `kb gold generate` has a real retriever. The OpenAI embedder is replaced by the
+    offline fake (same dimensions); the profile and its name are the committed ones."""
+    from hal9000.cost.metering import Meter
+    from hal9000.knowledge.config import load_knowledge_file
+    from hal9000.knowledge.index.fake import FakeEmbedder
+    from hal9000.knowledge.index.profiles import active_profile, profile_status
+    from hal9000.knowledge.ingest.pipeline import IngestPipeline
+    from hal9000.knowledge.storage import open_db
+    from hal9000.storage.db import Database
+
+    knowledge_file = load_knowledge_file(REPO / "config" / "knowledge.yaml")
+    note = tmp_path / "boiler.md"
+    note.write_text("# Boiler\n\nService the boiler every autumn and bleed the radiators.\n")
+    conn = open_db(tmp_path / "knowledge.db")
+    ledger = Database(tmp_path / "hal9000.db")
+    pipeline = IngestPipeline(
+        tmp_path / "files",
+        embed_fn=FakeEmbedder(),
+        meter=Meter(ledger, "kb-deploy-test", 10, 10),  # a paid model is always metered (K9)
+        use_llm=False,
+        bus=None,
+        knowledge_file=knowledge_file,
+    )
+    try:
+        assert active_profile(conn) is None
+        result = pipeline.submit(conn, note, "boiler.md")
+        job = pipeline.worker(":unused:").run_job(conn, result.job_id)
+        assert job.status == "done", job.error
+        active = active_profile(conn)
+        assert active is not None and active.name == knowledge_file.active_profile
+        assert profile_status(conn, active.name) == "ready"
+        chunks = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
+        assert chunks >= 1
+    finally:
+        pipeline.close()
+        conn.close()
+        ledger.close()

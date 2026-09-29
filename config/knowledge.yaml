@@ -2,9 +2,13 @@
 # Secrets, caps, the port and the embedding model are in .env (KB_*); model
 # names and prices are in src/hal9000/config.py. Unknown keys are rejected.
 
-# The one index profile that serves the chat. Chosen at gate G-K2 from the
-# setup evaluation; until then, null (the chat refuses with a clear message).
-active_profile: null
+# The index profile the first `kb ingest` builds and activates when the
+# database has no active profile yet: the plan's baseline (pypdfium2 text,
+# structure chunks of 768 tokens with the contextual header,
+# text-embedding-3-small at 1536 dimensions). The setup evaluation replaces
+# it at gate G-K2 (`kb eval choose` rewrites this line). After the first
+# ingest, the database's active profile decides what serves the chat.
+active_profile: pdfium.structure-768.hdr.te3s-1536
 # Cross-encoder reranker, or null for none (chosen at G-K2).
 reranker: null
 
