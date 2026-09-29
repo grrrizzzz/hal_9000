@@ -137,7 +137,7 @@ def test_closed_label_sets_start_at_zero(client):
     outcomes = {
         s.labels["outcome"] for s in families["kb_questions"].samples if s.name.endswith("_total")
     }
-    assert outcomes == {"answered", "abstained", "retrieval_only", "error"}
+    assert outcomes == {"answered", "abstained", "retrieval_only", "error", "cancelled"}
     assert {s.labels["status"] for s in families["kb_ingest_files"].samples} >= {
         "added",
         "duplicate",

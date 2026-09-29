@@ -47,13 +47,22 @@ def seed_corpus(conn, profiles=("fixed-512", "recursive-1024")) -> dict[str, int
     return ids
 
 
-def add_eval_run(conn, run_id, profile, metrics_json, *, finished="2026-09-01T00:00:00+00:00"):
+def add_eval_run(
+    conn,
+    run_id,
+    profile,
+    metrics_json,
+    *,
+    finished="2026-09-01T00:00:00+00:00",
+    stage="S1a",
+    split="dev",
+):
     config = {"profile": profile} if profile is not None else {}
     with conn:
         conn.execute(
-            "INSERT INTO eval_runs (id, stage, config, metrics, started_at, finished_at)"
-            " VALUES (?, 'S1a', ?, ?, '2026-09-01T00:00:00+00:00', ?)",
-            (run_id, json.dumps(config), json.dumps(metrics_json), finished),
+            "INSERT INTO eval_runs (id, stage, split, config, metrics, started_at, finished_at)"
+            " VALUES (?, ?, ?, ?, ?, '2026-09-01T00:00:00+00:00', ?)",
+            (run_id, stage, split, json.dumps(config), json.dumps(metrics_json), finished),
         )
 
 

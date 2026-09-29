@@ -21,9 +21,8 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
-from typing import get_args
+from typing import TYPE_CHECKING, get_args
 
-from fastapi import APIRouter, Response
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     CollectorRegistry,
@@ -40,8 +39,12 @@ from prometheus_client.process_collector import ProcessCollector
 from hal9000.knowledge.contracts import Outcome
 from hal9000.knowledge.obs.timing import REGISTRY, STAGE_SECONDS, Stage, current_trace
 
+if TYPE_CHECKING:  # pragma: no cover - fastapi is imported only when the router is built
+    from fastapi import APIRouter
+
 __all__ = [
     "ANSWER_SECONDS",
+    "CANCELLED",
     "CHUNKS_NAME",
     "CONTEXT_TOKENS",
     "COST_USD_TOTAL",
@@ -85,8 +88,10 @@ __all__ = [
 ]
 
 # ------------------------------------------------------------ closed label sets
-#: ``kb_questions_total{outcome}`` (the contracts' ``Outcome``).
-OUTCOMES: tuple[str, ...] = get_args(Outcome)
+#: ``kb_questions_total{outcome}``: the contracts' ``Outcome`` plus ``cancelled``
+#: (the client went away, e.g. a closed stream: not an error, so not in the error rate).
+CANCELLED = "cancelled"
+OUTCOMES: tuple[str, ...] = (*get_args(Outcome), CANCELLED)
 #: ``kb_tokens_total`` / ``kb_cost_usd_total`` ``{purpose}``.
 PURPOSES: tuple[str, ...] = ("embed", "condense", "answer", "judge", "segment")
 #: ``kb_grounding_failures_total{kind}``.
@@ -464,8 +469,11 @@ def render_metrics(*, process: bool = True) -> bytes:
 def metrics_router(db_path: Path | str | None = None) -> APIRouter:
     """``GET /metrics`` (unauthenticated, LAN only, no question text: plan §14).
 
-    With ``db_path``, the knowledge.db collector is installed too.
+    With ``db_path``, the knowledge.db collector is installed too. FastAPI is
+    imported here, not at module import, so the CLI doesn't pay for it.
     """
+    from fastapi import APIRouter, Response
+
     if db_path is not None:
         install_db_collector(db_path)
     router = APIRouter()
@@ -481,7 +489,7 @@ def metrics_router(db_path: Path | str | None = None) -> APIRouter:
             }
         },
     )
-    def metrics() -> Response:
+    def metrics():  # no annotation: it would be resolved in module globals
         return Response(content=render_metrics(), media_type=CONTENT_TYPE_LATEST)
 
     return router

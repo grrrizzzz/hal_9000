@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import time
@@ -14,8 +15,10 @@ from hal9000.knowledge.obs import traces
 from hal9000.knowledge.obs.metrics import REGISTRY
 from hal9000.knowledge.obs.timing import stage
 from hal9000.knowledge.obs.traces import (
+    ERROR_MESSAGE_CHARS,
     RETENTION_DAYS,
     RetentionJob,
+    describe_error,
     finish_trace,
     hits_from_retrieval,
     load_trace,
@@ -132,7 +135,7 @@ def test_an_exception_marks_the_trace_and_counts_the_innermost_stage_once(kb_db)
             with stage("select"):
                 with stage("vector"):
                     raise RuntimeError("vec0 exploded")
-    assert trace.outcome == "error" and trace.error == "RuntimeError"
+    assert trace.outcome == "error" and trace.error == "RuntimeError: vec0 exploded"
     assert (
         kb_db.execute("SELECT outcome FROM traces WHERE id = ?", (trace.id,)).fetchone()[0]
         == "error"
@@ -210,10 +213,13 @@ def test_finish_trace_observes_top_score_and_context_only_when_known():
     finish_trace(Trace(error="Boom"))  # no outcome given: an error
 
 
-def test_a_failed_write_is_logged_not_raised(tmp_path, caplog):
+def test_a_failed_write_is_logged_counted_and_not_raised(tmp_path, caplog):
+    labels = {"stage": "request", "kind": "TraceWriteError"}
+    before = _get("kb_errors_total", labels)
     conn = sqlite3.connect(tmp_path / "nothing.db")  # no traces table
     finish_trace(Trace(outcome="answered"), conn)
     assert "could not write trace" in caplog.text
+    assert _get("kb_errors_total", labels) == before + 1
 
 
 def _insert(conn, trace_id: str, created: datetime) -> None:
@@ -271,3 +277,176 @@ def test_mark_first_token_needs_a_started_trace():
     mark_first_token(unstarted)
     assert unstarted.ttft_ms is None
     mark_first_token()  # nothing bound: a no-op
+
+
+# ------------------------------------------------------------ retention pin
+def test_retention_is_180_days(kb_db):
+    """plan §12, with dates written out rather than derived from the constant."""
+    assert RETENTION_DAYS == 180
+    now = datetime(2026, 9, 28, 12, 0, tzinfo=UTC)
+    _insert(kb_db, "day-181", datetime(2026, 3, 31, 12, 0, tzinfo=UTC))  # 181 days before
+    _insert(kb_db, "day-179", datetime(2026, 4, 2, 12, 0, tzinfo=UTC))  # 179 days before
+    assert purge_traces(kb_db, now=now) == 1
+    assert {r[0] for r in kb_db.execute("SELECT id FROM traces")} == {"day-179"}
+    assert RetentionJob().days == 180
+
+
+# ------------------------------------------------------------ cancellation
+def test_a_closed_stream_is_cancelled_not_answered(kb_db):
+    cancelled = _get("kb_questions_total", {"outcome": "cancelled"})
+    answered = _get("kb_questions_total", {"outcome": "answered"})
+    exit_errors = _get("kb_errors_total", {"stage": "generate", "kind": "GeneratorExit"})
+    seen = {}
+
+    def stream():
+        with observe(kb_db, question=QUESTION) as trace:
+            seen["trace"] = trace
+            with stage("generate"):
+                trace.outcome = "answered"  # set early, as a streaming handler might
+                yield "first"
+                yield "second"  # pragma: no cover - the client is gone
+
+    tokens = stream()
+    assert next(tokens) == "first"
+    tokens.close()  # the client disconnected: GeneratorExit at the yield
+
+    trace = seen["trace"]
+    assert _get("kb_questions_total", {"outcome": "cancelled"}) == cancelled + 1
+    assert _get("kb_questions_total", {"outcome": "answered"}) == answered
+    assert _get("kb_errors_total", {"stage": "generate", "kind": "GeneratorExit"}) == exit_errors
+    row = kb_db.execute("SELECT outcome, body FROM traces WHERE id = ?", (trace.id,)).fetchone()
+    assert row["outcome"] == "cancelled"
+    body = json.loads(row["body"])
+    assert body["outcome"] is None and body["error"] == "GeneratorExit"
+    assert load_trace(kb_db, trace.id).outcome is None  # the body still validates
+
+
+def test_task_cancellation_is_recorded_and_re_raised(kb_db):
+    cancelled = _get("kb_questions_total", {"outcome": "cancelled"})
+    ids = []
+
+    async def answer():
+        with observe(kb_db, question=QUESTION) as trace:
+            ids.append(trace.id)
+            with stage("generate"):
+                await asyncio.sleep(10)
+
+    async def main():
+        task = asyncio.create_task(answer())
+        await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(main())
+    assert _get("kb_questions_total", {"outcome": "cancelled"}) == cancelled + 1
+    assert (
+        kb_db.execute("SELECT outcome FROM traces WHERE id = ?", (ids[0],)).fetchone()[0]
+        == "cancelled"
+    )
+
+
+def test_a_real_error_before_cancellation_is_still_counted():
+    before = _get("kb_errors_total", {"stage": "embed_query", "kind": "ConnectionError"})
+    with pytest.raises(KeyboardInterrupt):
+        with observe(question=QUESTION):
+            try:
+                with stage("embed_query"):
+                    raise ConnectionError
+            except ConnectionError:
+                pass
+            raise KeyboardInterrupt
+    assert (
+        _get("kb_errors_total", {"stage": "embed_query", "kind": "ConnectionError"}) == before + 1
+    )
+
+
+def test_cancelled_ingest_traces_are_not_questions(kb_db):
+    before = _get("kb_questions_total", {"outcome": "cancelled"})
+    with pytest.raises(KeyboardInterrupt):
+        with observe(kb_db, kind="ingest") as trace:
+            raise KeyboardInterrupt
+    assert _get("kb_questions_total", {"outcome": "cancelled"}) == before
+    assert (
+        kb_db.execute("SELECT outcome FROM traces WHERE id = ?", (trace.id,)).fetchone()[0]
+        == "cancelled"
+    )
+
+
+# ------------------------------------------------------------ error text
+def test_describe_error_keeps_the_type_and_200_characters():
+    assert describe_error(ValueError()) == "ValueError"
+    assert describe_error(ValueError("bad\n  pdf")) == "ValueError: bad pdf"
+    long = describe_error(RuntimeError("x" * 500))
+    assert long == "RuntimeError: " + "x" * ERROR_MESSAGE_CHARS
+    assert ERROR_MESSAGE_CHARS == 200
+
+
+def test_trace_error_is_bounded_and_the_metric_kind_is_the_type():
+    before = _get("kb_errors_total", {"stage": "request", "kind": "ValueError"})
+    with pytest.raises(ValueError):
+        with observe(question=QUESTION) as trace:
+            raise ValueError("y" * 1000)
+    assert len(trace.error) == len("ValueError: ") + 200
+    assert _get("kb_errors_total", {"stage": "request", "kind": "ValueError"}) == before + 1
+
+
+# ------------------------------------------------------------ transactions
+def _other(db_path):
+    other = sqlite3.connect(db_path)
+    try:
+        return {r[0] for r in other.execute("SELECT id FROM traces")}
+    finally:
+        other.close()
+
+
+def test_write_trace_joins_the_callers_transaction_without_committing_it(kb_db, tmp_path):
+    db_path = tmp_path / "knowledge.db"
+    kb_db.execute(
+        "INSERT INTO traces (id, created_at, body) VALUES ('callers', '2026-01-01', '{}')"
+    )
+    assert kb_db.in_transaction
+    write_trace(kb_db, Trace(id="mine", outcome="answered"))
+    assert kb_db.in_transaction  # still the caller's transaction
+    assert _other(db_path) == set()  # nothing committed
+    kb_db.rollback()
+    assert {r[0] for r in kb_db.execute("SELECT id FROM traces")} == set()
+
+
+def test_a_failed_write_rolls_back_only_itself(kb_db, monkeypatch):
+    kb_db.execute(
+        "INSERT INTO traces (id, created_at, body) VALUES ('callers', '2026-01-01', '{}')"
+    )
+    monkeypatch.setattr(
+        traces, "trace_row", lambda trace, outcome=None: {"id": "x", "no_such_column": 1}
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        write_trace(kb_db, Trace())
+    assert kb_db.in_transaction
+    assert {r[0] for r in kb_db.execute("SELECT id FROM traces")} == {"callers"}
+    kb_db.commit()
+
+
+def test_without_a_transaction_the_write_is_committed(kb_db, tmp_path, monkeypatch):
+    write_trace(kb_db, Trace(id="solo"))
+    assert not kb_db.in_transaction
+    assert _other(tmp_path / "knowledge.db") == {"solo"}
+    monkeypatch.setattr(
+        traces, "trace_row", lambda trace, outcome=None: {"id": "x", "no_such_column": 1}
+    )
+    with pytest.raises(sqlite3.OperationalError):
+        write_trace(kb_db, Trace())
+    assert not kb_db.in_transaction
+
+
+def test_purge_inside_the_callers_transaction(kb_db, tmp_path):
+    write_trace(kb_db, Trace(id="ancient", created_at=datetime(2020, 1, 1, tzinfo=UTC)))
+    kb_db.execute(
+        "INSERT INTO traces (id, created_at, body) VALUES ('callers', ?, '{}')",
+        (datetime.now(UTC).isoformat(),),
+    )
+    assert purge_traces(kb_db) == 1
+    assert kb_db.in_transaction
+    assert _other(tmp_path / "knowledge.db") == {"ancient"}  # the delete isn't committed either
+    kb_db.commit()
+    assert _other(tmp_path / "knowledge.db") == {"callers"}

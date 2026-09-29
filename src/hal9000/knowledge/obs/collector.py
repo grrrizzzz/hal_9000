@@ -5,9 +5,11 @@ publish metrics themselves. They write rows, and ``hal-kb`` reads them here on
 every scrape, so the values appear on ``/metrics`` however they were produced:
 
 - ``kb_regression_recall``: the latest ``regression_runs.recall_2k``.
-- ``kb_eval_metric{profile, metric}``: the latest finished ``eval_runs`` row per
-  profile, flattened (``budgeted_recall@2000``, ``mrr``, ...). No run label,
-  so the number of series stays small.
+- ``kb_eval_metric{profile, metric}``: per profile, the finished ``dev``-split
+  ``eval_runs`` row of the latest sweep stage (``S1a`` < ``S1b`` < ``S2`` ...),
+  the most recently finished one within that stage, flattened
+  (``budgeted_recall@2000``, ``mrr``, ...). Profiles are compared like with
+  like, and there is no run label, so the number of series stays small.
 - ``kb_documents{profile}``, ``kb_chunks{profile}``: per index profile.
 - ``kb_db_bytes{profile}``: ``profile="all"`` is the database file plus its
   WAL; a profile's own value is the size of its FTS5 and ``vec0`` tables
@@ -34,7 +36,13 @@ from urllib.parse import quote
 from prometheus_client.core import GaugeMetricFamily, Metric
 from prometheus_client.registry import Collector
 
-__all__ = ["DBSTAT_TTL_S", "KnowledgeDbCollector", "flatten_eval_metrics", "eval_profile"]
+__all__ = [
+    "DBSTAT_TTL_S",
+    "KnowledgeDbCollector",
+    "eval_profile",
+    "flatten_eval_metrics",
+    "stage_order",
+]
 
 log = logging.getLogger(__name__)
 
@@ -56,6 +64,17 @@ def eval_profile(config: Any) -> str | None:
     if isinstance(profile, str) and profile:
         return profile
     return None
+
+
+_STAGE = re.compile(r"^[Ss](\d+)([a-z]*)$")
+
+
+def stage_order(stage: str | None) -> tuple:
+    """Sort key for sweep stages: ``S1a`` < ``S1b`` < ``S2`` < ``S10``; others sort first."""
+    match = _STAGE.match(stage or "")
+    if match is None:
+        return (0, 0, stage or "")
+    return (1, int(match.group(1)), match.group(2))
 
 
 def _value(item: Any) -> float | None:
@@ -105,11 +124,14 @@ class KnowledgeDbCollector(Collector):
         return []
 
     # ------------------------------------------------------------ plumbing
+    def uri(self) -> str:
+        """The read-only SQLite URI each scrape opens."""
+        return f"file:{quote(str(self.db_path.resolve()))}?mode=ro"
+
     def _connect(self) -> sqlite3.Connection | None:
         if not self.db_path.exists():
             return None
-        uri = f"file:{quote(str(self.db_path.resolve()))}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=5, check_same_thread=False)
+        conn = sqlite3.connect(self.uri(), uri=True, timeout=5, check_same_thread=False)
         conn.execute("PRAGMA query_only = ON")
         return conn
 
@@ -199,20 +221,23 @@ class KnowledgeDbCollector(Collector):
             if row is not None:
                 recall.add_metric([], float(row[0]))
         if "eval_runs" in tables:
-            latest: dict[str, dict[str, float]] = {}
+            best: dict[str, tuple[tuple, dict[str, float]]] = {}
             rows = conn.execute(
-                "SELECT config, metrics FROM eval_runs "
-                "WHERE metrics IS NOT NULL AND finished_at IS NOT NULL "
-                "ORDER BY finished_at, started_at, id"
+                "SELECT stage, finished_at, started_at, id, config, metrics FROM eval_runs "
+                "WHERE split = 'dev' AND metrics IS NOT NULL AND finished_at IS NOT NULL"
             )
-            for config_json, metrics_json in rows:
+            for stage, finished, started, run_id, config_json, metrics_json in rows:
                 try:
                     profile = eval_profile(json.loads(config_json or "{}"))
                     values = flatten_eval_metrics(json.loads(metrics_json))
                 except (TypeError, ValueError):
                     continue
-                if profile is not None and values:
-                    latest[profile] = values  # rows ascend, so the last one wins
+                if profile is None or not values:
+                    continue
+                key = (stage_order(stage), finished or "", started or "", run_id or "")
+                if profile not in best or key > best[profile][0]:
+                    best[profile] = (key, values)
+            latest = {profile: values for profile, (_, values) in best.items()}
             for profile in sorted(latest):
                 for metric, value in sorted(latest[profile].items()):
                     evals.add_metric([profile, metric], value)

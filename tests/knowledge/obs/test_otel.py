@@ -88,7 +88,7 @@ def test_a_failing_stage_sets_error_status(exporter):
     spans = {s.name: s for s in exporter.get_finished_spans()}
     assert spans["generate"].status.status_code == StatusCode.ERROR
     assert spans["kb.question"].status.status_code == StatusCode.ERROR
-    assert spans["kb.question"].attributes["kb.error"] == "ValueError"
+    assert spans["kb.question"].attributes["kb.error"] == "ValueError: bad"
 
 
 def test_ingest_traces_get_an_ingest_root(exporter):

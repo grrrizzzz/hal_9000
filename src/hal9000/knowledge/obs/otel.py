@@ -94,7 +94,7 @@ def _ns(trace: Trace) -> int:
     return int(trace.created_at.timestamp() * 1_000_000_000)
 
 
-def _attributes(trace: Trace) -> dict[str, Any]:
+def _attributes(trace: Trace, outcome: str | None) -> dict[str, Any]:
     attrs: dict[str, Any] = {
         "kb.trace_id": trace.id,
         "kb.kind": trace.kind,
@@ -106,6 +106,8 @@ def _attributes(trace: Trace) -> dict[str, Any]:
         value = getattr(trace, key)
         if value is not None:
             attrs[f"kb.{key}"] = value
+    if outcome is not None:
+        attrs["kb.outcome"] = outcome
     return attrs
 
 
@@ -114,8 +116,12 @@ def _ordered(stages: list[StageTiming]) -> list[StageTiming]:
     return sorted(stages, key=lambda t: (t.started_ms, t.depth, -t.duration_ms))
 
 
-def export_trace(trace: Trace) -> bool:
-    """Export ``trace`` as spans if enabled. Never raises; returns whether it exported."""
+def export_trace(trace: Trace, *, outcome: str | None = None) -> bool:
+    """Export ``trace`` as spans if enabled. Never raises; returns whether it exported.
+
+    ``outcome`` overrides ``trace.outcome`` (``cancelled``). ``kb.error`` is
+    ``trace.error``: a type name and at most 200 characters of message.
+    """
     if not enabled():
         return False
     try:
@@ -131,7 +137,7 @@ def export_trace(trace: Trace) -> bool:
         root = tracer.start_span(
             f"kb.{trace.kind}",
             start_time=start,
-            attributes=_attributes(trace),
+            attributes=_attributes(trace, outcome),
             context=otel_trace.set_span_in_context(otel_trace.INVALID_SPAN),
         )
         if trace.error:

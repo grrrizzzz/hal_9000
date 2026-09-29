@@ -220,3 +220,52 @@ def test_flatten_and_profile_helpers():
     assert eval_profile({"profile": ""}) is None
     assert eval_profile({"profile": {"name": "p"}}) == "p"
     assert collector_mod.DBSTAT_TTL_S > 0
+
+
+def test_eval_metric_compares_dev_runs_of_the_latest_stage(db_path, kb_db):
+    ci = lambda v: {"value": v, "low": v, "high": v}  # noqa: E731
+    # a later-finished S1b run doesn't beat an S2 run; S2 beats S1a; test split never shows
+    add_eval_run(
+        kb_db, "s2", "p", {"mrr": ci(0.6)}, stage="S2", finished="2026-09-02T00:00:00+00:00"
+    )
+    add_eval_run(
+        kb_db, "s1b", "p", {"mrr": ci(0.9)}, stage="S1b", finished="2026-09-05T00:00:00+00:00"
+    )
+    add_eval_run(
+        kb_db, "s2-rerun", "p", {"mrr": ci(0.65)}, stage="S2", finished="2026-09-03T00:00:00+00:00"
+    )
+    add_eval_run(
+        kb_db,
+        "s5-test",
+        "p",
+        {"mrr": ci(0.1)},
+        stage="S5",
+        split="test",
+        finished="2026-09-09T00:00:00+00:00",
+    )
+    add_eval_run(kb_db, "only-test", "q", {"mrr": ci(0.2)}, split="test")
+    metrics.install_db_collector(db_path)
+    assert _samples("kb_eval_metric") == {(("metric", "mrr"), ("profile", "p")): 0.65}
+
+
+def test_stage_order():
+    from hal9000.knowledge.obs.collector import stage_order
+
+    stages = ["S2", "S10", "S1b", "custom", "S1a", "s3"]
+    assert sorted(stages, key=stage_order) == ["custom", "S1a", "S1b", "S2", "s3", "S10"]
+    assert stage_order(None) < stage_order("S1a")
+
+
+def test_the_scrape_connection_uses_a_mode_ro_uri(db_path, kb_db, monkeypatch):
+    reader = KnowledgeDbCollector(db_path)
+    assert reader.uri().startswith("file:") and reader.uri().endswith("?mode=ro")
+    calls = []
+    real_connect = sqlite3.connect
+
+    def spy(target, *args, **kwargs):
+        calls.append((target, kwargs.get("uri")))
+        return real_connect(target, *args, **kwargs)
+
+    monkeypatch.setattr(collector_mod.sqlite3, "connect", spy)
+    list(reader.collect())
+    assert calls == [(reader.uri(), True)]

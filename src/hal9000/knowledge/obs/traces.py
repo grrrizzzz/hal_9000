@@ -14,8 +14,26 @@ On exit :func:`finish_trace` fills ``total_ms``, counts the question's
 Prometheus metrics, persists the row, exports OpenTelemetry spans when enabled
 and, at most once a day per process, deletes rows older than
 :data:`RETENTION_DAYS`. An exception inside the block marks the trace
-``error`` and still records it. Observability never breaks the request: a
-failure to persist or export is logged, not raised.
+``error`` and still records it. A ``BaseException`` that is not an
+``Exception`` (``asyncio.CancelledError``, or ``GeneratorExit`` when a client
+closes a stream) is recorded as outcome ``cancelled`` (the metric and the row's
+``outcome`` column; the contracts' ``Outcome`` has no such value, so the JSON
+body keeps ``outcome`` null) and re-raised. Observability never breaks the
+request: a failure to persist (counted as
+``kb_errors_total{stage="request",kind="TraceWriteError"}``) or to export is
+logged, not raised.
+
+``trace.error`` (and the OTel ``kb.error`` attribute) holds only
+:func:`describe_error`'s ``"TypeName: message"`` with the message cut to
+:data:`ERROR_MESSAGE_CHARS` characters. KWP6 and the pipeline must not raise
+exceptions whose message carries question or document text; set
+``trace.error`` yourself with :func:`describe_error` on a sanitized exception
+if you need to.
+
+**Transactions.** :func:`write_trace` and :func:`purge_traces` never commit or
+roll back a transaction they didn't open. With a transaction open on ``conn``
+they join it through a savepoint and leave the commit to the caller; with none
+open they commit their own write. A dedicated connection for traces is simplest.
 
 Errors are counted from the trace (``kb_errors_total``): each failing stage
 once, at its innermost level, including failures the pipeline handled (an
@@ -45,8 +63,10 @@ from hal9000.knowledge.obs import metrics, otel
 from hal9000.knowledge.obs.timing import current_trace, start_trace
 
 __all__ = [
+    "ERROR_MESSAGE_CHARS",
     "RETENTION_DAYS",
     "RetentionJob",
+    "describe_error",
     "finish_trace",
     "hits_from_retrieval",
     "load_trace",
@@ -63,6 +83,19 @@ log = logging.getLogger(__name__)
 
 #: plan §12: traces are kept 180 days.
 RETENTION_DAYS = 180
+#: ``trace.error`` keeps at most this much of an exception's message.
+ERROR_MESSAGE_CHARS = 200
+
+
+def describe_error(exc: BaseException) -> str:
+    """``"TypeName: message"``, the message cut to :data:`ERROR_MESSAGE_CHARS` characters."""
+    name = type(exc).__name__
+    message = " ".join(str(exc).split())[:ERROR_MESSAGE_CHARS]
+    return f"{name}: {message}" if message else name
+
+
+def _error_kind(error: str) -> str:
+    return error.split(":", 1)[0]
 
 
 def _ts(moment: datetime) -> str:
@@ -73,13 +106,39 @@ def _ts(moment: datetime) -> str:
 
 
 # ------------------------------------------------------------- persistence
-def trace_row(trace: Trace) -> dict[str, object]:
-    """The ``traces`` row for ``trace``: scalar columns for Grafana plus the JSON body."""
+@contextmanager
+def _atomic(conn: sqlite3.Connection) -> Iterator[None]:
+    """Our own write: a savepoint inside the caller's transaction, else our own commit."""
+    if conn.in_transaction:
+        conn.execute("SAVEPOINT kb_obs")
+        try:
+            yield
+        except BaseException:
+            conn.execute("ROLLBACK TO kb_obs")
+            conn.execute("RELEASE kb_obs")
+            raise
+        conn.execute("RELEASE kb_obs")
+        return
+    try:
+        yield
+    except BaseException:
+        if conn.in_transaction:
+            conn.rollback()
+        raise
+    if conn.in_transaction:
+        conn.commit()
+
+
+def trace_row(trace: Trace, *, outcome: str | None = None) -> dict[str, object]:
+    """The ``traces`` row for ``trace``: scalar columns for Grafana plus the JSON body.
+
+    ``outcome`` overrides the column (``cancelled``, which the contract lacks).
+    """
     return {
         "id": trace.id,
         "created_at": _ts(trace.created_at),
         "kind": trace.kind,
-        "outcome": trace.outcome,
+        "outcome": outcome if outcome is not None else trace.outcome,
         "profile": trace.profile,
         "total_ms": trace.total_ms,
         "ttft_ms": trace.ttft_ms,
@@ -88,12 +147,12 @@ def trace_row(trace: Trace) -> dict[str, object]:
     }
 
 
-def write_trace(conn: sqlite3.Connection, trace: Trace) -> None:
-    """Insert or replace ``trace``'s row."""
-    row = trace_row(trace)
+def write_trace(conn: sqlite3.Connection, trace: Trace, *, outcome: str | None = None) -> None:
+    """Insert or replace ``trace``'s row (see the module notes on transactions)."""
+    row = trace_row(trace, outcome=outcome)
     columns = ", ".join(row)
     marks = ", ".join(f":{key}" for key in row)
-    with conn:
+    with _atomic(conn):
         conn.execute(f"INSERT OR REPLACE INTO traces ({columns}) VALUES ({marks})", row)
 
 
@@ -109,7 +168,7 @@ def purge_traces(
     if days < 1:
         raise ValueError(f"days must be >= 1, got {days!r}")
     cutoff = _ts((now or datetime.now(UTC)) - timedelta(days=days))
-    with conn:
+    with _atomic(conn):
         cursor = conn.execute(
             "DELETE FROM traces WHERE julianday(created_at) < julianday(?)", (cutoff,)
         )
@@ -197,8 +256,8 @@ def retrieval_seconds(trace: Trace) -> float | None:
     return sum(durations) / 1000 if durations else None
 
 
-def _count_errors(trace: Trace) -> None:
-    failing = [t for t in trace.stages if t.error]
+def _count_errors(trace: Trace, *, ignore: str | None = None) -> None:
+    failing = [t for t in trace.stages if t.error and t.error != ignore]
     for timing in failing:
         # an exception leaving a nested stage fails its parents too: count it once, innermost
         inner = any(
@@ -207,8 +266,8 @@ def _count_errors(trace: Trace) -> None:
         )
         if not inner:
             metrics.record_error(timing.stage, timing.error)
-    if trace.error and not failing:
-        metrics.record_error("request", trace.error)
+    if trace.error and not failing and _error_kind(trace.error) != ignore:
+        metrics.record_error("request", _error_kind(trace.error))
 
 
 def finish_trace(
@@ -217,51 +276,70 @@ def finish_trace(
     *,
     top_score_value: float | None = None,
     retention: bool = True,
+    cancelled: bool = False,
 ) -> None:
     """Complete ``trace``: metrics, the ``traces`` row (if ``conn``), spans, retention.
 
     ``top_score_value`` overrides the abstain score derived from ``trace.hits``.
+    ``cancelled`` records outcome ``cancelled`` (the body's ``outcome`` is null)
+    and doesn't count the cancellation itself as an error.
     """
     if trace.total_ms is None and trace._t0:
         trace.total_ms = round((time.perf_counter() - trace._t0) * 1000, 3)
+    outcome: str | None = None
+    if cancelled:
+        outcome = metrics.CANCELLED
+        trace.outcome = None
     if trace.kind == "question":
-        if trace.outcome is None:
-            trace.outcome = "error" if trace.error else "answered"
+        if outcome is None:
+            if trace.outcome is None:
+                trace.outcome = "error" if trace.error else "answered"
+            outcome = trace.outcome
         score = top_score_value if top_score_value is not None else top_score(trace)
         metrics.record_question(
-            trace.outcome,
+            outcome,
             ttft_s=trace.ttft_ms / 1000 if trace.ttft_ms is not None else None,
             answer_s=trace.total_ms / 1000 if trace.total_ms is not None else None,
             retrieval_s=retrieval_seconds(trace),
             top_score=score,
             context_tokens=trace.context_tokens if trace.outcome == "answered" else None,
         )
-    _count_errors(trace)
+    _count_errors(trace, ignore=_error_kind(trace.error) if cancelled and trace.error else None)
     if conn is not None:
         try:
-            write_trace(conn, trace)
+            write_trace(conn, trace, outcome=outcome)
             if retention:
                 _retention.maybe_run(conn)
         except sqlite3.Error:
+            metrics.record_error("request", "TraceWriteError")
             log.exception("could not write trace %s", trace.id)
-    otel.export_trace(trace)
+    otel.export_trace(trace, outcome=outcome)
 
 
 @contextmanager
 def observe(
     conn: sqlite3.Connection | None = None, *, trace: Trace | None = None, **fields
 ) -> Iterator[Trace]:
-    """Bind a trace for the block (see :func:`start_trace`) and finish it on exit."""
+    """Bind a trace for the block (see :func:`start_trace`) and finish it on exit.
+
+    An ``Exception`` ends the question as ``error``; any other ``BaseException``
+    (cancellation, a closed stream) as ``cancelled``. Both are re-raised.
+    """
+    cancelled = False
     with start_trace(trace, **fields) as bound:
         try:
             yield bound
         except Exception as exc:
-            bound.error = bound.error or type(exc).__name__
+            bound.error = bound.error or describe_error(exc)
             if bound.kind == "question":
                 bound.outcome = "error"
             raise
+        except BaseException as exc:
+            cancelled = True
+            bound.error = describe_error(exc)
+            raise
         finally:
             try:
-                finish_trace(bound, conn)
+                finish_trace(bound, conn, cancelled=cancelled)
             except Exception:  # pragma: no cover - never mask the request's own result
                 log.exception("could not finish trace %s", bound.id)
