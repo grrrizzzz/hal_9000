@@ -141,11 +141,14 @@ huggingface.co when `WITH_RERANK` isn't `none` or `WITH_DOCLING` is `1`. The fir
 10–20 minutes on a Pi 5; later builds reuse the cached dependency layers
 unless `pyproject.toml`, `uv.lock` or `web/package-lock.json` change.
 
-**Size.** The target is under 900 MB with `WITH_DOCLING=0 WITH_RERANK=none`.
-Measured in the build workspace on x86_64 with a stand-in base (below): 580 MB
-for `/app`, plus the base image (python:3.12-slim is about 120 MB unpacked).
-Record the arm64 sizes with `docker image ls hal9000/hal-kb` after building
-on the Pi (runbook §4.9).
+**Size.** The target is under 900 MB unpacked with
+`WITH_DOCLING=0 WITH_RERANK=none`. Measured in the build workspace on x86_64
+with the stand-in base (below): 672 MB unpacked, of which the stand-in base is
+92 MB and `/app` 580 MB; python:3.12-slim is about 120 MB unpacked, so expect
+about 700 MB. (The download is 226 MB compressed.) Measure the arm64 sizes on
+the Pi with `du` inside the image (runbook §4.9): with Docker's containerd
+image store, `docker image ls` adds the compressed layers to the unpacked
+size and reads higher.
 
 ### Backups
 

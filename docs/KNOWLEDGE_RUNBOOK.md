@@ -377,19 +377,23 @@ a fresh trace appears within 60 seconds, and the four alert rules.
 
 ### 4.9 Record the image size (Pi)
 
+The unpacked size, in MB (with Docker's containerd image store,
+`docker image ls` adds the compressed download to it, so it reads higher):
+
 ```sh
-docker image ls hal9000/hal-kb --format '{{.Tag}}  {{.Size}}'
+size() { docker run --rm --network none --entrypoint sh "$1" -c 'set -- $(du -sxm / 2>/dev/null); echo $1'; }
+echo "local: $(size hal9000/hal-kb:local) MB"
 ```
 
-Pass: `local` is under 900 MB. Send the number. For the build record, the size
-with each reranker (optional; about 10 minutes each, needs huggingface.co):
+Pass: under 900. Send the number. For the build record, the size with each
+reranker (optional; about 10 minutes each, needs huggingface.co):
 
 ```sh
 for r in minilm bge-base; do
   docker build -f deploy/docker/Dockerfile.kb --build-arg WITH_RERANK=$r \
     --build-arg APP_UID="$(id -u)" --build-arg APP_GID="$(id -g)" -t hal9000/hal-kb:$r .
+  echo "$r: $(size hal9000/hal-kb:$r) MB"
 done
-docker image ls hal9000/hal-kb --format '{{.Tag}}  {{.Size}}'
 ```
 
 These extra images don't change the running stack (it uses `:local`). Keep
