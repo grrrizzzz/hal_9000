@@ -1,0 +1,314 @@
+{
+  "uid": "kb-quality",
+  "title": "Knowledge: Quality",
+  "description": "Retrieval quality over time: post-ingest regression recall and the latest sweep (plan \u00a79.3).",
+  "tags": [
+    "hal9000",
+    "knowledge"
+  ],
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "5m",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {
+    "from": "now-90d",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "title": "Knowledge dashboards",
+      "type": "dashboards",
+      "tags": [
+        "knowledge"
+      ],
+      "asDropdown": true,
+      "includeVars": false,
+      "keepTime": true
+    }
+  ],
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Post-ingest regression recall @ 2k",
+      "description": "The latest regression run on the approved question set. Alert: down more than 5 points after an ingestion.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "kb_regression_recall",
+          "legendFormat": "recall @ 2k",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": false
+          },
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 1,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 16,
+        "h": 8
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Latest regression recall @ 2k",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "kb_regression_recall",
+          "legendFormat": "recall",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.7
+              },
+              {
+                "color": "green",
+                "value": 0.85
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "id": 2,
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "table",
+      "title": "Regression runs",
+      "description": "",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "kb-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "kb-sqlite"
+          },
+          "queryText": "SELECT r.at AS time, COALESCE(p.name, '') AS profile, r.trigger,\n       r.recall_2k AS recall, r.recall_low AS low, r.recall_high AS high,\n       r.n_questions AS questions\nFROM regression_runs AS r LEFT JOIN profiles AS p ON p.id = r.profile_id\nORDER BY r.at DESC, r.id DESC LIMIT 50",
+          "rawQueryText": "SELECT r.at AS time, COALESCE(p.name, '') AS profile, r.trigger,\n       r.recall_2k AS recall, r.recall_low AS low, r.recall_high AS high,\n       r.n_questions AS questions\nFROM regression_runs AS r LEFT JOIN profiles AS p ON p.id = r.profile_id\nORDER BY r.at DESC, r.id DESC LIMIT 50",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "^(recall|low|high)$"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "percentunit"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "transformations": [],
+      "id": 3,
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 24,
+        "h": 9
+      }
+    },
+    {
+      "type": "table",
+      "title": "Latest sweep metrics by profile",
+      "description": "The latest finished evaluation run per profile (plan \u00a78). Metrics keyed by a budget read name@tokens.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "kb_eval_metric",
+          "legendFormat": "",
+          "instant": true,
+          "range": false,
+          "format": "table"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "groupingToMatrix",
+          "options": {
+            "columnField": "metric",
+            "rowField": "profile",
+            "valueField": "Value"
+          }
+        }
+      ],
+      "id": 4,
+      "gridPos": {
+        "x": 0,
+        "y": 17,
+        "w": 24,
+        "h": 10
+      }
+    },
+    {
+      "type": "table",
+      "title": "Evaluation runs",
+      "description": "",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "kb-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "kb-sqlite"
+          },
+          "queryText": "SELECT started_at AS time, id, stage, split, host,\n       ROUND(cost_usd, 4) AS cost_usd, finished_at\nFROM eval_runs\nORDER BY started_at DESC LIMIT 50",
+          "rawQueryText": "SELECT started_at AS time, id, stage, split, host,\n       ROUND(cost_usd, 4) AS cost_usd, finished_at\nFROM eval_runs\nORDER BY started_at DESC LIMIT 50",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cost_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "transformations": [],
+      "id": 5,
+      "gridPos": {
+        "x": 0,
+        "y": 27,
+        "w": 24,
+        "h": 9
+      }
+    }
+  ]
+}

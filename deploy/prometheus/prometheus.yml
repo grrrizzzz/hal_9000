@@ -1,0 +1,16 @@
+# Prometheus for the house knowledge base (plan §9, §15). Draft: KWP11 wires it
+# into deploy/docker/compose.knowledge.yaml and sets the 90-day retention with
+#   --storage.tsdb.retention.time=90d
+global:
+  scrape_interval: 30s
+  scrape_timeout: 10s
+  evaluation_interval: 30s
+
+scrape_configs:
+  # hal-kb serves every kb_* metric (and process metrics) at /metrics, including
+  # the gauges it reads from knowledge.db at scrape time.
+  - job_name: hal-kb
+    metrics_path: /metrics
+    scheme: http
+    static_configs:
+      - targets: ["hal-kb:8910"]

@@ -1,0 +1,26 @@
+# Optional: send the knowledge alerts to Telegram through HAL's existing bot
+# (plan §9.3). Off by default. To turn it on, mount this file into
+# /etc/grafana/provisioning/alerting/ and pass TELEGRAM_BOT_TOKEN and
+# TELEGRAM_CHAT_ID from .env into the grafana container's environment; Grafana
+# substitutes ${...} from its environment when it reads provisioning files.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: hal-telegram
+    receivers:
+      - uid: kb-telegram
+        type: telegram
+        disableResolveMessage: false
+        settings:
+          bottoken: ${TELEGRAM_BOT_TOKEN}
+          chatid: ${TELEGRAM_CHAT_ID}
+          message: '{{ template "default.message" . }}'
+
+policies:
+  - orgId: 1
+    receiver: hal-telegram
+    group_by: ["alertname"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 12h

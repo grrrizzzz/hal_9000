@@ -1,0 +1,1168 @@
+{
+  "uid": "kb-live",
+  "title": "Knowledge: Live",
+  "description": "Questions, latency, cost and quality signals for the house knowledge base (plan \u00a79.3).",
+  "tags": [
+    "hal9000",
+    "knowledge"
+  ],
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "version": 1,
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "type": "textbox",
+        "name": "kb_url",
+        "label": "hal-kb URL",
+        "description": "Base URL of the knowledge web app, for the Query Inspector links.",
+        "query": "http://localhost:8910",
+        "current": {
+          "text": "http://localhost:8910",
+          "value": "http://localhost:8910"
+        },
+        "hide": 0
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "title": "Knowledge dashboards",
+      "type": "dashboards",
+      "tags": [
+        "knowledge"
+      ],
+      "asDropdown": true,
+      "includeVars": false,
+      "keepTime": true
+    }
+  ],
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Retrieval latency p50 by stage",
+      "description": "Per-stage quantiles, stacked: the query embedding plus local retrieval (vector, bm25, fuse, rerank, select).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le, stage) (rate(kb_stage_seconds_bucket{stage=~\"embed_query|vector|bm25|fuse|rerank|select\"}[$__rate_interval])))",
+          "legendFormat": "{{stage}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 1,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Retrieval latency p95 by stage",
+      "description": "Per-stage quantiles, stacked: the query embedding plus local retrieval (vector, bm25, fuse, rerank, select).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le, stage) (rate(kb_stage_seconds_bucket{stage=~\"embed_query|vector|bm25|fuse|rerank|select\"}[$__rate_interval])))",
+          "legendFormat": "{{stage}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 2,
+      "gridPos": {
+        "x": 8,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Retrieval latency p99 by stage",
+      "description": "Per-stage quantiles, stacked: the query embedding plus local retrieval (vector, bm25, fuse, rerank, select).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "histogram_quantile(0.99, sum by (le, stage) (rate(kb_stage_seconds_bucket{stage=~\"embed_query|vector|bm25|fuse|rerank|select\"}[$__rate_interval])))",
+          "legendFormat": "{{stage}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 3,
+      "gridPos": {
+        "x": 16,
+        "y": 0,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "End-to-end latency and time to first token",
+      "description": "Alert: answer p95 over 15 s for 30 minutes. The local retrieval target is p95 <= 300 ms.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(kb_answer_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "answer p50",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kb_answer_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "answer p95",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "C",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(kb_ttft_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "ttft p50",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "D",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kb_ttft_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "ttft p95",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "E",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kb_retrieval_seconds_bucket[$__rate_interval])))",
+          "legendFormat": "local retrieval p95",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 4,
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Questions per hour by outcome",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "sum by (outcome) (increase(kb_questions_total[1h]))",
+          "legendFormat": "{{outcome}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 5,
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Error rate",
+      "description": "Alert: over 10% for 15 minutes.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "sum(rate(kb_questions_total{outcome=\"error\"}[$__rate_interval])) / sum(rate(kb_questions_total[$__rate_interval]))",
+          "legendFormat": "questions ending in error",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": false
+          },
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 6,
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Errors by stage and kind",
+      "description": "Includes handled failures, e.g. an embedding call that fell back to BM25-only.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "sum by (stage, kind) (increase(kb_errors_total[1h]))",
+          "legendFormat": "{{stage}} {{kind}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 7,
+      "gridPos": {
+        "x": 8,
+        "y": 16,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Abstain rate",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "sum(rate(kb_questions_total{outcome=\"abstained\"}[$__rate_interval])) / sum(rate(kb_questions_total[$__rate_interval]))",
+          "legendFormat": "abstained",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": false
+          },
+          "min": 0,
+          "max": 1
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 8,
+      "gridPos": {
+        "x": 16,
+        "y": 16,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Cost per question (hourly average)",
+      "description": "From the traces table: the metered spend recorded on each question's trace.",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "kb-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "kb-sqlite"
+          },
+          "queryText": "SELECT (CAST(strftime('%s', created_at) AS INTEGER) / 3600) * 3600 AS time,\n       AVG(cost_usd) AS cost_per_question\nFROM traces\nWHERE kind = 'question' AND julianday(created_at) BETWEEN julianday($__from / 1000.0, 'unixepoch') AND julianday($__to / 1000.0, 'unixepoch')\nGROUP BY 1 ORDER BY 1",
+          "rawQueryText": "SELECT (CAST(strftime('%s', created_at) AS INTEGER) / 3600) * 3600 AS time,\n       AVG(cost_usd) AS cost_per_question\nFROM traces\nWHERE kind = 'question' AND julianday(created_at) BETWEEN julianday($__from / 1000.0, 'unixepoch') AND julianday($__to / 1000.0, 'unixepoch')\nGROUP BY 1 ORDER BY 1",
+          "queryType": "time series",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 9,
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "gauge",
+      "title": "Month-to-date spend vs cap",
+      "description": "Agent 'knowledge' only (evaluation is capped separately). Over 100% the chat is retrieval-only. Alert: over 80%.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "kb_month_spend_usd / kb_month_cap_usd",
+          "legendFormat": "of cap",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "id": 10,
+      "gridPos": {
+        "x": 8,
+        "y": 24,
+        "w": 4,
+        "h": 8
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Spend and cap (USD)",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "kb_month_spend_usd",
+          "legendFormat": "spent",
+          "instant": true,
+          "range": false
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "kb_month_cap_usd",
+          "legendFormat": "cap",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "id": 11,
+      "gridPos": {
+        "x": 12,
+        "y": 24,
+        "w": 4,
+        "h": 8
+      }
+    },
+    {
+      "type": "heatmap",
+      "title": "Top-score distribution",
+      "description": "The abstain score per question (top dense cosine, or the cross-encoder score when reranking). A drift down means more questions without a good answer.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "sum by (le) (increase(kb_top_score_bucket[$__rate_interval]))",
+          "legendFormat": "{{le}}",
+          "instant": false,
+          "range": true,
+          "format": "heatmap"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      },
+      "options": {
+        "calculate": false,
+        "yAxis": {
+          "axisPlacement": "left"
+        },
+        "color": {
+          "mode": "scheme",
+          "scheme": "Blues",
+          "steps": 64
+        },
+        "cellGap": 1,
+        "tooltip": {
+          "show": true,
+          "yHistogram": true
+        }
+      },
+      "id": 12,
+      "gridPos": {
+        "x": 16,
+        "y": 24,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Grounding failures",
+      "description": "Answers shown with the 'figures not verified' badge, per hour.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "sum by (kind) (increase(kb_grounding_failures_total[1h]))",
+          "legendFormat": "{{kind}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 13,
+      "gridPos": {
+        "x": 0,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Feedback: thumbs up (7 days)",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "sum(increase(kb_feedback_total{rating=\"up\"}[7d])) / sum(increase(kb_feedback_total[7d]))",
+          "legendFormat": "up",
+          "instant": true,
+          "range": false
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.6
+              },
+              {
+                "color": "green",
+                "value": 0.8
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area",
+        "textMode": "auto"
+      },
+      "id": 14,
+      "gridPos": {
+        "x": 8,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tokens per hour by model and purpose",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "sum by (model, purpose) (increase(kb_tokens_total[1h]))",
+          "legendFormat": "{{model}} {{purpose}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 15,
+      "gridPos": {
+        "x": 16,
+        "y": 32,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Spend per day by purpose",
+      "description": "Includes ingestion embeddings and segmentation, not only questions.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "sum by (purpose) (increase(kb_cost_usd_total[1d]))",
+          "legendFormat": "{{purpose}}",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            },
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 16,
+      "gridPos": {
+        "x": 0,
+        "y": 40,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Context tokens per answered question",
+      "description": "",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "kb-prometheus"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(kb_context_tokens_bucket[$__rate_interval])))",
+          "legendFormat": "p50",
+          "instant": false,
+          "range": true
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "kb-prometheus"
+          },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(kb_context_tokens_bucket[$__rate_interval])))",
+          "legendFormat": "p95",
+          "instant": false,
+          "range": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none",
+              "group": "A"
+            },
+            "spanNulls": false
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "id": 17,
+      "gridPos": {
+        "x": 8,
+        "y": 40,
+        "w": 8,
+        "h": 8
+      }
+    },
+    {
+      "type": "table",
+      "title": "Latest 50 traces",
+      "description": "No question text. Click an ID for the Query Inspector (set the kb_url variable to where hal-kb is reachable).",
+      "datasource": {
+        "type": "frser-sqlite-datasource",
+        "uid": "kb-sqlite"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "frser-sqlite-datasource",
+            "uid": "kb-sqlite"
+          },
+          "queryText": "SELECT created_at AS time, outcome, profile,\n       ROUND(total_ms) AS latency_ms, ROUND(ttft_ms) AS ttft_ms,\n       ROUND(cost_usd, 5) AS cost_usd, id\nFROM traces\nWHERE kind = 'question'\nORDER BY created_at DESC LIMIT 50",
+          "rawQueryText": "SELECT created_at AS time, outcome, profile,\n       ROUND(total_ms) AS latency_ms, ROUND(ttft_ms) AS ttft_ms,\n       ROUND(cost_usd, 5) AS cost_usd, id\nFROM traces\nWHERE kind = 'question'\nORDER BY created_at DESC LIMIT 50",
+          "queryType": "table",
+          "timeColumns": [
+            "time"
+          ]
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "id"
+            },
+            "properties": [
+              {
+                "id": "links",
+                "value": [
+                  {
+                    "title": "Open in the Query Inspector",
+                    "url": "${kb_url}/traces/${__value.raw}",
+                    "targetBlank": true
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "cost_usd"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "currencyUSD"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "latency_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "ttft_ms"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "ms"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "transformations": [],
+      "id": 18,
+      "gridPos": {
+        "x": 0,
+        "y": 48,
+        "w": 24,
+        "h": 12
+      }
+    }
+  ]
+}
