@@ -212,10 +212,14 @@ class _Page:
         self.y -= size + 8
 
 
-def _inspection_frame(canvas, number: int) -> None:
+def _inspection_header(canvas) -> None:
     canvas.setFont(BODY_FONT, 7)
     canvas.drawString(LEFT, 772, ENVELOPE_LINE)
     canvas.drawString(LEFT, 760, INSPECTOR_LINE)
+
+
+def _inspection_footer(canvas, number: int) -> None:
+    canvas.setFont(BODY_FONT, 7)
     canvas.drawString(LEFT, 40, ADDRESS)
     canvas.drawRightString(RIGHT, 28, f"Page {number} of {INSPECTION_PAGES}")
 
@@ -257,7 +261,7 @@ def draw_inspection(canvas) -> None:
             _photo_page(canvas)
             canvas.showPage()
             continue
-        _inspection_frame(canvas, number)
+        _inspection_header(canvas)
         page = _Page(canvas)
         if number == 1:
             page.line("HOME INSPECTION REPORT", BOLD_FONT, 20, 30)
@@ -303,6 +307,7 @@ def draw_inspection(canvas) -> None:
             )
             page.gap()
             page.line("Jordan Avery Reyes, Coastline Home Inspections")
+        _inspection_footer(canvas, number)
         canvas.showPage()
 
 
