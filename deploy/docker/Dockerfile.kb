@@ -14,11 +14,14 @@
 #
 # Build arguments:
 #   WITH_DOCLING=0|1               add the knowledge-docling group (PyTorch: large)
+#                                  and its layout and table models, downloaded
+#                                  from Hugging Face at build time
 #   WITH_RERANK=none|minilm|bge-base
 #                                  add knowledge-rerank and download that ONNX
 #                                  cross-encoder from Hugging Face at build time
-#                                  (the Pi must reach huggingface.co while building;
-#                                  at run time nothing is downloaded)
+#                                  (for either, the Pi must reach huggingface.co
+#                                  while building; at run time nothing is
+#                                  downloaded)
 #   APP_UID / APP_GID=1000         the user the service runs as; match the owner of
 #                                  ./data on the Pi (`id -u`, `id -g`)
 #   BASE_IMAGE=python:3.12-slim    the Python base (a stand-in for offline tests:
@@ -70,13 +73,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_NO_CACHE=1 \
     UV_PYTHON_DOWNLOADS=never \
     UV_PROJECT_ENVIRONMENT=/app/.venv \
-    FASTEMBED_CACHE_PATH=/app/models/fastembed \
+    FASTEMBED_CACHE_PATH=/opt/models/fastembed \
+    DOCLING_ARTIFACTS_PATH=/opt/models/docling \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_ROOT_USER_ACTION=ignore
+# Docling's models need two system libraries (here for the build-time check,
+# and again in the runtime stage). Unpinned: Debian versions follow the base.
+# hadolint ignore=DL3008
 RUN case "$WITH_DOCLING" in 0|1) ;; *) echo "WITH_DOCLING must be 0 or 1" >&2; exit 1;; esac \
  && case "$WITH_RERANK" in none|minilm|bge-base) ;; \
       *) echo "WITH_RERANK must be none, minilm or bge-base" >&2; exit 1;; esac \
+ && if [ "$WITH_DOCLING" = 1 ]; then \
+      apt-get update \
+      && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi \
  && python -m pip install "uv==${UV_VERSION}"
 WORKDIR /app
 
@@ -110,11 +122,19 @@ RUN find /app/.venv/lib -type d -name tests -prune -exec rm -rf {} + \
  && TIKTOKEN_CACHE_DIR=/app/vendor/tiktoken /app/.venv/bin/python -c \
       "import hal9000.knowledge.api.app, hal9000.knowledge.cli.serve, hal9000.knowledge.cli.ask; from hal9000.knowledge.tokens import encoding; encoding('cl100k_base'); encoding('o200k_base')"
 
-# The chosen reranker, downloaded now and exercised once, through the same code
-# path the service uses (OnnxCrossEncoder -> fastembed -> FASTEMBED_CACHE_PATH).
-RUN mkdir -p "$FASTEMBED_CACHE_PATH" \
+# Models are downloaded now, never at run time (the runtime sets
+# HF_HUB_OFFLINE=1), and each is exercised once, offline, through the code
+# path the service uses:
+# - the chosen reranker: OnnxCrossEncoder -> fastembed -> FASTEMBED_CACHE_PATH;
+# - Docling's layout and table models -> DOCLING_ARTIFACTS_PATH, checked by
+#   converting a blank page with hal9000's DoclingParser settings.
+RUN mkdir -p "$FASTEMBED_CACHE_PATH" "$DOCLING_ARTIFACTS_PATH" \
  && if [ "$WITH_RERANK" != none ]; then \
       /app/.venv/bin/python -c "import sys; from hal9000.knowledge.retrieve.rerank import OnnxCrossEncoder; print(OnnxCrossEncoder(sys.argv[1]).score('warm-up', ['a passage']))" "$WITH_RERANK"; \
+    fi \
+ && if [ "$WITH_DOCLING" = 1 ]; then \
+      /app/.venv/bin/docling-tools models download -o "$DOCLING_ARTIFACTS_PATH" layout tableformer \
+      && HF_HUB_OFFLINE=1 /app/.venv/bin/python -c "import pypdfium2 as pdfium; d = pdfium.PdfDocument.new(); d.new_page(200, 200); d.save('/tmp/blank.pdf'); from hal9000.knowledge.ingest.parsers.docling import DoclingParser; DoclingParser()._get_converter().convert('/tmp/blank.pdf'); print('docling models load offline')"; \
     fi
 
 # ------------------------------------------------------------------- runtime
@@ -143,6 +163,9 @@ RUN if [ "$WITH_DOCLING" = 1 ]; then \
 
 WORKDIR /app
 COPY --from=build /app /app
+# the reranker and Docling models (empty without them), owned by the
+# service's user in case a model loader wants to write beside them
+COPY --from=build --chown=${APP_UID}:${APP_GID} /opt/models /opt/models
 COPY --from=web /web/dist /app/web/dist
 # /app/data is the only writable place: the bind mount on the Pi (./data), or
 # an anonymous volume when run without one.
@@ -159,7 +182,8 @@ ENV PATH=/app/.venv/bin:$PATH \
     KB_DATA_DIR=/app/data \
     TIKTOKEN_CACHE_DIR=/app/vendor/tiktoken \
     LITELLM_LOCAL_MODEL_COST_MAP=True \
-    FASTEMBED_CACHE_PATH=/app/models/fastembed \
+    FASTEMBED_CACHE_PATH=/opt/models/fastembed \
+    DOCLING_ARTIFACTS_PATH=/opt/models/docling \
     HF_HUB_OFFLINE=1 \
     HF_HUB_DISABLE_TELEMETRY=1
 

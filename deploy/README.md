@@ -65,7 +65,7 @@ repository's `data/` folder.
 | `GRAFANA_ADMIN_PASSWORD` | yes | Grafana's `admin` password, set on Grafana's first start (it is kept in the `grafana-data` volume after that) |
 | `KB_UID`, `KB_GID` | yes on the Pi | the owner of `data/`: the output of `id -u` and `id -g` (default 1000) |
 | `KB_PORT`, `PROMETHEUS_PORT`, `GRAFANA_PORT` | if taken | host ports (8910, 9090, 3001) |
-| `KB_WITH_DOCLING` | no | `1` builds Docling into the image (PyTorch: gigabytes; only if the evaluation chose it) |
+| `KB_WITH_DOCLING` | no | `1` builds Docling and its layout and table models into the image (PyTorch: gigabytes; only if the evaluation chose it) |
 | `KB_WITH_RERANK` | no | `none`, `minilm` or `bge-base`: the cross-encoder chosen at G-K2, downloaded at build time |
 | `KB_MONTHLY_CAP_USD`, `KB_EVAL_CAP_USD`, `KB_CHAT_TIER`, ... | no | as on the Mac |
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | no | only for Grafana's optional Telegram alerts |
@@ -113,7 +113,9 @@ tests out of the build context):
    third-party test suites, then fails the build if sqlite-vec can't run its
    cosine KNN (`scripts/kb_sqlite_vec_check.py`, gate G-K0b), if the vendored
    `tiktoken` encodings are missing, or if the service doesn't import. With a
-   reranker it downloads the model from Hugging Face and scores one pair.
+   reranker it downloads the model from Hugging Face and scores one pair; with
+   Docling it downloads the layout and table models and converts a blank page
+   offline. Models live in `/opt/models`.
 3. **runtime**: `python:3.12-slim` with `/app` (code, venv, `vendor/tiktoken`,
    `web/dist`), running as the non-root user `hal` (`APP_UID`/`APP_GID`, from
    `KB_UID`/`KB_GID`). `/app/data` is its only writable place. The
@@ -122,7 +124,8 @@ tests out of the build context):
 
 At run time it downloads nothing: the encodings are baked in,
 `LITELLM_LOCAL_MODEL_COST_MAP=True` uses LiteLLM's bundled price map, and
-`HF_HUB_OFFLINE=1` keeps the reranker from looking for updates. Only OpenAI is
+`HF_HUB_OFFLINE=1` keeps the reranker and Docling from looking for models
+online. Only OpenAI is
 called.
 
 | Build argument | Values | Default |
@@ -134,7 +137,7 @@ called.
 | `SKIP_WEB_BUILD` | `0`, `1` | `0` (1 is for offline tests only; see below) |
 
 Building on the Pi needs Docker Hub, PyPI and the npm registry, and
-huggingface.co when `WITH_RERANK` isn't `none`. The first build takes
+huggingface.co when `WITH_RERANK` isn't `none` or `WITH_DOCLING` is `1`. The first build takes
 10–20 minutes on a Pi 5; later builds reuse the cached dependency layers
 unless `pyproject.toml`, `uv.lock` or `web/package-lock.json` change.
 

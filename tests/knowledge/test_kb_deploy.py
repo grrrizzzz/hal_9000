@@ -293,8 +293,16 @@ def test_the_vendored_tiktoken_encodings_are_baked_in(dockerfile, runtime_stage)
 
 def test_nothing_is_downloaded_at_run_time(runtime_stage):
     env = " ".join(rest for keyword, rest in runtime_stage if keyword == "ENV")
-    for setting in ("LITELLM_LOCAL_MODEL_COST_MAP=True", "HF_HUB_OFFLINE=1"):
+    for setting in (
+        "LITELLM_LOCAL_MODEL_COST_MAP=True",
+        "HF_HUB_OFFLINE=1",
+        # the models downloaded at build time are where the loaders look
+        "FASTEMBED_CACHE_PATH=/opt/models/fastembed",
+        "DOCLING_ARTIFACTS_PATH=/opt/models/docling",
+    ):
         assert setting in env
+    copies = [rest for keyword, rest in runtime_stage if keyword == "COPY"]
+    assert any(c.endswith("/opt/models /opt/models") for c in copies)
 
 
 def test_the_ui_build_is_copied_into_the_runtime(runtime_stage):

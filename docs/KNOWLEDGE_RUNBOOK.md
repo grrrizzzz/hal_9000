@@ -513,7 +513,7 @@ $C exec hal-kb hal9000 kb eval regression         # recall on the approved quest
 | Compose: `env file .../.env not found` | Run from the repository root; `.env` must be there (§4.3). |
 | `bind: address already in use` | Another program has the port. Set `KB_PORT`, `PROMETHEUS_PORT` or `GRAFANA_PORT` in `.env`, then `$C up -d`. |
 | The build fails at `kb_sqlite_vec_check.py` | sqlite-vec doesn't work in this image on this Pi (the G-K0b risk). Stop and send the orchestrator the output. |
-| The build fails downloading the reranker | The Pi can't reach huggingface.co. Build with `KB_WITH_RERANK=none`, or retry later. |
+| The build fails downloading the reranker or Docling's models | The Pi can't reach huggingface.co. Build with `KB_WITH_RERANK=none` / `KB_WITH_DOCLING=0`, or retry later. |
 | `hal-kb` keeps restarting, log says `KB_PASSCODE is not set` | Add it to `.env`, then `$C up -d`. |
 | `/health`: `"active_profile":null` | No profile serves the chat: §4.7 (for now) or §6 (for good). |
 | `/health`: `"retrieval_only":true` | The month's spend reached `KB_MONTHLY_CAP_USD`: the chat shows sources without writing answers. Raise the cap in `.env` and `$C up -d`, or wait for next month. |
