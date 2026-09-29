@@ -44,6 +44,16 @@ def fake_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(FAKE_ENV, "1")
 
 
+@pytest.fixture(autouse=True)
+def fresh_query_cache() -> Iterator[None]:
+    """Each test starts with an empty process-wide query-vector cache."""
+    from hal9000.knowledge.retrieve.retriever import DEFAULT_QUERY_CACHE
+
+    DEFAULT_QUERY_CACHE.clear()
+    yield
+    DEFAULT_QUERY_CACHE.clear()
+
+
 @pytest.fixture(scope="session")
 def template_db(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """The ingested corpus, built once per session (about a second)."""

@@ -6,17 +6,24 @@ Stages, each timed with the shared ``stage()`` under its plan §9.2 name:
 ``fuse`` → ``rerank`` (only when configured) → ``select`` → ``abstain``.
 
 - **Condense** runs only when there is history (the last ``history_turns``
-  turns). A failed or empty rewrite falls back to the question as asked, with a
-  warning.
+  turns), on the caller's condense tier (``KB_CONDENSE_TIER`` unless ``tier``
+  is given). A failed, empty or over-long rewrite falls back to the question as
+  asked, with a warning.
 - **Query embedding** goes through KWP3's timed ``embed_query`` (the
   persistent ``embed_cache``), with an in-process cache in front of it
-  (:class:`QueryVectorCache`, keyed by model, dimensions and text) so a repeated
-  question costs no database round trip. A cache hit is still timed as
-  ``embed_query``.
-- **Degraded mode** (plan §7.4): if the embedding call raises (provider down,
-  monthly cap reached), retrieval continues BM25-only and the result says
-  ``mode="bm25"``, ``degraded="embedding_unavailable"``. Configuration errors
-  (fake mode off, an unmetered paid model) are bugs and still raise.
+  (:class:`QueryVectorCache`, keyed by model, dimensions and text; one shared,
+  bounded default per process) so a repeated question costs no embedding call
+  and no database round trip. A cache hit is still timed as ``embed_query``.
+- **Degraded mode** (plan §7.4): if the embedding call fails (provider down,
+  timeout), retrieval continues BM25-only and the result says ``mode="bm25"``,
+  ``degraded="embedding_unavailable"``.
+- **Errors that propagate**: a spending cap
+  (:class:`~hal9000.cost.metering.BudgetExceeded` and its subclasses, such as
+  ``MonthlyCapExceeded``) is never swallowed by the embedding, condense or
+  transform steps: the chat turns it into its retrieval-only mode, and an
+  evaluation run stops instead of scoring BM25 results under a hybrid label.
+  Configuration errors (fake mode off, an unmetered paid model) are bugs and
+  raise too.
 - **Fusion**: ``hybrid`` fuses per ``fusion`` (RRF with ``rrf_k``, or weighted
   with ``alpha``); ``dense`` and ``bm25`` use one retriever.
 - **Rerank** re-scores the top ``top_k_each`` fused candidates with the
@@ -28,18 +35,25 @@ Stages, each timed with the shared ``stage()`` under its plan §9.2 name:
   score. The threshold is ``abstain_thresholds`` for (profile, reranker);
   ``abstained = score < threshold`` when both are known. With no query vector
   (mode ``bm25`` or degraded) there is no retrieval abstain, reranked or not.
+  **An empty selection always abstains** (``abstained=True``, score ``None``):
+  a filter that matches nothing, or a top item that alone exceeds the budget
+  (logged as a warning), leaves the prompt nothing to answer from.
 
 **Query transforms** (evaluation only, off by default): ``multi`` adds three
 rewrites; each query (the question and its rewrites) is retrieved as above and
 the ranked lists are fused by RRF across queries. The component scores and
 ranks recorded on each chunk are those of the question itself. ``hyde``
 embeds a hypothetical answer as the dense query (BM25 still uses the question),
-so the dense scores, and the abstain score, are cosines to that passage. The
+so the dense scores are cosines to that passage; the question itself is
+embedded too (cached), and the abstain score is the cosine between the
+*question* and the top selected chunk, so HyDE never inflates it. The
 transform's generate call is not a plan §7.1 stage and is not timed as one;
 its cost is metered by the injected ``generate``.
 
 The retriever never commits: the caller owns the connection. (The embedding
-service commits its own cache writes.)
+service commits its own cache writes.) A :class:`Retriever` holds the caller's
+connection, so it must not be shared across threads: build one per request
+(the shared query-vector cache makes that cheap).
 """
 
 from __future__ import annotations
@@ -56,7 +70,9 @@ from datetime import date
 import numpy as np
 
 from hal9000 import config as hal_config
+from hal9000.cost.metering import BudgetExceeded
 from hal9000.knowledge.config import ConfigMissing
+from hal9000.knowledge.config import settings as knowledge_settings
 from hal9000.knowledge.contracts import IndexProfile, RetrievalResult, RetrievedChunk, SearchFilters
 from hal9000.knowledge.index.embedding import EmbeddingService, UnmeteredCall
 from hal9000.knowledge.index.fusion import FusedHit, fuse
@@ -72,6 +88,7 @@ from hal9000.knowledge.storage import vec_table
 from hal9000.knowledge.tokens import encoding_for_model
 
 __all__ = [
+    "DEFAULT_QUERY_CACHE",
     "NoActiveProfile",
     "QueryVectorCache",
     "Retriever",
@@ -88,9 +105,12 @@ class NoActiveProfile(ConfigMissing):
 
 
 class QueryVectorCache:
-    """A small thread-safe LRU of query vectors, keyed by (model, dimensions, text)."""
+    """A bounded, thread-safe LRU of query vectors, keyed by (model, dimensions, text).
 
-    def __init__(self, size: int = 512) -> None:
+    Stored vectors are read-only copies, so no caller can change a cached vector.
+    """
+
+    def __init__(self, size: int = 1024) -> None:
         self.size = size
         self._items: OrderedDict[tuple[str, int, str], np.ndarray] = OrderedDict()
         self._lock = threading.Lock()
@@ -107,12 +127,28 @@ class QueryVectorCache:
             self.hits += 1
             return vector
 
-    def put(self, key: tuple[str, int, str], vector: np.ndarray) -> None:
+    def put(self, key: tuple[str, int, str], vector: np.ndarray) -> np.ndarray:
+        """Store a read-only copy of ``vector``; returns the stored array."""
+        frozen = np.array(vector, dtype=np.float32, copy=True)
+        frozen.setflags(write=False)
         with self._lock:
-            self._items[key] = vector
+            self._items[key] = frozen
             self._items.move_to_end(key)
             while len(self._items) > self.size:
                 self._items.popitem(last=False)
+        return frozen
+
+    def clear(self) -> None:
+        with self._lock:
+            self._items.clear()
+            self.hits = self.misses = 0
+
+    def __len__(self) -> int:
+        return len(self._items)
+
+
+#: The process-wide cache every :class:`Retriever` uses unless given its own.
+DEFAULT_QUERY_CACHE = QueryVectorCache()
 
 
 @dataclass
@@ -154,8 +190,11 @@ class Retriever:
         config: the default :class:`RetrievalConfig` (default: the class defaults).
         profile: an :class:`IndexProfile` or profile name; default the DB's
             active profile at call time.
-        tier: the tier ``generate`` is called with.
-        query_cache: the in-process query-vector cache (default: one per retriever).
+        tier: the tier ``generate`` is called with; default the configured
+            condense tier (``KB_CONDENSE_TIER``), read at call time.
+        query_cache: the query-vector cache (default: :data:`DEFAULT_QUERY_CACHE`).
+
+    Not thread-safe: it holds the caller's connection. Use one per request or thread.
     """
 
     def __init__(
@@ -167,7 +206,7 @@ class Retriever:
         reranker: Reranker | None = None,
         config: RetrievalConfig | None = None,
         profile: IndexProfile | str | None = None,
-        tier: str = "fast",
+        tier: str | None = None,
         query_cache: QueryVectorCache | None = None,
     ) -> None:
         self.conn = conn
@@ -177,7 +216,7 @@ class Retriever:
         self.config = config or RetrievalConfig()
         self.profile = profile
         self.tier = tier
-        self.query_cache = query_cache if query_cache is not None else QueryVectorCache()
+        self.query_cache = query_cache if query_cache is not None else DEFAULT_QUERY_CACHE
 
     # ------------------------------------------------------------ profile
     def resolve_profile(self) -> IndexProfile:
@@ -194,6 +233,9 @@ class Retriever:
             )
         return found
 
+    def _tier(self) -> str:
+        return self.tier or knowledge_settings().condense_tier
+
     # ------------------------------------------------------------ stages
     def _condense(self, question: str, history: Sequence[Turn], cfg: RetrievalConfig) -> str:
         turns = list(history)[-cfg.history_turns :] if cfg.history_turns else []
@@ -204,7 +246,9 @@ class Retriever:
                 log.warning("condense skipped: no generate function; using the question as asked")
                 return question
             try:
-                rewritten = transforms.condense(self.generate, question, turns, tier=self.tier)
+                rewritten = transforms.condense(self.generate, question, turns, tier=self._tier())
+            except BudgetExceeded:
+                raise
             except Exception as error:
                 log.warning("condense failed (%s); using the question as asked", error)
                 return question
@@ -221,12 +265,14 @@ class Retriever:
             raise ValueError(f"query transform {cfg.transform!r} needs a generate function")
         try:
             if cfg.transform == "multi":
-                rewrites = transforms.multi_query(self.generate, standalone, tier=self.tier)
+                rewrites = transforms.multi_query(self.generate, standalone, tier=self._tier())
                 queries += [_Query(text, text) for text in rewrites]
             else:  # hyde
-                passage = transforms.hyde(self.generate, standalone, tier=self.tier)
+                passage = transforms.hyde(self.generate, standalone, tier=self._tier())
                 if passage:
                     queries[0].embed_text = passage
+        except BudgetExceeded:
+            raise
         except Exception as error:
             log.warning("%s transform failed (%s); using the question alone", cfg.transform, error)
         return queries
@@ -237,16 +283,22 @@ class Retriever:
         if cached is not None:
             with stage(Stage.EMBED_QUERY):
                 return cached
-        vector = np.asarray(embed_query(self.embeddings, profile, text), dtype=np.float32)
-        self.query_cache.put(key, vector)
-        return vector
+        return self.query_cache.put(key, embed_query(self.embeddings, profile, text))
 
-    def _embed_all(self, profile: IndexProfile, queries: list[_Query]) -> bool:
-        """Embed every query; False (degraded) when the embedding call fails."""
+    def _embed_all(self, profile: IndexProfile, queries: list[_Query]) -> np.ndarray | None:
+        """Embed every query; returns the *question's* vector, or None (degraded) on failure.
+
+        With HyDE the first query embeds the hypothetical passage, so the question
+        is embedded as well: its vector is what the abstain score is measured with.
+        """
         try:
             for query in queries:
                 query.vector = self._embed(profile, query.embed_text)
-        except (hal_config.ConfigError, UnmeteredCall):
+            first = queries[0]
+            if first.embed_text == first.bm25_text:
+                return first.vector
+            return self._embed(profile, first.bm25_text)
+        except (hal_config.ConfigError, UnmeteredCall, BudgetExceeded):
             raise
         except Exception as error:
             from hal9000.knowledge.obs.metrics import record_error
@@ -255,8 +307,7 @@ class Retriever:
             record_error(Stage.EMBED_QUERY, error)
             for query in queries:
                 query.vector = None
-            return False
-        return True
+            return None
 
     def _search(
         self,
@@ -392,8 +443,11 @@ class Retriever:
         queries = self._queries(standalone, cfg)
         mode = cfg.mode
         degraded = None
-        if mode != "bm25" and not self._embed_all(profile, queries):
-            mode, degraded = "bm25", "embedding_unavailable"
+        question_vector = None
+        if mode != "bm25":
+            question_vector = self._embed_all(profile, queries)
+            if question_vector is None:
+                mode, degraded = "bm25", "embedding_unavailable"
         lists = [self._search(profile, q, mode, cfg, filters) for q in queries]
         fused = lists[0] if len(lists) == 1 else self._across(lists, cfg.rrf_k)
 
@@ -427,21 +481,29 @@ class Retriever:
                 for pid, row in self._rows(profile, sorted(parent_ids)).items()
             }
             chosen = select(candidates, cfg.budget_tokens, parents=parents)
+            if candidates and not chosen.items:
+                log.warning(
+                    "nothing selected: the top item alone exceeds the %d-token context budget",
+                    cfg.budget_tokens,
+                )
 
         with stage(Stage.ABSTAIN):
             score = None
-            primary = queries[0].vector
+            hyde = queries[0].vector is not question_vector
             # BM25 only (configured or degraded): no dense score, no retrieval abstain (§7.1)
-            if chosen.items and primary is not None:
+            if chosen.items and question_vector is not None:
                 top, source = chosen.items[0], chosen.sources[0]
                 if cfg.rerank != "none":
                     score = top.rerank_score
                 else:
-                    score = source.dense_score
-                    if score is None:  # it came from BM25 alone: its cosine, looked up
-                        score = self._cosine(profile, source.chunk_id, primary)
+                    score = None if hyde else source.dense_score
+                    if score is None:  # BM25-only hit, or HyDE: the question's cosine
+                        score = self._cosine(profile, source.chunk_id, question_vector)
             threshold = get_threshold(self.conn, profile.id, reranker_key(cfg.rerank))
-            abstained = score is not None and threshold is not None and score < threshold
+            if not chosen.items:
+                abstained = True  # nothing to answer from
+            else:
+                abstained = score is not None and threshold is not None and score < threshold
         return RetrievalResult(
             query=question,
             standalone_query=standalone,

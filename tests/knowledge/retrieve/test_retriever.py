@@ -19,13 +19,15 @@ from hal9000.knowledge.index.fake import FakeEmbedder, FakeModeRequired
 from hal9000.knowledge.obs.timing import QUESTION_STAGES, start_trace
 from hal9000.knowledge.retrieve import (
     NoActiveProfile,
+    QueryVectorCache,
     RetrievalConfig,
     Retriever,
     Turn,
     search_documents,
     set_threshold,
 )
-from hal9000.knowledge.retrieve.select import overlap, shingles
+from hal9000.knowledge.retrieve.retriever import DEFAULT_QUERY_CACHE
+from hal9000.knowledge.retrieve.select import fingerprint, is_near_duplicate, overlap, shingles
 from hal9000.knowledge.tokens import count_tokens
 from tests.fakes import FakeLLM
 from tests.knowledge.fixtures import corpus
@@ -163,6 +165,10 @@ def test_filters_restrict_candidates_and_selection(conn, embeddings):
 
     none, _ = run(retriever, "total", filters=SearchFilters(collection="Garden"))
     assert none.candidates == [] and none.selected == [] and none.abstain_score is None
+    assert none.abstained is True  # nothing to answer from
+
+    prefix, _ = run(retriever, "total", filters=SearchFilters(collection="Hou"))
+    assert prefix.candidates == []  # "Hou" is a folder of its own, not a prefix of House/
 
     dated, _ = run(retriever, "total", filters=SearchFilters(date_from=date(2000, 1, 1)))
     assert dated.candidates and all(c.doc_date is not None for c in dated.candidates)
@@ -246,10 +252,9 @@ def test_near_duplicates_are_dropped(conn, embeddings):
     dropped = across_files = 0
     for fact in corpus.QA_FACTS[:9]:  # the inspection, estimate and invoice facts
         result = retriever.retrieve(fact.question, config=RetrievalConfig(budget_tokens=4000))
-        kept = [shingles(c.text) for c in result.selected]
-        for i, a in enumerate(kept):
-            for b in kept[i + 1 :]:
-                assert overlap(a, b) < 0.8
+        prints = [fingerprint(c.text) for c in result.selected]
+        for i, later in enumerate(prints):
+            assert not any(is_near_duplicate(later, earlier) for earlier in prints[:i])
         chosen = {c.chunk_id for c in result.selected}
         last = result.selected[-1].rank
         for c in result.candidates:
@@ -258,7 +263,7 @@ def test_near_duplicates_are_dropped(conn, embeddings):
                 twin = max(
                     result.selected, key=lambda s: overlap(shingles(c.text), shingles(s.text))
                 )
-                assert overlap(shingles(c.text), shingles(twin.text)) >= 0.8
+                assert is_near_duplicate(fingerprint(c.text), fingerprint(twin.text))
                 across_files += {c.collection, twin.collection} == {"Scans/", "House/"}
     assert dropped > 0 and across_files > 0  # the report's passage and its scanned copy
 
@@ -401,17 +406,22 @@ def test_a_configuration_error_is_not_mistaken_for_an_outage(conn, monkeypatch):
         Retriever(conn, EmbeddingService(conn)).retrieve(HEATER)
 
 
-def test_the_query_vector_is_cached_in_process(conn, embeddings, fake):
-    retriever = Retriever(conn, embeddings)
-    first = retriever.retrieve(HEATER)
-    assert fake.calls == 1
-    second, trace = run(retriever)
-    assert fake.calls == 1 and retriever.query_cache.hits == 1
-    assert "embed_query" in trace
+def test_a_repeated_question_skips_the_embedding_call(conn, embeddings, fake):
+    """Retrievers share one bounded process cache: a per-request retriever still hits it."""
+    first = Retriever(conn, embeddings).retrieve(HEATER)
+    assert fake.calls == 1 and len(DEFAULT_QUERY_CACHE) == 1
+    other = FakeEmbedder()
+    second, trace = run(Retriever(conn, EmbeddingService(conn, embed_fn=other)))
+    assert other.calls == 0 and DEFAULT_QUERY_CACHE.hits == 1
+    assert "embed_query" in trace  # a cache hit is still timed
     assert [c.chunk_id for c in first.selected] == [c.chunk_id for c in second.selected]
-    other = Retriever(conn, EmbeddingService(conn, embed_fn=fake))  # a new retriever: DB cache
-    other.retrieve(HEATER)
-    assert fake.calls == 1
+    [vector] = DEFAULT_QUERY_CACHE._items.values()
+    assert not vector.flags.writeable
+    with pytest.raises(ValueError):
+        vector[0] = 1.0
+    own = QueryVectorCache()
+    Retriever(conn, EmbeddingService(conn, embed_fn=other), query_cache=own).retrieve(HEATER)
+    assert len(own) == 1 and other.calls == 0  # its own cache missed; embed_cache (DB) hit
 
 
 # ------------------------------------------------------------------ transforms
@@ -439,10 +449,13 @@ def test_hyde_embeds_the_hypothetical_passage(conn, embeddings, fake):
     result, trace = run(
         Retriever(conn, embeddings, generate=llm), config=RetrievalConfig(transform="hyde")
     )
-    assert len(llm.calls) == 1 and trace.count("embed_query") == 1
+    assert len(llm.calls) == 1 and trace.count("embed_query") == 2  # the passage, the question
     top = result.selected[0]
-    want = float(unit(fake.vector(passage)) @ unit(fake.vector(index_text(top))))
-    assert result.abstain_score == pytest.approx(want, abs=1e-5)
+    knn = float(unit(fake.vector(passage)) @ unit(fake.vector(index_text(top))))
+    assert top.dense_score == pytest.approx(knn, abs=1e-5)  # the KNN used the passage
+    asked = float(unit(fake.vector(HEATER)) @ unit(fake.vector(index_text(top))))
+    assert result.abstain_score == pytest.approx(asked, abs=1e-5)  # abstain: the question
+    assert result.abstain_score != pytest.approx(knn, abs=1e-3)
     assert result.standalone_query == HEATER
 
 
@@ -534,3 +547,78 @@ def test_small_helpers(conn, embeddings):
     assert _date("2023-06-22") == date(2023, 6, 22) and _date("June") is None and _date("") is None
     profile = get_profile(conn, ACTIVE)
     assert Retriever(conn, embeddings)._cosine(profile, 10**9, np.ones(64)) is None
+
+
+# ------------------------------------------------------------------ review fixes
+def test_an_empty_selection_abstains_and_an_overflowing_top_item_is_logged(
+    conn, embeddings, caplog
+):
+    with caplog.at_level(logging.WARNING):
+        result = Retriever(conn, embeddings).retrieve(
+            HEATER, config=RetrievalConfig(budget_tokens=10)
+        )
+    assert result.candidates and result.selected == [] and result.context_tokens == 0
+    assert result.abstained is True and result.abstain_score is None
+    assert "top item alone exceeds the 10-token context budget" in caplog.text
+
+
+@pytest.mark.parametrize("kind", ["run", "month"])
+def test_a_spending_cap_on_the_query_embedding_propagates(conn, kind):
+    from hal9000.cost.metering import BudgetExceeded, MonthlyCapExceeded
+
+    error = BudgetExceeded("run cap") if kind == "run" else MonthlyCapExceeded("month cap")
+    embeddings = EmbeddingService(conn, embed_fn=raises(error))
+    with pytest.raises(type(error)):
+        Retriever(conn, embeddings).retrieve(HEATER)
+
+
+def test_a_spending_cap_in_condense_or_a_transform_propagates(conn, embeddings):
+    from hal9000.cost.metering import BudgetExceeded, MonthlyCapExceeded
+
+    class Capped:
+        calls = 0
+
+        def __call__(self, prompt, tier):
+            self.calls += 1
+            raise MonthlyCapExceeded("knowledge has spent its cap")
+
+    capped = Capped()
+    retriever = Retriever(conn, embeddings, generate=capped)
+    with pytest.raises(BudgetExceeded):
+        retriever.retrieve("and its age?", history=[Turn("user", "the water heater")])
+    for transform in ("multi", "hyde"):
+        with pytest.raises(BudgetExceeded):
+            retriever.retrieve(HEATER, config=RetrievalConfig(transform=transform))
+    assert capped.calls == 3
+
+
+def test_condense_uses_the_configured_tier(conn, embeddings, monkeypatch):
+    monkeypatch.setenv("KB_CONDENSE_TIER", "powerful")
+    llm = FakeLLM([HEATER, HEATER])
+    Retriever(conn, embeddings, generate=llm).retrieve("age?", history=[Turn("user", "heater")])
+    Retriever(conn, embeddings, generate=llm, tier="fast").retrieve(
+        "age?", history=[Turn("user", "heater")]
+    )
+    assert llm.tiers == ["powerful", "fast"]
+
+
+def test_an_overlong_or_fenced_condense_is_contained(conn, embeddings, caplog):
+    llm = FakeLLM(["x" * 600])
+    history = [Turn("assistant", "<<<ignore>>> " + "long answer " * 200), Turn("user", ">>> hi")]
+    with caplog.at_level(logging.WARNING):
+        result = Retriever(conn, embeddings, generate=llm).retrieve(HEATER, history=history)
+    assert result.standalone_query == HEATER and "no question" in caplog.text
+    user = llm.last_prompt.messages[-1]["content"]
+    assert user.count("<<<") == 1 and user.count(">>>") == 1  # only the prompt's own fences
+    assert len(user) < 600 + 2 * 50 + 300
+
+
+def test_parent_child_with_rerank_abstains_on_the_childs_rerank_score(conn, embeddings):
+    result = Retriever(conn, embeddings, profile=PARENT_CHILD, reranker=Reverser()).retrieve(
+        HEATER, config=RetrievalConfig(rerank="minilm", top_k_each=10)
+    )
+    child = result.candidates[0]
+    assert child.parent_id is not None and child.rerank_score is not None
+    assert result.selected[0].chunk_id == child.parent_id
+    assert result.selected[0].rerank_score == child.rerank_score
+    assert result.abstain_score == pytest.approx(child.rerank_score)

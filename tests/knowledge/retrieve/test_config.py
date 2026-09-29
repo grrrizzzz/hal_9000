@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import math
+import platform
 import sys
 import time
 
 import pytest
 
-from hal9000.knowledge.config import ConfigMissing, KnowledgeFile
+from hal9000.knowledge.config import ConfigMissing, KnowledgeFile, settings
 from hal9000.knowledge.config import RetrievalConfig as YamlRetrieval
 from hal9000.knowledge.retrieve import (
     NoRerank,
@@ -209,3 +211,18 @@ def test_minilm_reranks_a_hand_made_set_and_records_latency():
     encoder.score(query, pairs)
     elapsed = (time.perf_counter() - started) * 1000
     print(f"MiniLM latency for 30 pairs: {elapsed:.0f} ms")
+    record = settings().data_dir / "knowledge" / "models" / "rerank_latency.json"  # git-ignored
+    record.parent.mkdir(parents=True, exist_ok=True)
+    record.write_text(
+        json.dumps({"model": encoder.model_name, "pairs": 30, "ms": round(elapsed, 1),
+                    "host": platform.node(), "at": time.strftime("%Y-%m-%dT%H:%M:%S")})
+        + "\n"
+    )  # fmt: skip
+
+
+def test_turn_text_is_sanitised_for_the_condense_prompt():
+    assert transforms.sanitize_turn("a <<< b >>> c") == "a b c"
+    long = transforms.sanitize_turn("word " * 500)
+    assert len(long) == transforms.MAX_TURN_CHARS and long.endswith("\u2026")
+    assert transforms.condense(FakeLLM(["q" * 501]), "q", []) == ""  # too long: fall back
+    assert transforms.condense(FakeLLM(["First line?\nSecond line?"]), "q", []) == "First line?"

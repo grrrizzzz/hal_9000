@@ -25,6 +25,8 @@ from hal9000.core.prompt import Prompt
 
 __all__ = [
     "CONDENSE_SYSTEM",
+    "MAX_REWRITE_CHARS",
+    "MAX_TURN_CHARS",
     "HYDE_SYSTEM",
     "MULTI_QUERY_SYSTEM",
     "N_REWRITES",
@@ -33,12 +35,17 @@ __all__ = [
     "condense",
     "hyde",
     "multi_query",
+    "sanitize_turn",
 ]
 
 Generate = Callable[[Prompt, str], str]
 
 #: Multi-query rewrites per question (plan §8.3 T10).
 N_REWRITES = 3
+#: Each history turn is cut to this many characters in the condense prompt.
+MAX_TURN_CHARS = 600
+#: A condensed question longer than this is not a question: fall back.
+MAX_REWRITE_CHARS = 500
 
 CONDENSE_SYSTEM = (
     "You rewrite a follow-up question about a household's documents (inspection reports, "
@@ -76,6 +83,16 @@ def clean_line(line: str) -> str:
     return text
 
 
+def sanitize_turn(text: str, limit: int = MAX_TURN_CHARS) -> str:
+    """One line of turn text for the condense prompt: no ``<<<``/``>>>`` fences, at most ``limit``.
+
+    The fences delimit the conversation in the prompt, so turn text can't close
+    them early; long turns (an assistant's full answer) are cut to their start.
+    """
+    text = " ".join(str(text).replace("<<<", " ").replace(">>>", " ").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "\u2026"
+
+
 def _user(text: str) -> dict[str, str]:
     return {"role": "user", "content": text}
 
@@ -85,17 +102,21 @@ def condense(
 ) -> str:
     """The standalone form of ``question`` given the ``history`` turns (``role``/``text``).
 
-    Returns ``""`` when the reply holds no question (the caller falls back).
+    Each turn is sanitised (:func:`sanitize_turn`). Only the reply's first line
+    with text is kept. Returns ``""`` when the reply holds no question or the
+    question is longer than :data:`MAX_REWRITE_CHARS` (the caller falls back).
     """
     lines = [
-        f"{getattr(t, 'role', 'user').capitalize()}: {getattr(t, 'text', '')}" for t in history
+        f"{getattr(t, 'role', 'user').capitalize()}: {sanitize_turn(getattr(t, 'text', ''))}"
+        for t in history
     ]
     conversation = "\n".join(lines)
     prompt = Prompt(
         messages=[
             {"role": "system", "content": CONDENSE_SYSTEM},
             _user(
-                f"Conversation:\n<<<\n{conversation}\n>>>\n\nFollow-up question: {question}\n\n"
+                f"Conversation:\n<<<\n{conversation}\n>>>\n\n"
+                f"Follow-up question: {sanitize_turn(question, MAX_REWRITE_CHARS)}\n\n"
                 "Standalone question:"
             ),
         ],
@@ -105,7 +126,7 @@ def condense(
     for line in reply.splitlines():
         text = clean_line(line)
         if text:
-            return text
+            return text if len(text) <= MAX_REWRITE_CHARS else ""
     return ""
 
 
