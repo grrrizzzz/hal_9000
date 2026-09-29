@@ -68,7 +68,7 @@ export function ChatPage() {
 
   const visibleTurns = turns.filter((t) => t.view === view);
   const busy = visibleTurns.some((t) => t.state.phase === "streaming");
-  const serverMessages = (conversationId !== null ? (convo.data?.messages ?? []) : []) as MessageOut[];
+  const serverMessages: MessageOut[] = conversationId !== null ? (convo.data?.messages ?? []) : [];
   // Turns streamed on this page stay mounted (they carry the grounding result and
   // feedback state); the same messages coming back from the server are skipped.
   const localIds = new Set(turns.map((t) => t.state.answer?.message_id).filter((id): id is number => typeof id === "number"));

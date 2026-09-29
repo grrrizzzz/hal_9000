@@ -518,6 +518,10 @@ export const handlers: HttpHandler[] = [
     authed(async ({ request }) => {
       // Rating is optional (e.g. only add_to_gold); one row per message, later posts update it.
       const body = (await request.json()) as FeedbackRequest;
+      // Like the server's FeedbackRequest validator.
+      if ((body.rating === undefined || body.rating === null) && !body.add_to_gold) {
+        return json({ detail: [{ msg: "Value error, a rating is required unless add_to_gold is set" }] }, { status: 422 });
+      }
       let row = db.feedback.find((f) => f.message_id === body.message_id);
       if (!row) {
         row = { id: nextId(), message_id: body.message_id, rating: null, comment: null, add_to_gold: false, gold_item_id: null };

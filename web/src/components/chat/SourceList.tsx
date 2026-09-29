@@ -34,8 +34,11 @@ export function SourceList({
                   <FileText className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
                   <span className="truncate">{c.title}</span>
                 </span>
-                <span className="mt-0.5 block text-xs text-muted-foreground">
-                  {[docTypeLabel(c.doc_type), c.vendor, formatDocDate(c.doc_date), `p. ${c.page}`].filter(Boolean).join(" · ")}
+                <span className="mt-0.5 block text-xs text-muted-foreground" data-testid="source-meta">
+                  {[docTypeLabel(c.doc_type), c.vendor].filter(Boolean).join(" · ")}
+                  {/* The date and the page never break inside ("Jun 22, 2023", "p. 2"); lines break before a "·". */}
+                  {c.doc_date ? <> <span className="whitespace-nowrap">· {formatDocDate(c.doc_date)}</span></> : null}{" "}
+                  <span className="whitespace-nowrap">· p. {c.page}</span>
                 </span>
                 {showSnippets && c.snippet ? (
                   <span className="mt-1.5 line-clamp-4 block rounded-md bg-mark/40 px-2 py-1 text-[13px] leading-relaxed">{c.snippet}</span>

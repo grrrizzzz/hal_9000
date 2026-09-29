@@ -51,7 +51,7 @@ export function JudgeCalibration() {
   const [viewer, setViewer] = useState<Citation | null>(null);
   const q = useQuery({ queryKey: ["judge-labels", run], queryFn: () => api.get("/api/eval/judge-labels", { query: run ? { run } : {} }) });
   const all = useQuery({ queryKey: ["judge-labels", ""], queryFn: () => api.get("/api/eval/judge-labels"), enabled: !!run });
-  const labels = useMemo(() => (q.data ?? []) as JudgeLabel[], [q.data]);
+  const labels = useMemo(() => q.data ?? [], [q.data]);
   const runs = [...new Set((run ? all.data : q.data)?.map((l) => l.eval_run_id).filter(Boolean) as string[])];
   const done = labels.filter((l) => l.human).length;
   const { agree, total } = agreement(labels);
