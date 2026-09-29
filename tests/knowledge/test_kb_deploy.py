@@ -173,21 +173,22 @@ def test_grafana_mounts_follow_the_kwp8_provisioning(services):
     assert provider["providers"][0]["options"]["path"] == "/etc/grafana/dashboards"
 
 
-def test_grafana_mounts_the_data_directory_read_write_for_the_wal(services):
+def test_grafana_mounts_the_data_directory_read_only(services):
     grafana = services["grafana"]
+    assert "../../data:/data:ro" in grafana["volumes"]
     source, mode = _mount_for(grafana, "/data")
-    assert _resolve(source) == REPO / "data"  # the directory, not knowledge.db alone
-    assert mode == "rw"  # a WAL reader must create and map knowledge.db-shm
+    assert _resolve(source) == REPO / "data"  # the directory, so -wal and -shm are visible
+    assert mode == "ro"  # it can never create -wal/-shm files hal-kb can't write
     datasources = yaml.safe_load((GRAFANA / "provisioning/datasources/knowledge.yaml").read_text())[
         "datasources"
     ]
     sqlite = next(d for d in datasources if d["type"] == "frser-sqlite-datasource")
     assert sqlite["jsonData"]["path"] == "/data/knowledge.db"
-    assert "mode=ro" in sqlite["jsonData"]["pathOptions"]  # Grafana still can't write it
+    assert "mode=ro" in sqlite["jsonData"]["pathOptions"]
 
 
-def test_grafana_shares_hal_kbs_user_for_the_sqlite_side_files(services):
-    assert services["grafana"]["user"] == services["hal-kb"]["user"]
+def test_grafana_runs_as_its_own_user(services):
+    assert "user" not in services["grafana"]  # the image's uid 472, not hal-kb's
     assert services["hal-kb"]["user"] == "${KB_UID:-1000}:${KB_GID:-1000}"
 
 

@@ -96,9 +96,6 @@ services:
     # 12.4.0; grafana/grafana carries the same OSS build.
     image: grafana/grafana:12.4.12
     container_name: hal-kb-grafana
-    # Same user as hal-kb, so the SQLite -shm/-wal files either container
-    # creates in ./data are usable by the other (see deploy/README.md).
-    user: "${KB_UID:-1000}:${KB_GID:-1000}"
     environment:
       GF_SECURITY_ADMIN_USER: admin
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env and pass --env-file .env}
@@ -112,10 +109,12 @@ services:
       - ../grafana/provisioning:/etc/grafana/provisioning:ro
       - ../grafana/dashboards:/etc/grafana/dashboards:ro
       # - ../grafana/optional/telegram.yaml:/etc/grafana/provisioning/alerting/telegram.yaml:ro
-      # The whole data/ directory, read-write: knowledge.db is in WAL mode and a
-      # reader must be able to create and map its -shm file. The datasource
-      # opens the database with mode=ro, so Grafana cannot change it.
-      - ../../data:/data
+      # The whole data/ directory (not knowledge.db alone, or the -wal and -shm
+      # files would be hidden), read-only, as Grafana's own user (uid 472): it
+      # can never create those files with the wrong owner. It reads the WAL
+      # while hal-kb holds the database open; while hal-kb is down, the SQLite
+      # panels show an error and the Prometheus panels still work.
+      - ../../data:/data:ro
       - grafana-data:/var/lib/grafana
     ports:
       - "${GRAFANA_PORT:-3001}:3001"
