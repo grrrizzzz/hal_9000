@@ -14,7 +14,7 @@ export function DialogContent({
   description,
   size = "md",
   ...props
-}: React.ComponentProps<typeof D.Content> & {
+}: Omit<React.ComponentProps<typeof D.Content>, "title"> & {
   title: React.ReactNode;
   description?: React.ReactNode;
   size?: "md" | "lg" | "full";

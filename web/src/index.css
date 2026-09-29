@@ -31,6 +31,14 @@
   --mark-strong: oklch(0.82 0.16 90 / 0.85);
   --shadow: 0 1px 2px oklch(0.2 0.01 60 / 0.06), 0 1px 1px oklch(0.2 0.01 60 / 0.03);
   --shadow-lg: 0 12px 32px -8px oklch(0.2 0.01 60 / 0.18), 0 2px 6px oklch(0.2 0.01 60 / 0.06);
+  /* Chart palette: the dataviz reference instance (validated order, never cycled). */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --chart-grid: #e1e0d9;
+  --chart-axis: #c3c2b7;
+  --chart-muted: #898781;
   color-scheme: light;
 }
 
@@ -60,6 +68,13 @@
     --mark-strong: oklch(0.78 0.15 90 / 0.7);
     --shadow: 0 1px 2px oklch(0 0 0 / 0.3);
     --shadow-lg: 0 16px 40px -8px oklch(0 0 0 / 0.55), 0 2px 6px oklch(0 0 0 / 0.3);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --chart-grid: #2c2c2a;
+    --chart-axis: #383835;
+    --chart-muted: #898781;
     color-scheme: dark;
   }
 }
@@ -92,6 +107,10 @@
   --shadow-card: var(--shadow);
   --shadow-pop: var(--shadow-lg);
   --radius-card: 0.875rem;
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-series-3: var(--series-3);
+  --color-series-4: var(--series-4);
 }
 
 @layer base {
