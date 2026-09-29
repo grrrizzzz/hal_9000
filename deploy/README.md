@@ -83,21 +83,20 @@ environment). After changing `KB_WITH_*` or `KB_UID`, run `$C up -d --build`.
 |---|---|---|---|
 | `data/` | `hal-kb:/app/data` | read-write | `knowledge.db`, `knowledge/files/` (originals by hash), `knowledge/eval/`, `backups/`, `hal9000.db` (the shared cost ledger) |
 | `config/` | `hal-kb:/app/config` | read-write | `knowledge.yaml` etc. from the checkout: a `git pull` plus `$C up -d` applies it without a rebuild, and `kb eval choose` writes it at G-K2 |
-| `data/` | `grafana:/data` | read-write | the SQLite datasource opens `/data/knowledge.db` with `mode=ro` |
+| `data/` | `grafana:/data` | read-only | the SQLite datasource opens `/data/knowledge.db` with `mode=ro` |
 | `deploy/grafana/{grafana.ini,provisioning,dashboards}` | `grafana:/etc/grafana/...` | read-only | KWP8's provisioning |
 | `deploy/prometheus/prometheus.yml` | `prometheus:/etc/prometheus/prometheus.yml` | read-only | scrape config |
 | volumes `prometheus-data`, `grafana-data` | | | the time series and Grafana's own database |
 
-**Why Grafana mounts `data/` read-write and runs as `hal-kb`'s user.**
-`knowledge.db` is in WAL mode. A reader has to be able to create and map
-`knowledge.db-shm`, which a read-only mount prevents whenever `hal-kb` isn't
-holding the file open, and it mounts the directory rather than the single
-file so the `-wal` and `-shm` files are visible at all. Grafana normally runs
-as uid 472; if it created those two files while `hal-kb` was stopped, `hal-kb`
-(a different user) could not write its own database afterwards. So both
-containers run as `KB_UID:KB_GID`, the owner of `data/`: whichever creates the
-side files, the other can use them. The datasource's `mode=ro` (and the
-plugin's `query_only`) still stops Grafana from changing anything.
+**Grafana and `knowledge.db`.** Grafana mounts the whole `data/` directory,
+not `knowledge.db` alone, so SQLite's `-wal` and `-shm` files next to it are
+visible and recent rows aren't missed. The mount is read-only and Grafana runs
+as its own user (uid 472), so it can never create those side files with an
+owner `hal-kb` can't write. It reads the database while `hal-kb` holds it open
+(the service always does). **While `hal-kb` is stopped, Grafana's SQLite
+panels show an error**; the Prometheus panels keep working, and the SQLite
+ones come back when `hal-kb` starts. uid 472 only needs to read: `data/` and
+`knowledge.db*` must be readable by others (`hal-kb` creates them that way).
 
 ### The image
 
@@ -152,10 +151,16 @@ size and reads higher.
 
 ### Backups
 
-`hal9000 kb backup` makes an online, consistent copy of `knowledge.db` (with
-SQLite's backup API, so it is safe while the service runs) and a tarball of
-`knowledge/files/` and `knowledge/eval/`, with a checksummed manifest, in
-`data/backups/knowledge-<UTC time>/`:
+`hal9000 kb backup [--to DIR]` writes a folder `knowledge-<UTC time>/` under
+`data/backups/` (or `DIR`) holding:
+
+- `knowledge.db`: an online, consistent copy made with SQLite's backup API,
+  so it is safe while the service runs;
+- `library.tar.gz`: `knowledge/files/` (the originals) and `knowledge/eval/`;
+- `manifest.json`: counts and SHA-256 checksums (no document text, names or
+  questions).
+
+
 
 ```sh
 cd ~/hal_9000
@@ -179,11 +184,13 @@ rsync -av pi@<pi-address>:hal_9000/data/backups/ ~/hal-kb-backups/
 
 ### Restore
 
-`kb restore` checks the backup's checksums, refuses to overwrite an existing
-library unless `--force` (which moves the old one aside to
-`data/knowledge-replaced-<time>/`, never deletes it), leaves `hal9000.db`
-alone, and refuses while the service holds the library lock. So stop
-`hal-kb` first:
+`hal9000 kb restore FROM [--into DIR] [--force]` restores a `knowledge-<UTC
+time>/` folder into the data directory (default `KB_DATA_DIR`, `/app/data` in
+the container). It checks `manifest.json`'s checksums first, refuses a
+directory that already holds a library unless `--force` (which moves the old
+library aside to `data/knowledge-replaced-<time>/`, never deletes it), leaves
+`hal9000.db` alone, and refuses while the service holds the library lock. So
+stop `hal-kb` first:
 
 ```sh
 cd ~/hal_9000

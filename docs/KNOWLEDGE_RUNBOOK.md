@@ -15,7 +15,7 @@ and per-question scores only.
 | 3 | G-K1b: sweep S1a–S4, judge labels, S5, export | Mac | 15 min + unattended runs | capped at $10 in all |
 | 4 | Pi deployment | Pi (and the Mac for the copy) | about 1 hour, mostly building | a cent for the smoke test |
 | 5 | S6: latency on the Pi | Pi | about 30 min | a few cents |
-| 6 | G-K2: choose the configuration | Pi | 15 min | none, unless a profile must be built |
+| 6 | G-K2: choose, then the one-time test split | Pi | 30 min | the test split's judged answers (estimate shown first) |
 | 7 | Daily use and troubleshooting | | | |
 | 8 | Backup and restore | Pi | | |
 
@@ -75,8 +75,8 @@ into git.)
 uv run hal9000 kb check
 ```
 
-Pass: `ok` on every line and `All checks passed.` (the index profile line may
-say there is no active profile yet).
+Pass: `ok` on every line and `All checks passed.` (before the first ingest,
+the index profile line says there is no active profile yet).
 
 ### 2.4 Ingest (about a cent)
 
@@ -84,8 +84,10 @@ say there is no active profile yet).
 uv run hal9000 kb ingest data/knowledge/inbox/Home_Inspection.pdf
 ```
 
-It prints an estimate and asks before spending. Pass: the file is `indexed`
-(or stored and parsed, if there is no profile yet) with no failures.
+It prints an estimate and asks before spending. It also builds and activates
+the default index profile from `config/knowledge.yaml`, so the real retriever
+exists for the next steps. Pass: the file is `indexed` with no failures, and
+`uv run hal9000 kb profile list` shows one profile `ready` and active.
 
 ### 2.5 The house test (no cost)
 
@@ -103,8 +105,9 @@ uv run hal9000 kb gold generate --yes
 ```
 
 Pass: a summary of about 120 drafts by category, with any quota shortfall
-listed. If it stops because unanswerable drafts can't be checked against an
-index, tell the orchestrator rather than adding `--allow-keyword-check`.
+listed. Unanswerable drafts are checked against the index `kb ingest` built;
+don't add `--allow-keyword-check`. If it says there is no index, go back to
+§2.4 and check `kb profile list`.
 
 ### 2.7 Review (about 45 minutes, can be split)
 
@@ -226,6 +229,7 @@ On the Pi, add the Pi-only keys. The password prompt doesn't echo:
 ```sh
 cd ~/hal_9000
 chmod 600 .env
+sed -i '/^\(KB_UID\|KB_GID\|GRAFANA_ADMIN_PASSWORD\)=/d' .env   # any earlier (empty) lines
 read -rsp "Grafana admin password: " GP; echo
 printf '\n# Pi: knowledge stack (deploy/README.md)\nKB_UID=%s\nKB_GID=%s\nGRAFANA_ADMIN_PASSWORD=%s\n' \
   "$(id -u)" "$(id -g)" "$GP" >> .env
@@ -288,9 +292,12 @@ find data ! -user "$(id -u)" | head
 
 Pass: `knowledge.db` has your uid, and `find` prints nothing.
 
-(Alternative, once `kb backup` is in your checkout: `uv run hal9000 kb backup`
-on the Mac, `rsync -av data/backups/knowledge-<time> "$PI:hal_9000/data/backups/"`,
-then the restore in §8 on the Pi. It is checksummed end to end.)
+(Alternative, checksummed end to end: `uv run hal9000 kb backup` on the Mac
+writes `data/backups/knowledge-<UTC time>/` (`knowledge.db`,
+`library.tar.gz`, `manifest.json`); copy that folder with
+`rsync -av data/backups/knowledge-<UTC time> "$PI:hal_9000/data/backups/"`,
+then restore it on the Pi as in §8, without `--force` since the Pi's library
+is empty.)
 
 ### 4.6 Start (Pi)
 
@@ -362,16 +369,7 @@ Open `http://<pi-address>:3001` and sign in as `admin` with
 Knowledge: Ingestion, Knowledge: Live and Knowledge: Quality.
 
 Then follow [`deploy/grafana/VERIFY.md`](../deploy/grafana/VERIFY.md) step by
-step, with these two lines in place of its step 0 shell setup (this stack's
-password key is `GRAFANA_ADMIN_PASSWORD`, and Compose needs `--env-file`):
-
-```sh
-C="docker compose --env-file .env -f deploy/docker/compose.knowledge.yaml"
-PW=$(grep '^GRAFANA_ADMIN_PASSWORD=' .env | cut -d= -f2-)
-G="http://localhost:3001"
-```
-
-It checks the Prometheus config, that Grafana logs no provisioning errors, the
+step, starting with its shell setup. It checks the Prometheus config, that Grafana logs no provisioning errors, the
 pinned SQLite plugin, that anonymous access is off, the three dashboards, that
 a fresh trace appears within 60 seconds, and the four alert rules.
 
@@ -467,10 +465,23 @@ $C exec hal-kb hal9000 kb eval choose SWEEP --config NAME
 ```
 
 It builds the profile first if it isn't built (it shows the embedding cost and
-asks), activates it, stores its abstain threshold, writes
-`config/knowledge.yaml`, and says whether `KB_CHAT_TIER` should change.
+asks), activates it, stores its abstain threshold, and writes the choice
+(profile, reranker, query transform and chat tier) to `config/knowledge.yaml`.
 
-1. If it says so, set `KB_CHAT_TIER` in `.env`.
+Then score the chosen configuration once on the held-back test split (answers
+are judged; it prints an estimate and asks):
+
+```sh
+$C exec hal-kb hal9000 kb eval test SWEEP --config NAME
+$C run --rm --no-deps -v "$PWD/docs:/app/docs" hal-kb hal9000 kb eval report SWEEP
+```
+
+The report now has the test-split scores against the plan §1 targets. This is
+a one-time measurement: don't re-run it to chase a better number (it refuses
+without `--force`, which is logged). Share the report with the orchestrator.
+
+1. `KB_CHAT_TIER` in `.env` overrides the chat tier `choose` wrote: delete
+   that line from `.env` unless you mean to override it.
 2. If the chosen configuration has a reranker, set `KB_WITH_RERANK` in `.env`
    to it (and back to `none` if not).
 3. Apply: `$C up -d --build` (it only rebuilds if `KB_WITH_RERANK` changed).
@@ -523,7 +534,8 @@ $C exec hal-kb hal9000 kb eval regression         # recall on the approved quest
 | `/health`: `"retrieval_only":true` | The month's spend reached `KB_MONTHLY_CAP_USD`: the chat shows sources without writing answers. Raise the cap in `.env` and `$C up -d`, or wait for next month. |
 | Answers fail with an `error` outcome | The OpenAI key or the Pi's internet connection. `$C exec hal-kb hal9000 kb check` checks both. |
 | Log: `attempt to write a readonly database` or `Permission denied` under `/app/data` | `data/` isn't owned by `KB_UID:KB_GID`. `sudo chown -R "$(id -u):$(id -g)" data`, check `KB_UID`/`KB_GID` in `.env`, then `$C up -d`. |
-| Grafana's database panels say `unable to open database file` | The same ownership problem (Grafana runs as `KB_UID:KB_GID` too): fix as above. |
+| Grafana's SQLite panels (traces, jobs, regression, sweep) show an error, the Prometheus ones don't | Expected while `hal-kb` is stopped: Grafana reads `knowledge.db` through a read-only mount, which works only while `hal-kb` holds the database open. `$C up -d hal-kb`; the panels recover on their next refresh. |
+| Grafana's SQLite panels say `unable to open database file` while `hal-kb` is running | Grafana (uid 472) can't read `data/`. `chmod o+rx data && chmod o+r data/knowledge.db*`. |
 | Grafana rejects the admin password | The password is set on Grafana's first start only. Reset it: `$C exec grafana grafana cli admin reset-admin-password '<new>'`, and put the new one in `.env`. |
 | Prometheus target `down` | `hal-kb` isn't healthy: `$C logs --tail 100 hal-kb`. |
 | `hal-kb` was killed during a big upload (`docker inspect hal-kb --format '{{.State.OOMKilled}}'` says `true`) | It hit its 2 GB limit. Upload large documents one at a time; tell the orchestrator if it repeats. |
@@ -536,11 +548,14 @@ $C exec hal-kb hal9000 kb eval regression         # recall on the approved quest
 Details and the cron line are in [`deploy/README.md`](../deploy/README.md#backups).
 
 ```sh
-$C exec -T hal-kb hal9000 kb backup            # data/backups/knowledge-<UTC time>/
+$C exec -T hal-kb hal9000 kb backup            # or: kb backup --to DIR (DIR under data/)
+ls data/backups/knowledge-*/                   # knowledge.db  library.tar.gz  manifest.json
 ```
 
-Restore (it refuses while the service runs, and moves the current library
-aside rather than deleting it):
+Restore with `kb restore FROM [--into DIR] [--force]`. It checks the
+manifest's checksums, refuses while the service holds the library lock, and
+with `--force` moves the current library aside to
+`data/knowledge-replaced-<time>/` rather than deleting it:
 
 ```sh
 ls data/backups/
