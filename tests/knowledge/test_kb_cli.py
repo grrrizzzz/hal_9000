@@ -14,18 +14,19 @@ from hal9000.__main__ import build_parser, main
 
 REPO = Path(__file__).resolve().parents[2]
 
-#: Plan §17 plus handoff KWP0's additions, with the owning work package.
+#: Plan §17 plus handoff KWP0's additions, with the owning work package. A command
+#: leaves this list when its work package implements it (KWP5 part A: gold and
+#: eval judge-prep/export/report/regression, tested in tests/knowledge/eval/).
 COMMANDS = [
     (["check"], "KWP3"),
     (["ingest", "a.pdf", "Folder/", "--collection", "Appliances", "--no-llm", "--yes"], "KWP3"),
     (["ask", "How old is the furnace?", "--trace"], "KWP6"),
     (["serve", "--host", "127.0.0.1", "--port", "8911", "--fake"], "KWP6"),
-    (["gold", "generate", "--max-cost", "2.00", "--yes"], "KWP5"),
-    (["gold", "export", "data/knowledge/eval/gold.jsonl"], "KWP5"),
-    (["gold", "import", "data/knowledge/eval/gold.jsonl"], "KWP5"),
-    (["eval", "sweep", "--stages", "S1a,S1b,S2,S3,S4", "--max-cost", "10", "--yes"], "KWP5"),
-    (["eval", "sweep", "--stages", "S5", "--resume", "RUN1", "--yes", "--force-judge"], "KWP5"),
-    (["eval", "judge-prep", "RUN1", "--yes"], "KWP5"),
+    (["eval", "sweep", "--stages", "S1a,S1b,S2,S3,S4", "--max-cost", "10", "--yes"], "KWP5 part B"),
+    (
+        ["eval", "sweep", "--stages", "S5", "--resume", "RUN1", "--yes", "--force-judge"],
+        "KWP5 part B",
+    ),
     (
         [
             "eval",
@@ -39,11 +40,8 @@ COMMANDS = [
             "--ingest-test",
             "ab" * 32,
         ],
-        "KWP5",
+        "KWP5 part B",
     ),
-    (["eval", "export", "RUN1"], "KWP5"),
-    (["eval", "report", "RUN1"], "KWP5"),
-    (["eval", "regression"], "KWP5"),
     (["profile", "list"], "KWP10"),
     (["profile", "activate", "pdfium.fixed-512.hdr.te3s-1536"], "KWP10"),
     (["backup", "--to", "/tmp/backups"], "KWP10"),

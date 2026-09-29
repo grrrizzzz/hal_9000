@@ -60,3 +60,35 @@ def fixture_docs() -> list[SourceDocument]:
     if not _CACHE:
         _CACHE.extend(build_documents())
     return list(_CACHE)
+
+
+def store_documents(conn, documents: list[SourceDocument]) -> None:
+    """Write ``documents`` (files, documents and pages rows) into a knowledge.db."""
+    with conn:
+        for sha in dict.fromkeys(d.file_sha for d in documents):
+            conn.execute(
+                "INSERT OR IGNORE INTO files (sha256, original_name, relative_path, mime_type, "
+                "bytes, uploaded_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (sha, f"{sha[:8]}.pdf", f"{sha[:8]}.pdf", "application/pdf", 1, "2026-01-01"),
+            )
+        for d in documents:
+            conn.execute(
+                "INSERT INTO documents (id, file_sha, page_start, page_end, title, doc_type, "
+                "vendor, doc_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    d.document_id,
+                    d.file_sha,
+                    min(d.pages),
+                    max(d.pages),
+                    d.title,
+                    d.doc_type,
+                    d.vendor,
+                    d.doc_date.isoformat() if d.doc_date else None,
+                ),
+            )
+            for page, text in d.pages.items():
+                conn.execute(
+                    "INSERT OR IGNORE INTO pages (file_sha, page, parser, text, has_text_layer) "
+                    "VALUES (?, ?, 'pdfium', ?, 1)",
+                    (d.file_sha, page, text),
+                )
