@@ -18,7 +18,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from hal9000.knowledge.contracts import EvalRun, MetricCI
-from hal9000.knowledge.eval.runs import runs_for
+from hal9000.knowledge.eval.export import check_shareable, page_texts
+from hal9000.knowledge.eval.runs import HOST_CLASSES, runs_for
 from hal9000.knowledge.obs.collector import stage_order
 
 __all__ = ["TRADE_OFFS", "pareto_front", "render_report", "write_report"]
@@ -52,6 +53,11 @@ def _num(value: float | None, digits: int = 1) -> str:
 
 def _recall(run: EvalRun, budget: int) -> MetricCI | None:
     return run.metrics.budgeted_recall.get(budget) if run.metrics else None
+
+
+def _host(host: str) -> str:
+    """A host class only (``mac``, ``pi``, ``linux``): never a machine name."""
+    return host if host in HOST_CLASSES else "other"
 
 
 def _cell(value) -> str:
@@ -182,7 +188,7 @@ def render_report(
         [
             rid,
             _cell(by_id[rid].config.get("profile")),
-            by_id[rid].host,
+            _host(by_id[rid].host),
             f"{recall:.3f}",
             f"{latency:.1f}",
             _num(by_id[rid].metrics.cost_per_question_usd, 6),
@@ -230,11 +236,20 @@ def render_report(
     return "\n".join(lines)
 
 
-def write_report(conn: sqlite3.Connection, run_id: str, path: Path) -> Path:
-    """Render the report for a run (or a sweep's runs) to ``path``. KeyError if unknown."""
+def write_report(
+    conn: sqlite3.Connection, run_id: str, path: Path, *, pages: Sequence[str] | None = None
+) -> Path:
+    """Render the report for a run (or a sweep's runs) to ``path``. KeyError if unknown.
+
+    The rendered Markdown gets the same leak check as ``eval export`` (no page
+    text longer than 40 characters, no ``KB_DENYLIST`` entry); a hit raises
+    :class:`~hal9000.knowledge.eval.export.LeakDetected` and nothing is written.
+    """
     runs = runs_for(conn, run_id)
     if not runs:
         raise KeyError(run_id)
+    text = render_report(runs, source=run_id)
+    check_shareable([text], page_texts(conn) if pages is None else pages)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(render_report(runs, source=run_id))
+    path.write_text(text)
     return path

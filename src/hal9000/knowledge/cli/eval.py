@@ -58,6 +58,7 @@ def _export(args, conn, current) -> int:
 
 
 def _report(args, conn, current) -> int:
+    from hal9000.knowledge.eval.export import LeakDetected
     from hal9000.knowledge.eval.report import write_report
 
     target = current.config_dir.parent / "docs" / "KNOWLEDGE_EVAL_REPORT.md"
@@ -65,6 +66,9 @@ def _report(args, conn, current) -> int:
         path = write_report(conn, args.run, target)
     except KeyError:
         _err(f"no evaluation run or sweep {args.run!r}")
+        return EXIT_ERROR
+    except LeakDetected as error:
+        _err(f"report not written: {error}")
         return EXIT_ERROR
     print(f"Wrote {path} (aggregates only)")
     return EXIT_OK

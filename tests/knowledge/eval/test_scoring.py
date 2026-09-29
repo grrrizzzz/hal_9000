@@ -27,8 +27,9 @@ from hal9000.knowledge.eval.scoring import (
     quote_coverage,
     roc_auc,
     score_question,
+    sign_flip_p,
 )
-from hal9000.knowledge.eval.text import words
+from hal9000.knowledge.eval.text import joined, words
 from hal9000.knowledge.eval.types import RetrievalOutput, SelectedItem
 
 
@@ -133,8 +134,12 @@ def test_unrelated_chunk_covers_nothing_even_with_common_words():
 
 
 def test_small_differences_still_align_at_ninety():
-    typo = QUOTE.replace("dripping", "driping").replace("2012", "2O12")
+    typo = QUOTE.replace("dripping", "driping")
     assert quote_coverage(QUOTE, FILLER + typo) == 1.0
+    # ...but a number must match exactly: "2O12" leaves "2012" uncovered
+    wrong_year = QUOTE.replace("2012", "2O12")
+    year = words(QUOTE).index("2012")
+    assert covered_words(QUOTE, FILLER + wrong_year) == set(range(len(words(QUOTE)))) - {year}
     garbled = " ".join(w[::-1] for w in QUOTE.split())
     assert quote_coverage(QUOTE, garbled) < 0.2
 
@@ -345,28 +350,46 @@ def test_aggregate_is_deterministic():
 
 # ----------------------------------------------------------- paired bootstrap
 def test_paired_bootstrap_calls_identical_configs_a_tie():
-    per_q = {i: v for i, v in enumerate([0.1, 0.5, 0.9, 1.0, 0.0, 0.3, 0.7])}
+    per_q = {i: v for i, v in enumerate([0.1, 0.5, 0.9, 1.0, 0.0, 0.3, 0.7] * 2)}
     result = paired_bootstrap(per_q, dict(per_q), n_boot=500, seed=3)
     assert isinstance(result, Comparison)
-    assert result.verdict == "tie"
+    assert result.verdict == "tie" and result.n == 14
     assert result.mean_diff == 0.0 and result.low == 0.0 and result.high == 0.0
+    assert result.p_value == 1.0 and not result.mismatched
 
 
 def test_paired_bootstrap_calls_a_config_that_wins_every_question_a_win():
     a = {i: 0.5 + i / 100 for i in range(20)}
     b = {i: v - 0.05 for i, v in a.items()}
-    assert paired_bootstrap(a, b, n_boot=500, seed=3).verdict == "a"
+    win = paired_bootstrap(a, b, n_boot=500, seed=3)
+    assert win.verdict == "a" and win.p_value < 0.01
     assert paired_bootstrap(b, a, n_boot=500, seed=3).verdict == "b"
 
 
-def test_paired_bootstrap_uses_only_shared_questions_and_is_a_tie_for_noise():
-    a = {1: 1.0, 2: 0.0, 3: 1.0, 4: 0.0, 99: 1.0}
-    b = {1: 0.0, 2: 1.0, 3: 0.0, 4: 1.0, 50: 0.0}
+def test_paired_bootstrap_with_one_shared_question_is_insufficient_never_a_win():
+    r = paired_bootstrap({1: 1.0}, {1: 0.0}, n_boot=100, seed=1)
+    assert r.n == 1 and r.verdict == "insufficient" and r.mean_diff == 1.0
+    a = {i: 1.0 for i in range(9)}
+    b = {i: 0.0 for i in range(9)}
+    assert paired_bootstrap(a, b, n_boot=100, seed=1).verdict == "insufficient"
+    assert paired_bootstrap(a, b, n_boot=100, seed=1, min_paired=5).verdict == "a"
+    none = paired_bootstrap({1: 1.0}, {2: 1.0}, n_boot=10, seed=1)
+    assert none.verdict == "insufficient" and none.n == 0 and none.mismatched
+
+
+def test_paired_bootstrap_surfaces_mismatched_question_sets():
+    a = {i: float(i % 2) for i in range(12)} | {99: 1.0}
+    b = {i: float((i + 1) % 2) for i in range(12)} | {50: 0.0, 51: 0.0}
     r = paired_bootstrap(a, b, n_boot=500, seed=1)
-    assert r.n == 4 and r.verdict == "tie"
-    assert r.low <= r.mean_diff <= r.high
-    with pytest.raises(ValueError):
-        paired_bootstrap({1: 1.0}, {2: 1.0}, n_boot=10, seed=1)
+    assert r.n == 12 and (r.only_a, r.only_b) == (1, 2) and r.mismatched
+    assert r.verdict == "tie" and r.low <= r.mean_diff <= r.high
+    assert r.p_value > 0.5
+
+
+def test_sign_flip_p_is_deterministic():
+    diffs = [0.1, -0.05, 0.2, 0.0, 0.15]
+    assert sign_flip_p(diffs, n_perm=200, seed=4) == sign_flip_p(diffs, n_perm=200, seed=4)
+    assert sign_flip_p([], n_perm=10) == 1.0
 
 
 def test_scoring_item_from_gold():
@@ -392,10 +415,79 @@ def test_default_token_counter_is_the_shared_tiktoken_one():
 
 
 def test_tiny_quotes_need_an_exact_run():
-    assert quote_coverage("$625", "Total due: $625.00") == 1.0
-    assert quote_coverage("$625", "Total due: $626.00") == 0.0
+    assert quote_coverage("$625.00", "Total due: $625.00") == 1.0
+    assert quote_coverage("$625", "Total due: $625.00") == 0.0  # 625 is not the token 625.00
+    assert quote_coverage("$625.00", "Total due: $626.00") == 0.0
 
 
-def test_zero_bootstrap_replicates_give_a_degenerate_interval():
-    ci = bootstrap_ci([0.2, 0.8], n_boot=0, seed=1)
-    assert ci.value == ci.low == ci.high == 0.5
+# ------------------------------------------- review probes: wrong numbers, part-words
+@pytest.mark.parametrize(
+    ("quote", "chunk"),
+    [
+        ("Total due: $625.00", "Total due: $425.00"),
+        ("Total due: $625.00", "The amount now owing, Total due: $1,625.00, is past due."),
+        ("$1,234.00", "Balance $12,340.00 carried forward."),
+        ("$1,234.00", "Account 51234001 is closed."),
+        ("The water heater is 13 years old", "The water heater is 18 years old"),
+        ("The water heater is 13 years old", "The water heater is 3 years old"),
+        ("Invoice date 06/22/2023", "Invoice date 06/22/2024"),
+        ("yes", "The inspector's eyes were tired."),
+        ("yes", "They established the boundary."),
+    ],
+)
+def test_a_chunk_with_the_wrong_number_or_a_part_word_is_not_full_coverage(quote, chunk):
+    assert quote_coverage(quote, chunk) < 1.0
+    numbers = [i for i, w in enumerate(words(quote)) if any(c.isdigit() for c in w)]
+    assert not covered_words(quote, chunk) & set(numbers)
+
+
+def test_the_right_number_and_whole_words_are_still_covered():
+    assert quote_coverage("Total due: $625.00", "Services. Total due: $625.00. Thank you.") == 1.0
+    assert quote_coverage("$1,234.00", "Balance $1,234.00 carried forward.") == 1.0
+    assert quote_coverage("Invoice date 06/22/2023", "Invoice date 06/22/2023 (net 30)") == 1.0
+    assert quote_coverage("yes", "The answer is yes.") == 1.0
+    # a rejected part-word window doesn't hide a real match later in the chunk
+    assert quote_coverage("yes", "Their eyes said yes.") == 1.0
+
+
+def test_a_mostly_mismatched_word_is_not_covered_by_one_shared_character():
+    """Fails if the 50% word rule is weakened to "any matched character"."""
+    garbled = QUOTE.replace("pipe", "xyze")  # 'e' is the only shared character
+    covered = covered_words(QUOTE, FILLER + garbled)
+    pipe = words(QUOTE).index("pipe")
+    assert pipe not in covered
+    assert covered == set(range(len(words(QUOTE)))) - {pipe}
+
+
+@pytest.mark.parametrize(
+    ("quote", "chunk"),
+    [
+        (QUOTE, FILLER + QUOTE + OTHER),
+        ("yes indeed", "Answer: xxyesindeedyy."),  # the only window is inside one chunk word
+        (
+            "the pressure relief valve was replaced last year",
+            "the pressure relief valve was replaced last yearly",
+        ),
+        ("relief valve is dripping", "a prelief valve is drippingly"),
+    ],
+)
+def test_every_alignment_starts_and_ends_on_chunk_word_boundaries(quote, chunk):
+    from hal9000.knowledge.eval.scoring import _chunk, _find
+
+    prepared = _chunk(chunk)
+    found = _find(joined(quote).text, 0, prepared, ScoringConfig())
+    if found is not None:
+        assert found.ca in prepared.starts and found.cb in prepared.ends
+    if "xx" in chunk:
+        assert found is None
+
+
+def test_a_top_item_that_alone_overflows_the_budget_is_na_and_kept_out_of_means():
+    overflow = score(gold(QUOTE, gid=1), out(item(FILLER + QUOTE, 1200), item(QUOTE, 50, 2)))
+    assert 1000 not in overflow.recall and 1000 not in overflow.context_precision
+    assert 1000 not in overflow.context_tokens
+    assert overflow.recall[2000] == 1.0
+    fits = score(gold(QUOTE, gid=2), out(item(QUOTE, 30)))
+    metrics = aggregate([overflow, fits], config=CFG)
+    assert metrics.budgeted_recall[1000].value == 1.0
+    assert metrics.context_precision[1000].value == pytest.approx(fits.context_precision[1000])

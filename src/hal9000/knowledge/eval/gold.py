@@ -33,20 +33,27 @@ import logging
 import math
 import re
 import sqlite3
+import threading
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
+from functools import lru_cache
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from rapidfuzz import fuzz
 
 from hal9000.core.prompt import Prompt
 from hal9000.cost.metering import BudgetExceeded
 from hal9000.knowledge.contracts import EvidenceQuote, GoldCategory, GoldItem
 from hal9000.knowledge.eval.config import CATEGORIES, GoldConfig
-from hal9000.knowledge.eval.text import find_normalized, joined, normalize, words
+from hal9000.knowledge.eval.text import (
+    extend_to_words,
+    find_normalized,
+    joined,
+    normalize,
+    words,
+)
 from hal9000.knowledge.eval.types import (
     Generate,
     RetrievalOutput,
@@ -64,6 +71,7 @@ __all__ = [
     "align_selection",
     "assign_splits",
     "generate_gold",
+    "is_flagged",
     "is_paraphrased",
     "jaccard",
     "link_keys",
@@ -71,6 +79,7 @@ __all__ = [
     "parse_tool_reply",
     "plan_generation",
     "propose_link_sets",
+    "stems",
 ]
 
 log = logging.getLogger(__name__)
@@ -98,12 +107,46 @@ def content_words(text: str) -> set[str]:
     return {w for w in words(text) if w not in STOPWORDS}
 
 
+_STEMMER_LOCK = threading.Lock()
+
+
+@lru_cache(maxsize=1)
+def _stemmer() -> sqlite3.Connection:
+    """An in-memory FTS5 table with the index's own tokenizer, used only to stem words."""
+    from hal9000.knowledge.storage.db import FTS_TOKENIZER
+
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.execute(f"CREATE VIRTUAL TABLE t USING fts5(x, tokenize = '{FTS_TOKENIZER}')")
+    conn.execute("CREATE VIRTUAL TABLE v USING fts5vocab(t, 'row')")
+    return conn
+
+
+@lru_cache(maxsize=8192)
+def stems(text: str) -> frozenset[str]:
+    """Content words of ``text`` (stopwords removed), Porter-stemmed by the FTS5 index tokenizer.
+
+    Stemming with the index's own tokenizer (``porter unicode61
+    remove_diacritics 2``) means "replaced" and "replace" count as the same
+    token, exactly as keyword search sees them.
+    """
+    kept = sorted(content_words(text))
+    if not kept:
+        return frozenset()
+    with _STEMMER_LOCK:
+        conn = _stemmer()
+        with conn:
+            conn.execute("DELETE FROM t")
+            conn.execute("INSERT INTO t (x) VALUES (?)", (" ".join(kept),))
+            found = frozenset(row[0] for row in conn.execute("SELECT term FROM v"))
+    return found
+
+
 def jaccard(question: str, quotes: Iterable[str]) -> float:
-    """Token Jaccard between a question and its evidence (stopwords removed)."""
-    q = content_words(question)
+    """Token Jaccard between a question and its evidence (stopwords removed, Porter-stemmed)."""
+    q = set(stems(question))
     e: set[str] = set()
     for quote in quotes:
-        e |= content_words(quote)
+        e |= stems(quote)
     union = q | e
     return len(q & e) / len(union) if union else 0.0
 
@@ -699,10 +742,18 @@ def _verify(draft: _DraftItem, task: GenerationTask, cfg: GoldConfig) -> GoldIte
         doc = task.documents[ev.document - 1]
         if ev.page not in doc.pages:
             return f"page {ev.page} is not a page of document {ev.document}"
-        span = find_normalized(ev.quote, doc.pages[ev.page])
+        page_text = doc.pages[ev.page]
+        span = find_normalized(ev.quote, page_text)
         if span is None:
             return f"the quote {ev.quote[:60]!r} is not on page {ev.page} of document {ev.document}"
-        quote = doc.pages[ev.page][span[0] : span[1]]
+        start, end = extend_to_words(page_text, *span)  # never a partial word
+        quote = page_text[start:end]
+        j = joined(quote)
+        if j.n_words < cfg.min_quote_words or len(j.text) < cfg.min_quote_chars:
+            return (
+                f"the quote {quote[:60]!r} is too short (at least {cfg.min_quote_words} words "
+                f"and {cfg.min_quote_chars} letters or digits)"
+            )
         evidence.append(EvidenceQuote(quote=quote, page=ev.page, file_sha=doc.file_sha))
         documents.add(ev.document)
     if draft.category == "cross_document" and len(documents) < 2:
@@ -848,12 +899,23 @@ def _run_questions(task: GenerationTask, runner: _Runner, out: list, dropped: li
     dropped.extend(failed[len(repaired) :])
 
 
+KEYWORD_ONLY = "checked by keyword search only (no index was wired)"
+
+
+def is_flagged(item: GoldItem) -> bool:
+    """An unanswerable draft the corpus might answer (or that couldn't be checked)."""
+    return (item.reviewer_note or "").startswith("FLAGGED")
+
+
 def _check_unanswerable(question: str, retrieve: RetrieveFn, runner: _Runner, k: int) -> str | None:
     """None when the corpus doesn't answer ``question``; else why it is flagged."""
     try:
         passages = [s.text for s in list(retrieve(question).selected)[:k]]
     except Exception as error:
         return f"could not be checked (retrieval failed: {type(error).__name__})"
+    if not passages:
+        # nothing to show the checker: skip the paid call, and let Mike decide
+        return "no keyword match: retrieval returned no passages, so it was not checked"
     reply = runner.call(_check_prompt(question, passages))
     if reply is None:
         return "could not be checked (the check call failed)"
@@ -868,11 +930,17 @@ def _check_unanswerable(question: str, retrieve: RetrieveFn, runner: _Runner, k:
 
 
 def _run_unanswerable(
-    task: GenerationTask, runner: _Runner, retrieve: RetrieveFn, out: list, dropped: list
-) -> int:
+    task: GenerationTask,
+    runner: _Runner,
+    retrieve: RetrieveFn,
+    out: list,
+    dropped: list,
+    *,
+    keyword_only: bool = False,
+) -> None:
     reply = runner.call(task.prompt)
     if reply is None:
-        return 0
+        return
     try:
         drafts = parse_tool_reply(reply, _UnanswerableReply).questions
     except ValueError as error:
@@ -895,21 +963,22 @@ def _run_unanswerable(
             drafts = parse_tool_reply(reply or "", _UnanswerableReply).questions
         except ValueError as error2:
             dropped.append(("(unanswerable drafts)", f"invalid twice: {error2}"))
-            return 0
-    flagged = 0
+            return
     for draft in drafts:
         note = _check_unanswerable(
             draft.question, retrieve, runner, runner.cfg.unanswerable_check_k
         )
-        item = GoldItem(
-            question=draft.question.strip(),
-            category="unanswerable",
-            difficulty=draft.difficulty,
-            reviewer_note=f"FLAGGED: {note}" if note else None,
+        parts = [f"FLAGGED: {note}"] if note else []
+        if keyword_only:
+            parts.append(f"({KEYWORD_ONLY})" if note else KEYWORD_ONLY.capitalize() + ".")
+        out.append(
+            GoldItem(
+                question=draft.question.strip(),
+                category="unanswerable",
+                difficulty=draft.difficulty,
+                reviewer_note=" ".join(parts) or None,
+            )
         )
-        out.append(item)
-        flagged += bool(note)
-    return flagged
 
 
 def _question_key(question: str) -> str:
@@ -919,6 +988,8 @@ def _question_key(question: str) -> str:
 def _dedup(
     items: Sequence[GoldItem], existing: Iterable[str], threshold: float
 ) -> tuple[list[GoldItem], int]:
+    from rapidfuzz import fuzz
+
     seen = [_question_key(q) for q in existing]
     kept: list[GoldItem] = []
     dupes = 0
@@ -944,7 +1015,7 @@ def _select(
     for category in CATEGORIES:
         pool = by_category.get(category, [])
         if category == "unanswerable":  # clean drafts before flagged ones
-            pool = [i for i in pool if not i.reviewer_note] + [i for i in pool if i.reviewer_note]
+            pool = [i for i in pool if not is_flagged(i)] + [i for i in pool if is_flagged(i)]
         quota = cfg.quotas.get(category, 0)
         chosen[category] = list(pool[:quota])
         spare[category] = list(pool[quota:])
@@ -1020,14 +1091,14 @@ def generate_gold(
     """
     cfg = plan.config
     runner = _Runner(generate, cfg)
+    keyword_only = retrieve is None
     retrieve = retrieve or LexicalRetriever(plan.corpus, cfg.unanswerable_check_k)
     raw: list[GoldItem] = []
     dropped: list[tuple[str, str]] = []
-    flagged = 0
     try:
         for task in plan.tasks:
             if task.kind == "unanswerable":
-                flagged += _run_unanswerable(task, runner, retrieve, raw, dropped)
+                _run_unanswerable(task, runner, retrieve, raw, dropped, keyword_only=keyword_only)
             else:
                 _run_questions(task, runner, raw, dropped)
     except _Stop:
@@ -1046,7 +1117,7 @@ def generate_gold(
         paraphrase_shortfall=para_short,
         dropped=dropped,
         duplicates=dupes,
-        flagged=sum(1 for i in selected if i.reviewer_note),
+        flagged=sum(1 for i in selected if is_flagged(i)),
         calls=runner.calls,
         errors=runner.errors,
         stopped=runner.stopped,
@@ -1063,6 +1134,8 @@ def align_selection(selection: str, page_text: str, *, min_similarity: float = 9
     (whole words), which is what gets stored as the quote, or None when the
     selection isn't on this page.
     """
+    from rapidfuzz import fuzz
+
     sel = joined(selection).text
     page = joined(page_text)
     if not sel or len(sel) > len(page.text):
@@ -1070,10 +1143,7 @@ def align_selection(selection: str, page_text: str, *, min_similarity: float = 9
     hit = fuzz.partial_ratio_alignment(sel, page.text, score_cutoff=min_similarity)
     if hit is None:
         return None
-    start = page.source[hit.dest_start]
-    end = page.source[hit.dest_end - 1] + 1
-    while start > 0 and page_text[start - 1].isalnum():
-        start -= 1
-    while end < len(page_text) and page_text[end].isalnum():
-        end += 1
+    start, end = extend_to_words(
+        page_text, page.source[hit.dest_start], page.source[hit.dest_end - 1] + 1
+    )
     return page_text[start:end].strip() or None

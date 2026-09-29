@@ -40,8 +40,10 @@ class ScoringSection(_Model):
     full_support: float = Field(default=0.8, gt=0, le=1)
     min_span_words: int = Field(default=3, ge=1)
     word_cover: float = Field(default=0.5, gt=0, le=1)
+    min_fuzzy_chars: int = Field(default=12, ge=1)
     n_boot: int = Field(default=1000, ge=0)
     seed: int = 20260928
+    min_paired: int = Field(default=10, ge=1)
 
     def to_config(self) -> ScoringConfig:
         return ScoringConfig(
@@ -51,8 +53,10 @@ class ScoringSection(_Model):
             full_support=self.full_support,
             min_span_words=self.min_span_words,
             word_cover=self.word_cover,
+            min_fuzzy_chars=self.min_fuzzy_chars,
             n_boot=self.n_boot,
             seed=self.seed,
+            min_paired=self.min_paired,
         )
 
 
@@ -87,6 +91,8 @@ class GoldConfig(_Model):
     max_link_docs: int = Field(default=4, ge=2)
     unanswerable_check_k: int = Field(default=30, ge=1)
     dedup_similarity: float = Field(default=90.0, ge=0, le=100)
+    min_quote_words: int = Field(default=3, ge=1)
+    min_quote_chars: int = Field(default=12, ge=1)
     estimate: GoldEstimate = Field(default_factory=GoldEstimate)
 
     @model_validator(mode="after")

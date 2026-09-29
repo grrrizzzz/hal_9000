@@ -67,17 +67,32 @@ def _generate(args, conn, current) -> int:
     if not corpus:
         _err("no documents in knowledge.db: run `hal9000 kb ingest` first")
         return EXIT_ERROR
-    plan = plan_generation(corpus, cfg.gold)
-    estimate = plan.estimate()
-    pages = sum(len(d.pages) for d in corpus)
-    print(
-        f"Gold generation over {len(corpus)} documents ({pages} pages): {len(plan.tasks)} "
-        f"generation tasks, {len(plan.link_sets)} linked document sets, "
-        f"{plan.n_unanswerable} unanswerable drafts to check."
-    )
-    print(f"Estimate: {estimate.describe()} (cap --max-cost ${args.max_cost:.2f}).")
     spend = open_spend(current, max_cost=args.max_cost, label="gold")
     try:
+        try:
+            retrieve = retriever_for(conn, current, meter=spend.meter).retrieve
+            keyword_note = None
+        except NotWired as error:
+            if not args.allow_keyword_check:
+                _err(
+                    f"{error}. Unanswerable drafts must be checked against the real index: "
+                    "build one first, or pass --allow-keyword-check to check them with "
+                    "keyword search only (they are then marked for review)."
+                )
+                return EXIT_ERROR
+            retrieve = None
+            keyword_note = f"Note: {error}; unanswerable drafts are checked by keyword search only."
+        plan = plan_generation(corpus, cfg.gold)
+        estimate = plan.estimate()
+        pages = sum(len(d.pages) for d in corpus)
+        print(
+            f"Gold generation over {len(corpus)} documents ({pages} pages): {len(plan.tasks)} "
+            f"generation tasks, {len(plan.link_sets)} linked document sets, "
+            f"{plan.n_unanswerable} unanswerable drafts to check."
+        )
+        print(f"Estimate: {estimate.describe()} (cap --max-cost ${args.max_cost:.2f}).")
+        if keyword_note:
+            print(keyword_note)
         refusal = spend.refusal(estimate.usd)
         if refusal:
             _err(f"not started: {refusal}")
@@ -89,12 +104,6 @@ def _generate(args, conn, current) -> int:
         except hal_config.ConfigError as error:
             _err(str(error))
             return EXIT_ERROR
-        try:
-            binding = retriever_for(conn, current, meter=spend.meter)
-            retrieve = binding.retrieve
-        except NotWired as error:
-            print(f"Note: {error}; unanswerable drafts are checked with keyword search.")
-            retrieve = None
         result = generate_gold(plan, generate, retrieve=retrieve, existing=list_gold(conn))
         stored = insert_gold(conn, result.items)
         print(result.summary())

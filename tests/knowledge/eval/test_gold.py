@@ -610,3 +610,81 @@ def test_an_unreadable_or_failed_check_flags_the_draft(fixture_docs):
         plan, lambda p, t: (_ for _ in ()).throw(TimeoutError()), retrieve=FakeRetrieve()
     )
     assert result.items == [] and result.errors
+
+
+# ------------------------------------------------ review: short and partial-word quotes
+def _page_plan(text: str) -> GenerationPlan:
+    doc = SourceDocument(
+        1, SHA, "Invoice 7", "invoice", "Acme Plumbing", date(2024, 6, 22), {1: text}
+    )
+    return plan_generation([doc], cfg(quotas={"money": 1}, overgenerate=1.0, min_window_chars=10))
+
+
+PAGE = (
+    "Invoice date 06/22/2023\nLabor and parts. Total due: $1,625.00\nThank you for your business."
+)
+
+
+@pytest.mark.parametrize("quote", ["a", "yes", "Total due", "$1,625.00", "Invoice date"])
+def test_quotes_under_three_words_or_twelve_characters_are_rejected(quote):
+    page = PAGE + "\nyes a"
+    plan = _page_plan(page)
+    llm = FakeLLM([tool_call("record_questions", items=[draft("How much was owed?", quote, 1, "money")]),
+                   tool_call("record_questions", items=[])])  # fmt: skip
+    result = generate_gold(plan, llm)
+    assert result.items == []
+    assert "too short" in result.dropped[0][1]
+
+
+def test_a_partial_word_quote_is_extended_to_whole_words():
+    plan = _page_plan(PAGE)
+    partial = draft("How much was owed?", "otal due: $1,625.0", 1, "money")
+    result = generate_gold(plan, FakeLLM([tool_call("record_questions", items=[partial])]))
+    assert result.items[0].evidence[0].quote == "Total due: $1,625.00"
+    inner = draft("How much was owed?", "Total due: $1,625", 1, "money")
+    result = generate_gold(plan, FakeLLM([tool_call("record_questions", items=[inner])]))
+    assert result.items[0].evidence[0].quote == "Total due: $1,625.00"
+
+
+def test_the_paraphrase_jaccard_uses_the_index_stemmer():
+    from hal9000.knowledge.eval.gold import stems
+
+    assert stems("The filters were replaced") == {"filter", "replac"}
+    assert jaccard("Were the filters replaced?", ["Replace the filter"]) == 1.0
+    assert not is_paraphrased("Were the filters replaced?", ["Replace the filter"])
+
+
+def test_no_passages_skips_the_paid_check_and_flags_no_keyword_match(fixture_docs):
+    plan = _unanswerable_plan(fixture_docs, n=1)
+    drafts = tool_call(
+        "record_drafts", questions=[{"question": "Who painted the fence?", "difficulty": "easy"}]
+    )
+    llm = FakeLLM([drafts])  # a check call would exhaust the script
+    result = generate_gold(plan, llm, retrieve=FakeRetrieve(texts=[]))
+    assert len(llm.calls) == 1
+    assert result.items[0].reviewer_note.startswith("FLAGGED: no keyword match")
+    assert result.flagged == 1
+
+
+def test_keyword_only_checks_are_marked(fixture_docs):
+    plan = _unanswerable_plan(fixture_docs, n=2)
+    drafts = tool_call(
+        "record_drafts",
+        questions=[{"question": "How often should the heat pump filter be replaced?", "difficulty": "easy"},
+                   {"question": "When was the chimney last swept by the sweep?", "difficulty": "easy"}],
+    )  # fmt: skip
+    yes = tool_call("record_check", answered="yes", reason="P1")
+    no = tool_call("record_check", answered="no", reason="none")
+    result = generate_gold(plan, FakeLLM([drafts, yes, no]))  # no retrieve: keyword search
+    notes = {i.question: i.reviewer_note for i in result.items}
+    assert notes["How often should the heat pump filter be replaced?"].startswith(
+        "FLAGGED: retrieval found it answered"
+    )
+    assert "keyword search only" in notes["How often should the heat pump filter be replaced?"]
+    clean = notes["When was the chimney last swept by the sweep?"]
+    assert clean.startswith("Checked by keyword search only") and result.flagged == 1
+
+
+def test_align_selection_never_returns_a_partial_number():
+    quote = align_selection("due: $1,625.0", PAGE)
+    assert quote == "due: $1,625.00"

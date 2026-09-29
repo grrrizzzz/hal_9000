@@ -184,18 +184,19 @@ def test_agreement_counts_every_label():
         _label(3, na, na),  # 3/3 (abstention n/a on both sides)
         _label(4, na, GOOD),  # 3/4 (None vs a value disagrees)
         _label(5, None, GOOD),  # unlabelled by Mike
-        _label(6, GOOD, None),  # the judge failed: not compared
+        _label(6, GOOD, None),  # the judge failed twice: 0/4, every label a disagreement
     ]
     result = agreement(labels)
-    assert (result.items, result.labels, result.agreed, result.unlabelled) == (4, 15, 13, 1)
-    assert result.rate == pytest.approx(13 / 15)
-    assert (
-        result.per_field["correctness"] == 0.75 and result.per_field["abstention_correct"] == 2 / 3
-    )
-    assert not result.passes(0.85)  # one answer is still unlabelled
+    assert (result.items, result.labels, result.agreed, result.unlabelled) == (5, 19, 13, 1)
+    assert result.rate == pytest.approx(13 / 19)
+    assert result.per_field["correctness"] == 0.6 and result.per_field["abstention_correct"] == 0.5
+    assert not result.passes(0.85)
     assert agreement(labels[:4]).passes(0.85)
+    assert not agreement(labels[:4] + labels[5:]).passes(0.85)  # 13/19: the failure counts
+    failed_na = agreement([_label(7, na, None)])
+    assert (failed_na.labels, failed_na.agreed) == (3, 0)
     assert not agreement([]).passes(0.85) and agreement([]).rate == 0.0
-    assert "13/15" in result.describe()
+    assert "13/19" in result.describe()
 
 
 def _calibrated(conn, human_labels):

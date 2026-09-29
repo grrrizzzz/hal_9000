@@ -8,18 +8,21 @@ count, and on evidence *text*, never offsets:
   align with ``rapidfuzz`` partial alignment at >= 90 similarity, on
   normalized text (:func:`hal9000.knowledge.eval.text.joined`: letters and
   digits only, so case, whitespace, hyphenation and letter spacing don't
-  matter). The whole quote is tried first, then the item inside the quote
-  (an item smaller than the quote), then the longest prefix and suffix of the
-  quote (a quote straddling a chunk boundary). Within an alignment, the quote
-  characters that match (Indel opcodes) are covered; a quote *word* is
-  covered when at least half its characters are. A partial alignment must
-  span at least ``min_span_words`` words, so a stray common phrase doesn't
-  count.
+  matter). Every alignment must start and end on the chunk's word boundaries,
+  and a span shorter than ``min_fuzzy_chars`` must match exactly. The whole
+  quote is tried first (or the item inside it, when the item is smaller), then
+  the longest prefix and suffix of the quote (a quote straddling a chunk
+  boundary), each at least ``min_span_words`` words. Within an alignment, the
+  quote characters that match (Indel opcodes) are covered, and a plain word
+  is covered when at least half its characters are. A word of a number token
+  (amount, date, reference number) is covered only when the aligned part of
+  the chunk holds the *identical* token.
 - **Evidence recall** is the share of the question's evidence words covered
   by the union of the selected items.
 - **Budgeted recall @ B** fills the context in rank order and stops at the
   first item that would overflow ``B`` (it is excluded). A chunk size larger
-  than ``B`` is N/A: the key is absent.
+  than ``B``, or a top item that alone overflows ``B``, is N/A: the key is
+  absent (and stays out of the means).
 - **Full-support hit @ k**: every quote at least 80% covered within the top k.
 - **MRR**: reciprocal rank of the first item covering any evidence.
 - **Context precision @ B**: covered evidence tokens / context tokens.
@@ -28,21 +31,23 @@ count, and on evidence *text*, never offsets:
 - **Uncertainty**: a seeded percentile bootstrap (the interval is widened to
   include the point estimate, so it always brackets it), and a paired
   bootstrap over per-question differences to compare two configurations: a
-  difference counts only when its interval excludes zero.
+  difference counts only when its interval excludes zero and at least
+  ``min_paired`` questions are shared (with a sign-flip permutation p-value
+  alongside).
 """
 
 from __future__ import annotations
 
+import bisect
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Literal
 
 import numpy as np
-from rapidfuzz import fuzz
-from rapidfuzz.distance import Indel
 
 from hal9000.knowledge.contracts import EvalMetrics, GoldItem, MetricCI
-from hal9000.knowledge.eval.text import joined, joined_text
+from hal9000.knowledge.eval.text import compound_tokens, joined
 from hal9000.knowledge.eval.types import RetrievalOutput, SelectedItem
 
 __all__ = [
@@ -59,12 +64,15 @@ __all__ = [
     "quote_coverage",
     "roc_auc",
     "score_question",
+    "sign_flip_p",
 ]
 
 TokenCounter = Callable[[str], int]
 
 #: An exact run of this many joined characters must be shared before aligning.
 _SEED = 5
+#: Windows tried per alignment before giving up (each rejected one is masked).
+_RETRIES = 6
 
 
 @dataclass(frozen=True)
@@ -77,8 +85,12 @@ class ScoringConfig:
     full_support: float = 0.8
     min_span_words: int = 3
     word_cover: float = 0.5
+    #: aligned spans shorter than this (joined characters) must match exactly
+    min_fuzzy_chars: int = 12
     n_boot: int = 1000
     seed: int = 20260928
+    #: fewer shared questions than this: a paired comparison is "insufficient"
+    min_paired: int = 10
 
 
 @dataclass(frozen=True)
@@ -120,38 +132,108 @@ class QuestionScore:
 
 
 # ------------------------------------------------------------------ coverage
-def _matched(needle: str, q0: int, hay: str, hit, out: set[int]) -> None:
-    """Mark the quote characters an alignment of ``needle`` (at ``q0`` in the quote) matched.
+@dataclass(frozen=True)
+class _Chunk:
+    """A selected item's text prepared for alignment (cached per text)."""
 
-    ``hit`` aligns ``needle[src_start:src_end]`` with ``hay[dest_start:dest_end]``;
-    only characters in equal Indel blocks inside that window count.
+    text: str
+    joined: str
+    starts: tuple[int, ...]
+    ends: tuple[int, ...]
+    source: tuple[int, ...]
+    numbers: tuple[tuple[int, int, str], ...]
+
+    def tokens_between(self, a: int, b: int) -> set[str]:
+        """Normalized number tokens of the original text overlapping joined ``[a, b)``."""
+        lo, hi = self.source[a], self.source[b - 1] + 1
+        return {norm for s, e, norm in self.numbers if s < hi and e > lo}
+
+
+@lru_cache(maxsize=16384)
+def _chunk(text: str) -> _Chunk:
+    j = joined(text)
+    return _Chunk(
+        text,
+        j.text,
+        tuple(a for a, _ in j.spans),
+        tuple(b for _, b in j.spans),
+        j.source,
+        tuple(compound_tokens(text)),
+    )
+
+
+@dataclass(frozen=True)
+class _Alignment:
+    """Quote ``[qa, qb)`` aligned with chunk ``[ca, cb)`` (joined coordinates)."""
+
+    qa: int
+    qb: int
+    ca: int
+    cb: int
+
+
+def _neighbours(points: Sequence[int], x: int) -> set[int]:
+    """The closest points at or below and at or above ``x``."""
+    i = bisect.bisect_left(points, x)
+    out = set()
+    if i < len(points):
+        out.add(points[i])
+    if i > 0 and (i == len(points) or points[i] != x):
+        out.add(points[i - 1])
+    return out
+
+
+def _find(needle: str, q0: int, chunk: _Chunk, cfg: ScoringConfig) -> _Alignment | None:
+    """The best alignment of ``needle`` in the chunk that starts and ends on its word boundaries.
+
+    rapidfuzz proposes the best window; it is snapped to the chunk's word
+    boundaries and re-scored. A window that can't be snapped is masked out and
+    the next best is tried, so ``yes`` never matches inside ``eyes`` but still
+    finds a real ``yes`` later on. A span shorter than ``min_fuzzy_chars`` must
+    match exactly.
     """
-    a, b = hit.src_start, hit.src_end
-    for op in Indel.opcodes(needle[a:b], hay[hit.dest_start : hit.dest_end]):
-        if op.tag == "equal":
-            out.update(range(q0 + a + op.src_start, q0 + a + op.src_end))
+    from rapidfuzz import fuzz
+    from rapidfuzz.distance import Indel
 
-
-def _aligned(needle: str, hay: str, cutoff: float):
-    return fuzz.partial_ratio_alignment(needle, hay, score_cutoff=cutoff)
+    hay = chunk.joined
+    for _attempt in range(_RETRIES):
+        hit = fuzz.partial_ratio_alignment(needle, hay, score_cutoff=cfg.min_similarity)
+        if hit is None:
+            return None
+        sub = needle[hit.src_start : hit.src_end]
+        best: tuple[float, int, int] | None = None
+        for a in _neighbours(chunk.starts, hit.dest_start):
+            for b in _neighbours(chunk.ends, hit.dest_end):
+                if a >= b:
+                    continue
+                window = chunk.joined[a:b]
+                if len(sub) < cfg.min_fuzzy_chars or len(window) < cfg.min_fuzzy_chars:
+                    score = 100.0 if sub == window else 0.0
+                else:
+                    score = Indel.normalized_similarity(sub, window) * 100
+                if score >= cfg.min_similarity and (best is None or score > best[0]):
+                    best = (score, a, b)
+        if best is not None:
+            return _Alignment(q0 + hit.src_start, q0 + hit.src_end, best[1], best[2])
+        width = hit.dest_end - hit.dest_start
+        hay = hay[: hit.dest_start] + "\0" * max(1, width) + hay[hit.dest_start + max(1, width) :]
+    return None
 
 
 def _longest(
-    qj: str, ends: Sequence[int], cj: str, cutoff: float, *, prefix: bool
-) -> tuple[int, object] | None:
-    """Binary search for the longest word-aligned prefix (or suffix) of ``qj`` found in ``cj``.
+    qj: str, cuts: Sequence[int], chunk: _Chunk, cfg: ScoringConfig, *, prefix: bool
+) -> _Alignment | None:
+    """Binary search for the longest word-aligned prefix (or suffix) of the quote in the chunk.
 
-    ``ends`` are candidate cut points (character offsets in ``qj``) ordered from
-    the shortest candidate to the longest.
+    ``cuts`` are candidate cut points in ``qj``, from the shortest candidate to the longest.
     """
-    lo, hi, best = 0, len(ends) - 1, None
+    lo, hi, best = 0, len(cuts) - 1, None
     while lo <= hi:
         mid = (lo + hi) // 2
-        cut = ends[mid]
-        needle = qj[:cut] if prefix else qj[cut:]
-        hit = _aligned(needle, cj, cutoff)
-        if hit is not None:
-            best = (cut, hit)
+        cut = cuts[mid]
+        found = _find(qj[:cut], 0, chunk, cfg) if prefix else _find(qj[cut:], cut, chunk, cfg)
+        if found is not None:
+            best = found
             lo = mid + 1
         else:
             hi = mid - 1
@@ -165,48 +247,69 @@ def _seeded(qj: str, cj: str) -> bool:
     return any(qj[i : i + _SEED] in cj for i in range(len(qj) - _SEED + 1))
 
 
+@lru_cache(maxsize=4096)
+def _quote_numbers(quote: str) -> tuple[str | None, ...]:
+    """For each quote word, the number token it belongs to (None for plain words)."""
+    q = joined(quote)
+    numbers = compound_tokens(quote)
+    out: list[str | None] = []
+    for a, _b in q.spans:
+        origin = q.source[a]
+        out.append(next((norm for s, e, norm in numbers if s <= origin < e), None))
+    return tuple(out)
+
+
 def covered_words(quote: str, text: str, config: ScoringConfig | None = None) -> set[int]:
-    """Indices of the quote's words that ``text`` covers."""
+    """Indices of the quote's words that ``text`` covers.
+
+    A plain word is covered when at least ``word_cover`` of its characters
+    match inside an alignment. A word of a number token (an amount, date or
+    reference number) is covered only when the aligned part of the chunk holds
+    the identical token: ``$625.00`` is never covered by ``$425.00`` or
+    ``$1,625.00``.
+    """
+    from rapidfuzz.distance import Indel
+
     cfg = config or ScoringConfig()
     q = joined(quote)
     qj = q.text
-    cj = joined_text(text)
-    if not qj or not cj or not _seeded(qj, cj):
+    chunk = _chunk(text)
+    if not qj or not chunk.joined or not _seeded(qj, chunk.joined):
         return set()
-    cutoff = cfg.min_similarity
-    chars: set[int] = set()
-    hit = _aligned(qj, cj, cutoff) if len(qj) <= len(cj) else None
-    if hit is not None:
-        _matched(qj, 0, cj, hit, chars)
-    else:
-        inside = _aligned(cj, qj, cutoff) if len(cj) < len(qj) else None
-        if inside is not None:
-            # the item lies inside the quote: swap the roles back
-            for op in Indel.opcodes(
-                qj[inside.dest_start : inside.dest_end], cj[inside.src_start : inside.src_end]
-            ):
-                if op.tag == "equal":
-                    at = inside.dest_start
-                    chars.update(range(at + op.src_start, at + op.src_end))
+    alignments: list[_Alignment] = []
+    whole = _find(qj, 0, chunk, cfg)
+    if whole is not None:
+        alignments.append(whole)
+    if whole is None or whole.qa > 0 or whole.qb < len(qj):
         n = q.n_words
         k = min(cfg.min_span_words, n)
         if n > k:
-            # prefixes of k..n-1 words, suffixes of k..n-1 words (shortest first)
             prefix_ends = [q.spans[i - 1][1] for i in range(k, n)]
             suffix_starts = [q.spans[n - i][0] for i in range(k, n)]
-            found = _longest(qj, prefix_ends, cj, cutoff, prefix=True)
-            if found is not None:
-                cut, h = found
-                _matched(qj[:cut], 0, cj, h, chars)
-            found = _longest(qj, suffix_starts, cj, cutoff, prefix=False)
-            if found is not None:
-                cut, h = found
-                _matched(qj[cut:], cut, cj, h, chars)
-    return {
-        i
-        for i, (a, b) in enumerate(q.spans)
-        if sum(1 for j in range(a, b) if j in chars) >= cfg.word_cover * (b - a)
-    }
+            for found in (
+                _longest(qj, prefix_ends, chunk, cfg, prefix=True),
+                _longest(qj, suffix_starts, chunk, cfg, prefix=False),
+            ):
+                if found is not None:
+                    alignments.append(found)
+    chars: set[int] = set()
+    for al in alignments:
+        for op in Indel.opcodes(qj[al.qa : al.qb], chunk.joined[al.ca : al.cb]):
+            if op.tag == "equal":
+                chars.update(range(al.qa + op.src_start, al.qa + op.src_end))
+    numbers = _quote_numbers(quote)
+    covered = set()
+    for i, (a, b) in enumerate(q.spans):
+        token = numbers[i]
+        if token is None:
+            if sum(1 for j in range(a, b) if j in chars) >= cfg.word_cover * (b - a):
+                covered.add(i)
+        elif any(
+            al.qa <= a and b <= al.qb and token in chunk.tokens_between(al.ca, al.cb)
+            for al in alignments
+        ):
+            covered.add(i)
+    return covered
 
 
 def quote_coverage(quote: str, text: str, config: ScoringConfig | None = None) -> float:
@@ -289,7 +392,9 @@ def score_question(
     context: dict[int, int] = {}
     for budget in cfg.budgets:
         if chunk_size is not None and chunk_size > budget:
-            continue
+            continue  # N/A: this profile's chunks can't fit the budget
+        if selected and selected[0].prompt_tokens > budget:
+            continue  # N/A: the top item alone overflows, so nothing could be sent
         kept = budget_prefix(selected, budget)
         sets = union(len(kept))
         tokens = sum(s.prompt_tokens for s in kept)
@@ -364,30 +469,64 @@ def _auc_ci(scores: Sequence[QuestionScore], n_boot: int, seed: int) -> MetricCI
 
 @dataclass(frozen=True)
 class Comparison:
-    """A paired-bootstrap comparison of config A against config B."""
+    """A paired comparison of config A against config B on their shared questions.
 
-    verdict: Literal["a", "b", "tie"]
+    ``verdict`` is ``"a"`` or ``"b"`` only when the bootstrap interval of the
+    mean per-question difference excludes zero; ``"tie"`` otherwise; and
+    ``"insufficient"`` (never a win) when fewer than ``min_paired`` questions
+    are shared. ``only_a``/``only_b`` count questions just one run scored, so
+    a mismatch between the two question sets is visible. ``p_value`` is a
+    seeded two-sided sign-flip permutation test, a second opinion.
+    """
+
+    verdict: Literal["a", "b", "tie", "insufficient"]
     mean_diff: float
     low: float
     high: float
     n: int
+    only_a: int = 0
+    only_b: int = 0
+    p_value: float = 1.0
+
+    @property
+    def mismatched(self) -> bool:
+        return bool(self.only_a or self.only_b)
+
+
+def sign_flip_p(diffs: Sequence[float], *, n_perm: int = 1000, seed: int = 0) -> float:
+    """Two-sided p-value of a paired sign-flip permutation test on the mean difference."""
+    d = np.asarray(diffs, dtype=float)
+    if d.size == 0 or not np.any(d):
+        return 1.0
+    observed = abs(d.mean())
+    rng = np.random.default_rng(seed)
+    flips = rng.choice(np.array([-1.0, 1.0]), size=(n_perm, d.size))
+    permuted = np.abs((flips * d).mean(axis=1))
+    return float((1 + np.sum(permuted >= observed - 1e-12)) / (n_perm + 1))
 
 
 def paired_bootstrap(
-    a: Mapping[int, float], b: Mapping[int, float], *, n_boot: int = 1000, seed: int = 0
+    a: Mapping[int, float],
+    b: Mapping[int, float],
+    *,
+    n_boot: int = 1000,
+    seed: int = 0,
+    min_paired: int = 10,
 ) -> Comparison:
-    """Compare two configs on the questions both scored (per-question differences A - B).
-
-    A wins only when the whole 95% interval of the mean difference is above
-    zero, B only when it is below; otherwise it's a tie.
-    """
+    """Compare two configs on the questions both scored (per-question differences A - B)."""
     shared = sorted(set(a) & set(b))
+    only_a, only_b = len(set(a) - set(b)), len(set(b) - set(a))
     if not shared:
-        raise ValueError("the two runs share no questions")
+        return Comparison("insufficient", 0.0, 0.0, 0.0, 0, only_a, only_b)
     diffs = np.asarray([a[q] - b[q] for q in shared], dtype=float)
     ci = bootstrap_ci(diffs, n_boot=n_boot, seed=seed)
-    verdict: Literal["a", "b", "tie"] = "a" if ci.low > 0 else "b" if ci.high < 0 else "tie"
-    return Comparison(verdict, ci.value, ci.low, ci.high, len(shared))
+    p = sign_flip_p(diffs, n_perm=max(n_boot, 1), seed=seed)
+    verdict: Literal["a", "b", "tie", "insufficient"]
+    if len(shared) < min_paired:
+        verdict = "insufficient"
+    else:
+        verdict = "a" if ci.low > 0 else "b" if ci.high < 0 else "tie"
+    return Comparison(verdict, ci.value, ci.low, ci.high, len(shared), only_a, only_b, p)
 
 
 # --------------------------------------------------------------- aggregation

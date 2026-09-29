@@ -13,18 +13,13 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Literal
 
 from hal9000.knowledge.contracts import MetricCI
 from hal9000.knowledge.eval.config import EvalConfig, load_eval_config
-from hal9000.knowledge.eval.scoring import (
-    ScoringConfig,
-    ScoringItem,
-    bootstrap_ci,
-    score_question,
-)
+from hal9000.knowledge.eval.scoring import ScoringItem, bootstrap_ci, score_question
 from hal9000.knowledge.eval.store import list_gold
 from hal9000.knowledge.eval.types import RetrieveFn
 from hal9000.knowledge.obs.timing import Stage, stage
@@ -83,17 +78,7 @@ def run_regression(
     """
     cfg = config or load_eval_config()
     budget = cfg.regression.budget
-    scoring = cfg.scoring.to_config()
-    scoring = ScoringConfig(
-        budgets=(budget,),
-        hit_ks=(),
-        min_similarity=scoring.min_similarity,
-        full_support=scoring.full_support,
-        min_span_words=scoring.min_span_words,
-        word_cover=scoring.word_cover,
-        n_boot=scoring.n_boot,
-        seed=scoring.seed,
-    )
+    scoring = replace(cfg.scoring.to_config(), budgets=(budget,), hit_ks=())
     at = datetime.now(UTC)
     with stage(Stage.REGRESSION):
         if profile_id is None:

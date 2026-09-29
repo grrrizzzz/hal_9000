@@ -8,9 +8,11 @@ scoring:                    # plan §8.2
   min_similarity: 90            # rapidfuzz partial alignment on normalized text
   full_support: 0.80            # every quote at least this covered within top k
   min_span_words: 3             # a partial alignment must cover at least this many words
-  word_cover: 0.50              # a quote word counts as covered at this share of its characters
+  word_cover: 0.50              # a plain quote word counts as covered at this share of its characters
+  min_fuzzy_chars: 12           # aligned spans shorter than this (letters+digits) must match exactly
   n_boot: 1000                  # bootstrap replicates for the 95% intervals
   seed: 20260928                # bootstrap seed (deterministic intervals)
+  min_paired: 10                # fewer shared questions: a paired comparison is "insufficient"
 
 gold:                       # plan §8.1
   tier: powerful
@@ -32,6 +34,8 @@ gold:                       # plan §8.1
   max_link_docs: 4              # a key shared by more documents than this is too generic
   unanswerable_check_k: 30      # passages retrieved when checking an "unanswerable" draft
   dedup_similarity: 90          # rapidfuzz token_sort_ratio at which two questions are duplicates
+  min_quote_words: 3            # shorter evidence quotes are rejected
+  min_quote_chars: 12           # (counting letters and digits only)
   estimate:
     output_tokens_per_item: 220
     repair_allowance: 0.25      # share of calls expected to need one repair call

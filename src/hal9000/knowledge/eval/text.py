@@ -22,6 +22,8 @@ from functools import lru_cache
 
 __all__ = [
     "Joined",
+    "compound_tokens",
+    "extend_to_words",
     "find_normalized",
     "joined",
     "joined_text",
@@ -30,10 +32,13 @@ __all__ = [
 ]
 
 _WORD = re.compile(r"[^\W_]+")
-_INVISIBLE = re.compile("[­￾​‌‍﻿]")
+_INVISIBLE = re.compile("[\u00ad\ufffe\u200b\u200c\u200d\ufeff]")
 _HYPHEN_BREAK = re.compile(r"(?<=\w)-[ \t]*\n[ \t]*(?=\w)")
 _HYPHEN_AT = re.compile(r"-[ \t]*\n[ \t]*(?=\w)")
 _SPACE = re.compile(r"\s+")
+#: a word, or words joined by number punctuation: ``1,625.00``, ``06/22/2023``, ``HP-3000``
+_COMPOUND = re.compile(r"[^\W_]+(?:[.,/:\-\u2010-\u2015][^\W_]+)*")
+_DASHES = re.compile("[\u2010-\u2015]")
 
 
 def _fold(text: str) -> str:
@@ -75,7 +80,7 @@ class Joined:
         return len(self.spans)
 
 
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=16384)
 def joined(text: str) -> Joined:
     """:func:`joined_text` with word spans and a map back to ``text``'s offsets.
 
@@ -149,3 +154,32 @@ def find_normalized(needle: str, haystack: str) -> tuple[int, int] | None:
         return None
     end_index = origin[at + len(target) - 1] + 1
     return origin[at], end_index
+
+
+def compound_tokens(text: str) -> list[tuple[int, int, str]]:
+    """``(start, end, normalized)`` of every compound token in ``text`` that contains a digit.
+
+    A compound token is a word or words joined by number punctuation
+    (``$1,625.00`` gives ``1,625.00``; ``06/22/2023``; ``CHI-INV-20250314``).
+    Amounts, dates and reference numbers are compared as whole tokens, so
+    ``625.00`` never matches ``1,625.00``.
+    """
+    out = []
+    for m in _COMPOUND.finditer(text):
+        token = m.group(0)
+        if any(ch.isdigit() for ch in token):
+            norm = _DASHES.sub("-", unicodedata.normalize("NFKC", token).lower())
+            out.append((m.start(), m.end(), norm))
+    return out
+
+
+def extend_to_words(text: str, start: int, end: int) -> tuple[int, int]:
+    """Widen ``[start, end)`` so it neither starts nor ends inside a (compound) word."""
+    for m in _COMPOUND.finditer(text):
+        if m.start() < start < m.end():
+            start = m.start()
+        if m.start() < end < m.end():
+            end = m.end()
+        if m.start() >= end:
+            break
+    return start, end

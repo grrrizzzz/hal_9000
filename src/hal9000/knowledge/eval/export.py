@@ -9,6 +9,7 @@ text may appear in it (:func:`find_leaks`). A leak refuses the export.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -61,16 +62,23 @@ def page_texts(conn: sqlite3.Connection) -> list[str]:
     return [row[0] for row in conn.execute("SELECT text FROM pages") if row[0]]
 
 
+def _fold(text: str) -> str:
+    """Case-folded with every run of whitespace as one space (leaks ignore both)."""
+    return " ".join(text.casefold().split())
+
+
 def find_leaks(text: str, pages: Iterable[str], n: int = LEAK_CHARS) -> list[str]:
     """Strings of more than ``n`` characters that ``text`` shares with any page.
 
-    Compares every (n+1)-character window of ``text`` against the set of all
-    (n+1)-character windows of the pages; returns the leaked windows, merged
-    per position run (empty when clean).
+    Case- and whitespace-insensitive: both sides are case-folded and their
+    whitespace collapsed first. Every (n+1)-character window of ``text`` is
+    looked up in the set of all (n+1)-character windows of the pages; the
+    leaked windows are returned (folded), merged per run (empty when clean).
     """
     size = n + 1
+    text = _fold(text)
     grams: set[str] = set()
-    for page in pages:
+    for page in map(_fold, pages):
         grams.update(page[i : i + size] for i in range(len(page) - size + 1))
     leaks: list[str] = []
     i = 0
@@ -84,6 +92,35 @@ def find_leaks(text: str, pages: Iterable[str], n: int = LEAK_CHARS) -> list[str
         else:
             i += 1
     return leaks
+
+
+def denylist() -> list[tuple[int, str]]:
+    """``(number, entry)`` for each ``KB_DENYLIST`` entry, case-folded.
+
+    Entries are separated by ``|`` or newlines and numbered like
+    ``scripts/kb_denylist_check.py`` numbers them; entries shorter than three
+    characters are skipped (they would match almost anything).
+    """
+    raw = os.environ.get("KB_DENYLIST", "")
+    entries = [p.strip() for p in raw.replace("|", "\n").splitlines() if p.strip()]
+    return [(n, e.casefold()) for n, e in enumerate(entries, 1) if len(e) >= 3]
+
+
+def check_shareable(texts: Iterable[str], pages: Iterable[str]) -> None:
+    """Raise :class:`LeakDetected` if any text holds page text or a denylist entry.
+
+    The message gives counts and entry numbers only, never the leaked string.
+    """
+    texts = list(texts)
+    pages = list(pages)
+    leaks = [leak for text in texts for leak in find_leaks(text, pages)]
+    if leaks:
+        raise LeakDetected(f"it would contain {len(leaks)} string(s) of document text; refusing")
+    folded = [_fold(t) for t in texts]
+    hits = [n for n, entry in denylist() if any(_fold(entry) in t for t in folded)]
+    if hits:
+        numbers = ", ".join(f"#{n}" for n in hits)
+        raise LeakDetected(f"it contains KB_DENYLIST entry {numbers}; refusing")
 
 
 def _strings(value: Any) -> Iterable[str]:
@@ -146,11 +183,7 @@ def export_runs(
     text = json.dumps(payload, indent=2, sort_keys=True)
     pages = list(page_texts(conn) if pages is None else pages)
     # the serialized file, and every decoded string (JSON escapes newlines and quotes)
-    leaks = find_leaks(text, pages) + find_leaks("\x00".join(_strings(payload)), pages)
-    if leaks:
-        raise LeakDetected(
-            f"the export would contain {len(leaks)} string(s) of document text; refusing"
-        )
+    check_shareable([text, "\x00".join(_strings(payload))], pages)
     target = out_path or run_dir(eval_dir, run_id) / "export.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text + "\n")

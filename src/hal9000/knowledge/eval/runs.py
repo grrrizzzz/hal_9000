@@ -39,8 +39,10 @@ from hal9000.knowledge.eval.types import EvalQuestionResult, EvalResultsPage
 
 __all__ = [
     "RESULTS_FILE",
+    "HOST_CLASSES",
     "finish_run",
     "get_run",
+    "host_class",
     "list_runs",
     "load_results",
     "new_run_id",
@@ -55,6 +57,24 @@ __all__ = [
 RESULTS_FILE = "results.jsonl"
 #: ``full_support`` in the per-question API is hit @ this k (or the largest k scored).
 FULL_SUPPORT_K = 5
+
+
+#: What ``eval_runs.host`` records: a class of machine, never its name.
+HOST_CLASSES = ("mac", "pi", "linux", "windows")
+
+
+def host_class() -> str:
+    """``mac``, ``pi`` (a Raspberry Pi), ``linux`` or ``windows`` for this machine."""
+    system = platform.system()
+    if system == "Darwin":
+        return "mac"
+    if system == "Windows":
+        return "windows"
+    try:
+        model = Path("/proc/device-tree/model").read_text(errors="ignore")
+    except OSError:
+        model = ""
+    return "pi" if "raspberry pi" in model.lower() else "linux"
 
 
 def _now() -> datetime:
@@ -133,7 +153,7 @@ def start_run(
         stage=stage,
         split=split,
         config=dict(config),
-        host=platform.node() if host is None else host,
+        host=host_class() if host is None else host,
         started_at=_now(),
     )
     with conn:

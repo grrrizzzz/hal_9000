@@ -275,28 +275,28 @@ class Agreement:
 
 
 def agreement(labels: Sequence[JudgeLabel]) -> Agreement:
-    """Compare every rubric label Mike and the judge both gave.
+    """Compare every rubric label Mike gave with the judge's.
 
     ``abstention_correct`` is compared when either side gave it (None vs a
-    value is a disagreement). Answers the judge labelled but Mike hasn't yet
-    are counted as ``unlabelled``.
+    value is a disagreement). An answer the judge failed to grade (its reply
+    was invalid twice, so ``judge`` is None) counts as a disagreement on every
+    label Mike gave. Answers Mike hasn't labelled yet are ``unlabelled``.
     """
     agreed = total = items = unlabelled = 0
     field_hits: dict[str, list[int]] = {f: [0, 0] for f in LABEL_FIELDS}
     for label in labels:
-        if label.judge is None:
-            continue
         if label.human is None:
             unlabelled += 1
             continue
         items += 1
         for name in LABEL_FIELDS:
-            human, judge = getattr(label.human, name), getattr(label.judge, name)
+            human = getattr(label.human, name)
+            judge = getattr(label.judge, name) if label.judge is not None else None
             if name == "abstention_correct" and human is None and judge is None:
-                continue
+                continue  # not applicable on either side
             total += 1
             field_hits[name][1] += 1
-            if human == judge:
+            if label.judge is not None and human == judge:
                 agreed += 1
                 field_hits[name][0] += 1
     per_field = {name: hit / n for name, (hit, n) in field_hits.items() if n}

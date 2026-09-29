@@ -58,7 +58,11 @@ def test_find_leaks_flags_strings_longer_than_40_characters():
     assert find_leaks("x" + page[:LEAK_CHARS] + "y", [page]) == []
     leak = page[5 : 5 + LEAK_CHARS + 1]
     assert find_leaks(f'{{"a": "{leak}"}}', [page]) == [leak]
-    assert find_leaks("prefix " + page + " suffix", [page]) == [page]
+    assert find_leaks("prefix " + page + " suffix", [page]) == [page.lower()]
+    # case and whitespace don't hide a leak
+    shouted = page.upper().replace(" ", "  \n ")
+    assert find_leaks(shouted, [page]) == [page.lower()]
+    assert find_leaks(page, [shouted]) == [page.lower()]
     assert find_leaks("short", [page]) == [] and find_leaks(page, []) == []
 
 
@@ -180,3 +184,42 @@ def test_metric_formatting_in_tables():
 
     assert _fmt(MetricCI(value=0.5, low=0.4, high=0.6)) == "0.500 [0.400-0.600]"
     assert _fmt(None) == "N/A"
+
+
+def test_eval_report_refuses_page_text_planted_in_a_config_value(kb_db, tmp_path, fixture_docs):
+    store_documents(kb_db, fixture_docs)
+    planted = fixture_docs[0].pages[7][:60].upper()  # case-changed: still caught
+    fixture_run(
+        kb_db, fixture_docs, tmp_path, config={"profile": "p1", "chunker": planted, "sweep_id": "s"}
+    )
+    fixture_run(
+        kb_db, fixture_docs, tmp_path, config={"profile": "p2", "chunker": "fixed", "sweep_id": "s"}
+    )
+    target = tmp_path / "docs" / "KNOWLEDGE_EVAL_REPORT.md"
+    with pytest.raises(LeakDetected, match="document text"):
+        write_report(kb_db, "s", target)
+    assert not target.exists()
+
+
+def test_report_and_export_refuse_a_denylist_entry(kb_db, tmp_path, fixture_docs, monkeypatch):
+    run = fixture_run(kb_db, fixture_docs, tmp_path, config={"profile": "Finchley-Profile"})
+    monkeypatch.setenv("KB_DENYLIST", "ab|harlow finchley\nFINCHLEY")
+    with pytest.raises(LeakDetected, match="KB_DENYLIST entry #3") as caught:
+        write_report(kb_db, run.id, tmp_path / "r.md", pages=[])
+    assert "finchley" not in str(caught.value).lower()
+    with pytest.raises(LeakDetected, match="#3"):
+        export_runs(kb_db, run.id, eval_dir=tmp_path, pages=[])
+    monkeypatch.delenv("KB_DENYLIST")
+    assert write_report(kb_db, run.id, tmp_path / "r.md", pages=[]).exists()
+
+
+def test_the_report_shows_a_host_class_not_a_machine_name(kb_db, tmp_path, fixture_docs):
+    from hal9000.knowledge.eval.runs import HOST_CLASSES, host_class, start_run
+
+    assert host_class() in HOST_CLASSES
+    assert start_run(kb_db, stage="S1a", config={}).host == host_class()
+    run = fixture_run(kb_db, fixture_docs, tmp_path, config={"profile": "p1", "sweep_id": "h"})
+    kb_db.execute("UPDATE eval_runs SET host = 'mikes-macbook-pro.local' WHERE id = ?", (run.id,))
+    kb_db.commit()
+    text = write_report(kb_db, "h", tmp_path / "r.md", pages=[]).read_text()
+    assert "mikes-macbook" not in text and "| other |" in text
