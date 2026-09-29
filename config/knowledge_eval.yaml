@@ -52,51 +52,57 @@ judge:                      # plan §8.4.1
 regression:                 # plan §9.2 kb_regression_recall
   budget: 2000
 
-# Staged sweep grids (plan §8.4), read by the sweep runner (KWP5 part B).
+# Staged sweep grids (plan §8.4), read by the sweep runner (KWP5 part B,
+# src/hal9000/knowledge/eval/sweep.py). Every retrieval run is scored at every
+# scoring budget (1k, 2k, 4k: T9's budgets) and times local retrieval on this host.
 sweep:
-  S1a:
+  decision_budget: 2000           # plan §8.6: budgeted recall @ 2k on dev decides
+  S1a:                            # T1 x T3
     sizes: [128, 256, 384, 512, 768, 1024, 1536]
     chunkers: [fixed, recursive, structure]
-    fixed_overlap: 0.15
+    fixed_overlap: 0.15           # fixed only; the others have none in S1a
     parent_child:
       child_sizes: [128, 256, 384, 512]
       parent_size: 1500
     parser: pdfium
     header: true
-    embed_model: openai/text-embedding-3-small
+    embedding: {model: openai/text-embedding-3-small, dimensions: 1536}
     retrieval: [dense, rrf]
-  S1b:
+  S1b:                            # T2 x T4 x T5 on the top chunkings of S1a
     top: 5
-    overlap: [0.0, 0.15]
+    overlap: [0.0, 0.15]          # share of the chunk size
     header: [false, true]
-    parser: [pdfium, docling]
-  S2:
+    parser: [pdfium, docling]     # docling only if importable (knowledge-docling)
+  S2:                             # T6 on the top profiles of S1, best S1 method
     top: 4
     embeddings:
       - {model: openai/text-embedding-3-small, dimensions: 1536}
       - {model: openai/text-embedding-3-large, dimensions: 3072}
       - {model: openai/text-embedding-3-large, dimensions: 1024}
       - {model: openai/text-embedding-3-large, dimensions: 256}
-  S3:
+  S3:                             # T7 x T8 on the top profiles of S2; T10 on the top configs
     top: 3
     retrieval: [dense, bm25, rrf, weighted]
     weighted_alpha: [0.3, 0.5, 0.7]
-    rerankers: [none, minilm-l6, bge-reranker-base]
+    rerankers: [none, minilm, bge-base]   # a reranker only if its model loads
     query_transform_top: 2
-    query_transforms: [none, multi_query, hyde]
-  S4:
+    query_transforms: [multi, hyde]
+  S4:                             # T9 (k) and T12 (abstain threshold) on the top configs of S3
     top: 3
-    budgets: [1000, 2000, 4000]
     ks: [3, 5, 8, 10, 15]
-    abstain_decline_min: 0.80   # plan §8.5: at least 80% of unanswerables declined
-    abstain_refuse_max: 0.05    # with at most 5% of answerables refused
-    abstain_auc_min: 0.75       # below this the check moves to generation
-  S5:
+    abstain_decline_min: 0.80     # plan §8.5: at least 80% of unanswerables declined
+    abstain_refuse_max: 0.05      # with at most 5% of answerables refused
+    abstain_auc_min: 0.75         # below this the check moves to generation
+  S5:                             # T11, end to end on dev, judged
     top: 3
     chat_tiers: [fast, powerful]
-    repeat_top: 1
-  S6:
+    repeat_top: 1                 # the top configuration answered once more per tier
+  S6:                             # kb eval latency on the Pi
     top: 3
     replay: 200
     end_to_end: 30
-    p95_local_retrieval_ms: 300
+    p95_local_retrieval_ms: 300   # plan §1 / §8.6 filter
+  estimate:                       # T10 rewrites per question (fast tier)
+    transform_prompt_tokens: 250
+    multi_output_tokens: 80
+    hyde_output_tokens: 200
