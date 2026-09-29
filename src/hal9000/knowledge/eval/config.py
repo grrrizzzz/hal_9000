@@ -1,0 +1,138 @@
+"""``config/knowledge_eval.yaml``: scoring, gold generation, judge and sweep settings."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any, Literal
+
+import yaml
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from hal9000 import config as hal_config
+from hal9000.knowledge.contracts import GoldCategory
+from hal9000.knowledge.eval.scoring import ScoringConfig
+
+__all__ = [
+    "EvalConfig",
+    "GoldConfig",
+    "JudgeConfig",
+    "load_eval_config",
+]
+
+CATEGORIES: tuple[GoldCategory, ...] = (
+    "factoid",
+    "money",
+    "date",
+    "list",
+    "cross_document",
+    "unanswerable",
+)
+
+
+class _Model(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ScoringSection(_Model):
+    budgets: list[int] = Field(default_factory=lambda: [1000, 2000, 4000])
+    hit_ks: list[int] = Field(default_factory=lambda: [1, 3, 5, 10])
+    min_similarity: float = Field(default=90.0, ge=0, le=100)
+    full_support: float = Field(default=0.8, gt=0, le=1)
+    min_span_words: int = Field(default=3, ge=1)
+    word_cover: float = Field(default=0.5, gt=0, le=1)
+    n_boot: int = Field(default=1000, ge=0)
+    seed: int = 20260928
+
+    def to_config(self) -> ScoringConfig:
+        return ScoringConfig(
+            budgets=tuple(self.budgets),
+            hit_ks=tuple(self.hit_ks),
+            min_similarity=self.min_similarity,
+            full_support=self.full_support,
+            min_span_words=self.min_span_words,
+            word_cover=self.word_cover,
+            n_boot=self.n_boot,
+            seed=self.seed,
+        )
+
+
+class GoldEstimate(_Model):
+    output_tokens_per_item: int = 220
+    repair_allowance: float = Field(default=0.25, ge=0)
+    check_output_tokens: int = 120
+
+
+def _default_quotas() -> dict[str, int]:
+    return {
+        "factoid": 34,
+        "money": 18,
+        "date": 12,
+        "list": 16,
+        "cross_document": 16,
+        "unanswerable": 24,
+    }
+
+
+class GoldConfig(_Model):
+    tier: Literal["fast", "powerful"] = "powerful"
+    quotas: dict[GoldCategory, int] = Field(default_factory=_default_quotas)
+    paraphrase_quota: float = Field(default=0.30, ge=0, le=1)
+    paraphrase_jaccard: float = Field(default=0.30, gt=0, le=1)
+    dev_fraction: float = Field(default=0.60, gt=0, lt=1)
+    overgenerate: float = Field(default=1.5, ge=1)
+    window_pages: int = Field(default=3, ge=1)
+    window_max_chars: int = Field(default=12000, ge=500)
+    min_window_chars: int = Field(default=200, ge=0)
+    max_link_sets: int = Field(default=12, ge=0)
+    max_link_docs: int = Field(default=4, ge=2)
+    unanswerable_check_k: int = Field(default=30, ge=1)
+    dedup_similarity: float = Field(default=90.0, ge=0, le=100)
+    estimate: GoldEstimate = Field(default_factory=GoldEstimate)
+
+    @model_validator(mode="after")
+    def _quotas(self) -> GoldConfig:
+        for category in CATEGORIES:
+            self.quotas.setdefault(category, 0)
+        if any(v < 0 for v in self.quotas.values()):
+            raise ValueError("quotas must be >= 0")
+        return self
+
+
+class JudgeEstimate(_Model):
+    answer_prompt_tokens: int = 2500
+    answer_output_tokens: int = 350
+    judge_output_tokens: int = 150
+
+
+class JudgeConfig(_Model):
+    n_items: int = Field(default=20, ge=1)
+    agreement_gate: float = Field(default=0.85, gt=0, le=1)
+    estimate: JudgeEstimate = Field(default_factory=JudgeEstimate)
+
+
+class RegressionConfig(_Model):
+    budget: int = Field(default=2000, gt=0)
+
+
+class EvalConfig(_Model):
+    scoring: ScoringSection = Field(default_factory=ScoringSection)
+    gold: GoldConfig = Field(default_factory=GoldConfig)
+    judge: JudgeConfig = Field(default_factory=JudgeConfig)
+    regression: RegressionConfig = Field(default_factory=RegressionConfig)
+    #: stage grids for the sweep runner (plan §8.4); validated by part B
+    sweep: dict[str, Any] = Field(default_factory=dict)
+
+
+def load_eval_config(path: Path | str | None = None) -> EvalConfig:
+    """Parse ``config/knowledge_eval.yaml``; a missing file gives the defaults."""
+    if path is None:
+        from hal9000.knowledge.config import settings
+
+        path = settings().config_dir / "knowledge_eval.yaml"
+    target = Path(path)
+    if not target.exists():
+        return EvalConfig()
+    raw: Any = yaml.safe_load(target.read_text()) or {}
+    if not isinstance(raw, dict):
+        raise hal_config.ConfigError(f"{target} must hold a mapping, not {type(raw).__name__}.")
+    return EvalConfig.model_validate(raw)
