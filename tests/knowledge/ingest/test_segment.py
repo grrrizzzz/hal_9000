@@ -67,7 +67,9 @@ def test_heuristic_labels_on_the_bundle():
 
 
 @pytest.mark.parametrize(
-    "file", [f for f in corpus.ALL_FILES if f is not corpus.MIXED], ids=lambda f: f.name
+    "file",
+    [f for f in corpus.ALL_FILES if f is not corpus.MIXED and f not in corpus.REVIEW_FILES],
+    ids=lambda f: f.name,
 )
 def test_each_fixture_file_segments_to_its_documents(file):
     result = parsed(file)
@@ -202,7 +204,12 @@ def test_vendor_change_without_a_form_header():
 
 def test_a_new_letterhead_after_a_finished_numbered_document():
     pages = _pages("Report\nPage 1 of 1", "Delta Electric Co.\nnotes without numbering")
-    assert propose_boundaries(pages)[1].reason == "letterhead after a finished numbered document"
+    assert (
+        propose_boundaries(pages)[1].reason
+        == "letterhead Delta Electric Co. where the document had none"
+    )
+    pages = _pages("Report\nPage 1 of 1", "notes without numbering")
+    assert propose_boundaries(pages)[1].reason == "after page 1 of 1"
 
 
 def test_nothing_detected_means_one_document():
@@ -521,32 +528,119 @@ def test_letterhead_top_lines_are_recognised():
 
 def test_a_letterhead_after_a_finished_numbered_document_starts_a_new_one():
     pages = _pages(
-        "Report\nbody\nrow 1 of 2",
-        "row 2 of 2\nbody",
+        "Report\nbody\n12 GULL LN 04/02/2025 1 of 3",
+        "12 GULL LN 04/02/2025 2 of 3\nbody",
+        "a last page whose footer was not captured",
         "A Person Carpentry\n88 Kelp Ave.\nPort Alder, CA 90000\nLic # 000111\nnote",
     )
-    boundaries = propose_boundaries(pages)
-    assert [(b.page, b.reason) for b in boundaries][-1] == (
-        3,
-        "letterhead after a finished numbered document",
+    reasons = [(b.page, b.reason) for b in propose_boundaries(pages)]
+    assert reasons[1:] == [(4, "letterhead after a finished numbered document")]
+
+
+def test_a_changed_contact_block_splits_only_with_corroboration():
+    # alone: a letter's last page names a managing company with another phone number
+    letter = _pages(
+        "Coastal Bluffs HOA\nPO Box 100, Seaview, CA 92000\n(555) 010-0101\nMarch 3, 2024\nDear Owner,",
+        "Owner, 12 Example Lane\nMarch 3, 2024\nPage 2\nbody\nManaged by Sunset Management (555) 010-0199",
     )
-
-
-def test_unnumbered_pages_split_when_the_contact_block_changes():
+    assert [b.page for b in propose_boundaries(letter)] == [1]
+    # with a reference number on the page: a new document
     pages = _pages(
-        "note one\nCall (555) 010-0444",
-        "note one continued\nCall (555) 010-0444",
-        "items\nQuestions? Call (555) 010-0555",
+        "note one\nCall (555) 010-0444", "items\nInvoice # GA-1\nQuestions? Call (555) 010-0555"
     )
-    assert [(b.page, b.reason) for b in propose_boundaries(pages)] == [
-        (1, "start of file"),
-        (3, "contact details change"),
+    assert [(b.page, b.reason) for b in propose_boundaries(pages)][1:] == [
+        (2, "contact details change")
     ]
 
 
-def test_unnumbered_pages_split_when_the_top_date_changes():
-    pages = _pages("June 3, 2025\nLetter one", "Letter one, page two", "July 9, 2025\nLetter two")
-    assert [(b.page, b.reason) for b in propose_boundaries(pages)] == [
-        (1, "start of file"),
-        (3, "date changes to 2025-07-09"),
+def test_a_changed_top_date_splits_only_with_corroboration():
+    # alone: a dated service log keeps its weeks together
+    log = _pages(
+        *(f"Pool Service Log\nWeek of 2024-05-{d:02d}\nvisit notes" for d in (6, 13, 20, 27))
+    )
+    assert [b.page for b in propose_boundaries(log)] == [1]
+    # with new contact details too: a new document
+    pages = _pages(
+        "June 3, 2025\nLetter one",
+        "Letter one, page two",
+        "July 9, 2025\nLetter two\n(555) 010-0777",
+    )
+    assert [(b.page, b.reason) for b in propose_boundaries(pages)][1:] == [
+        (3, "contact details change")
     ]
+
+
+def test_a_dated_page_after_an_undated_document_starts_a_new_one():
+    pages = _pages(
+        "Rivera Tile\nnote",
+        "Tuesday, June 4, 2024\nKitchen journal",
+        "Friday, June 7, 2024\nKitchen journal",
+    )
+    assert [(b.page, b.reason) for b in propose_boundaries(pages)][1:] == [
+        (2, "a dated page after an undated document")
+    ]
+
+
+def test_step_and_figure_counters_are_not_page_markers():
+    # one "Step 3 of 5" inside a manual must not hold every later page in the manual
+    manual = [f"Dishwasher guide\nSection {k}\nbody" for k in range(1, 7)]
+    manual[3] += "\nInstallation, Step 3 of 5"
+    pages = _pages(*manual, "Bayside Electric Co.\nINVOICE\nInvoice # 5521\nitems")
+    assert [b.page for b in propose_boundaries(pages)] == [1, 7]
+    figures = page_signals(
+        ParsedPage(page=1, text="Pump guide\nbody\nWiring diagram, Figure 1 of 3")
+    )
+    assert figures.marker is None
+
+
+def test_a_bare_k_of_n_needs_a_consistent_neighbour():
+    lone = _pages("Checklist\nbody\n12 GULL LN 04/02/2025 3 of 5", "next page\nbody")
+    assert page_signals(lone[0]).marker == (3, 5)
+    assert [b.page for b in propose_boundaries(lone)] == [1]  # not trusted: no neighbour
+    pair = _pages(
+        "intro\nbody", "form\n12 GULL LN 04/02/2025 1 of 2", "12 GULL LN 04/02/2025 2 of 2\nbody"
+    )
+    assert [(b.page, b.reason) for b in propose_boundaries(pair)][1:] == [(2, "page 1 of 2")]
+
+
+@pytest.mark.parametrize(("total", "starts"), [(4, [1, 5]), (9, [1])])
+def test_the_unfinished_document_guard_expires(total, starts):
+    # "Page 2 of N" then unnumbered pages: it absorbs at most N - 2 of them
+    pages = _pages(f"Page 1 of {total}\nA", f"Page 2 of {total}\nB", "c", "d", "INVOICE\nitems")
+    assert [b.page for b in propose_boundaries(pages)] == starts
+
+
+def test_a_form_word_followed_by_an_id_is_a_reference_not_a_heading():
+    assert (
+        page_signals(ParsedPage(page=1, text="Inspection Record - Permit B24-0117\nx")).form is None
+    )
+    assert (
+        page_signals(ParsedPage(page=1, text="BUILDING PERMIT\nPermit No. B24-0117")).form
+        == "permit"
+    )
+
+
+def test_a_form_header_where_the_document_had_none_starts_one():
+    pages = _pages("Thank you for your business!\nreceipt", "LiftRight Opener\nOWNERS MANUAL\nbody")
+    assert [(b.page, b.reason) for b in propose_boundaries(pages)][1:] == [
+        (2, "form header OWNERS MANUAL")
+    ]
+
+
+# ------------------------------------------ the KWP1b reviewer's over-fitting probes
+@pytest.mark.parametrize(
+    "file", [corpus.REVIEW_B1, corpus.REVIEW_B1B, corpus.REVIEW_B2], ids=lambda f: f.name
+)
+def test_review_bundles_split_with_no_misses_and_at_most_one_false_split(file):
+    found = {b.page for b in propose_boundaries(parsed(file).pages)}
+    expected = {d.page_start for d in file.documents}
+    assert expected - found == set()
+    assert len(found - expected) <= 1
+
+
+def test_review_b3_misses_only_pages_without_any_signal():
+    file = corpus.REVIEW_B3
+    found = {b.page for b in propose_boundaries(parsed(file).pages)}
+    expected = {d.page_start for d in file.documents}
+    assert found - expected == set()
+    assert expected - found == set(corpus.REVIEW_B3_NO_SIGNAL)  # left to the LLM path

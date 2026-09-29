@@ -32,7 +32,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import PurePath
 from typing import Literal, Protocol, get_args
@@ -191,6 +191,9 @@ def _form(line: str) -> tuple[str, str] | None:
         return None
     for phrase, doc_type in _FORMS:
         if re.search(rf"\b{phrase}\b", words) and len(words) <= len(phrase) + 30:
+            spelled = r"\W+".join(phrase.split())
+            if re.search(rf"(?i)\b{spelled}\s*(?:no\.?|#|number|:)?\s*[A-Z]*-?\d", line):
+                return None  # "Permit B24-0117": a reference to a form, not its heading
             return phrase, doc_type
     return None
 
@@ -228,9 +231,13 @@ class PageSignals:
     page: int
     has_text: bool
     marker: tuple[int, int] | None = None
+    #: the marker is a bare "k of N" (no "Page"): trusted only next to a consistent one
+    bare_marker: bool = False
     form: str | None = None  # doc_type of a form header in the top lines
     form_line: str | None = None
     vendor: str | None = None
+    #: the vendor is the page's first line (a letterhead, not a mention further down)
+    vendor_first: bool = False
     references: tuple[tuple[str, str], ...] = ()
     first_line: str = ""
     #: phone numbers in the top and bottom lines: a letterhead's or footer's contact block
@@ -239,6 +246,8 @@ class PageSignals:
     letterhead: bool = False
     #: the first date in the top lines (a letter's or form's own date)
     top_date: date | None = None
+    #: the page's first line is only a date (a dated heading, a log entry)
+    opens_with_date: bool = False
 
 
 def page_signals(page: ParsedPage) -> PageSignals:
@@ -251,11 +260,16 @@ def page_signals(page: ParsedPage) -> PageSignals:
         number, total = int(match.group(1)), int(match.group(2))
         if 1 <= number <= total:
             marker = (number, total)  # the last one wins: footers come last
+    bare_marker = False
     if marker is None:
         for line in [*lines[:_TOP_LINES], *lines[-_CONTACT_BOTTOM:]]:
             bare = _BARE_MARKER.search(line)
+            before = line[: bare.start()].rstrip() if bare else ""
+            if before and before[-1].isalpha():
+                continue  # "Figure 2 of 3", "Step 3 of 5": numbering something else
             if bare and 1 <= int(bare.group(1)) <= int(bare.group(2)):
                 marker = (int(bare.group(1)), int(bare.group(2)))
+                bare_marker = True
     head = lines[:_CONTACT_TOP]
     edges = [*head, *lines[-_CONTACT_BOTTOM:]]
     contacts = frozenset("".join(m.groups()) for line in edges for m in _PHONE.finditer(line))
@@ -280,15 +294,33 @@ def page_signals(page: ParsedPage) -> PageSignals:
         page=page.page,
         has_text=True,
         marker=marker,
+        bare_marker=bare_marker,
         form=form[1] if form else None,
         form_line=form_line,
         vendor=vendor,
+        vendor_first=bool(vendor) and _vendor(top[0], 0) == vendor,
         references=references,
         first_line=first_line,
         contacts=contacts,
         letterhead=letterhead,
         top_date=find_date("\n".join(lines[:_TOP_LINES])),
+        opens_with_date=_is_date_line(lines[0]),
     )
+
+
+_WEEKDAYS = re.compile(
+    r"(?i)\b(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)(?:day|nesday|urday|sday)?\b\.?"
+)
+
+
+def _is_date_line(line: str) -> bool:
+    """Whether ``line`` is a date and nothing more ("Tuesday, June 4, 2024", "06/04/2024")."""
+    if find_date(line) is None:
+        return False
+    rest = _WEEKDAYS.sub("", line)
+    for pattern in _DATE_PATTERNS:
+        rest = pattern.sub("", rest)
+    return not re.sub(r"[\W_]+", "", rest)
 
 
 def _is_noise(line: str) -> bool:
@@ -313,10 +345,14 @@ class _Current:
     references: dict[str, str] = field(default_factory=dict)
     contacts: set[str] = field(default_factory=set)
     top_date: date | None = None
+    #: pages absorbed since the last numbered one
+    since: int = 0
 
     def absorb(self, signals: PageSignals) -> None:
+        self.since += 1
         if signals.marker:
             self.marker = signals.marker
+            self.since = 0
         self.form = self.form or signals.form
         self.vendor = self.vendor or signals.vendor
         self.contacts |= signals.contacts
@@ -338,13 +374,15 @@ def _boundary_reason(signals: PageSignals, current: _Current) -> str | None:
             if total == last_total and number > last:
                 return None
             return f"page numbering changes to {number} of {total}"
-    elif current.marker is not None and current.marker[0] < current.marker[1]:
-        return None  # a numbered document is not finished yet
+    elif current.marker is not None and current.since < current.marker[1] - current.marker[0]:
+        # a numbered document is not finished yet -- but it can only absorb as many
+        # unnumbered pages as it has pages left (a "Step 3 of 5" line isn't a book)
+        return None
     for kind, value in signals.references:
         if current.references.get(kind, value) != value:
             return f"new {kind} number {value}"
-    if signals.form and current.form and signals.form != current.form:
-        return f"form header {signals.form_line}"
+    if signals.form and signals.form != current.form:
+        return f"form header {signals.form_line}"  # a new form, or one where there was none
     if signals.form and signals.form == current.form:
         # the same form header again without a page-number reset: a new document
         # (back-to-back invoices), unless the page carries the same reference number
@@ -357,19 +395,52 @@ def _boundary_reason(signals: PageSignals, current: _Current) -> str | None:
         and normalize_line(signals.vendor) != normalize_line(current.vendor)
     ):
         return f"vendor changes to {signals.vendor}"
+    if signals.vendor_first and not current.vendor and _LEGAL.search(signals.vendor or ""):
+        return f"letterhead {signals.vendor} where the document had none"
     finished = current.marker is not None and marker is None
     if finished and (signals.form or signals.vendor or signals.letterhead):
         return "letterhead after a finished numbered document"
-    if signals.contacts and current.contacts and signals.contacts.isdisjoint(current.contacts):
+    if finished and current.since == 0 and current.marker[0] == current.marker[1]:
+        return f"after page {current.marker[1]} of {current.marker[1]}"
+    if signals.opens_with_date and current.top_date is None:
+        return "a dated page after an undated document"
+    # contact details and dates change inside documents too (a second phone number on a
+    # letter's last page, a dated service log): each needs corroboration
+    # (contact details where the document had none also count as new)
+    new_contacts = bool(signals.contacts and signals.contacts.isdisjoint(current.contacts))
+    new_date = bool(signals.top_date and current.top_date and signals.top_date != current.top_date)
+    start_cue = bool(signals.letterhead or signals.form or signals.vendor or signals.references)
+    if new_contacts and (start_cue or new_date):
         return "contact details change"
-    if signals.top_date and current.top_date and signals.top_date != current.top_date:
+    if new_date and (start_cue or new_contacts):
         return f"date changes to {signals.top_date.isoformat()}"
     return None
 
 
+def _trusted_markers(signals: list[PageSignals]) -> list[PageSignals]:
+    """Drop a bare "k of N" unless a neighbouring page has a consistent marker (same N, k±1).
+
+    A form's "number of pages" cell repeats on every page; "Step 3 of 5" or a rating
+    "2 of 5" in the text is alone.
+    """
+    trusted: list[PageSignals] = []
+    for index, page in enumerate(signals):
+        if page.bare_marker and page.marker is not None:
+            number, total = page.marker
+            neighbours = [signals[j] for j in (index - 1, index + 1) if 0 <= j < len(signals)]
+            consistent = any(
+                n.marker is not None and n.marker[1] == total and abs(n.marker[0] - number) == 1
+                for n in neighbours
+            )
+            if not consistent:
+                page = replace(page, marker=None, bare_marker=False)
+        trusted.append(page)
+    return trusted
+
+
 def propose_boundaries(pages: Sequence[ParsedPage]) -> list[Boundary]:
     """Where each document starts, by the heuristics. The first page always starts one."""
-    signals = [page_signals(page) for page in pages]
+    signals = _trusted_markers([page_signals(page) for page in pages])
     if not signals:
         return []
     boundaries = [Boundary(signals[0].page, "start of file")]

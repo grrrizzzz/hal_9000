@@ -38,6 +38,12 @@ __all__ = [
     "LETTER_SPACED",
     "MIXED",
     "MIXED_TYPED",
+    "REVIEW_B1",
+    "REVIEW_B1B",
+    "REVIEW_B2",
+    "REVIEW_B3",
+    "REVIEW_B3_NO_SIGNAL",
+    "REVIEW_FILES",
     "MARKDOWN",
     "PDF_FILES",
     "QAFact",
@@ -173,6 +179,28 @@ MIXED = CorpusFile(
         )
     ),
 )
+
+
+def _review(name: str) -> CorpusFile:
+    pages, starts, types = _b.review_layout(name)
+    ends = [*(n - 1 for n in starts[1:]), len(pages)]
+    documents = tuple(
+        ExpectedDocument(start, end, doc_type, None, None, "")
+        for start, end, doc_type in zip(starts, ends, types)
+    )
+    return CorpusFile(name, len(pages), documents)
+
+
+#: The KWP1b reviewer's probes for over-fitted segmentation (see the builder).
+REVIEW_B1 = _review("review_b1.pdf")
+REVIEW_B1B = _review("review_b1b.pdf")
+REVIEW_B2 = _review("review_b2.pdf")
+REVIEW_B3 = _review("review_b3.pdf")
+REVIEW_FILES: tuple[CorpusFile, ...] = (REVIEW_B1, REVIEW_B1B, REVIEW_B2, REVIEW_B3)
+#: review_b3.pdf pages that start a document but carry no signal a heuristic can
+#: read (a neighbour's note, a panel schedule): left to the LLM path
+REVIEW_B3_NO_SIGNAL: tuple[int, ...] = (9, 10)
+
 DOCX = CorpusFile(
     "heat_pump_guide.docx",
     3,
@@ -208,12 +236,15 @@ ALL_FILES: tuple[CorpusFile, ...] = (
     BUNDLE,
     UNNUMBERED,
     MIXED,
+    *REVIEW_FILES,
     DOCX,
     HTML,
     MARKDOWN,
     TEXT,
 )
-PDF_FILES: tuple[CorpusFile, ...] = (INSPECTION, ESTIMATE, INVOICE, BUNDLE, UNNUMBERED, MIXED)
+PDF_FILES: tuple[CorpusFile, ...] = (
+    INSPECTION, ESTIMATE, INVOICE, BUNDLE, UNNUMBERED, MIXED, *REVIEW_FILES,
+)  # fmt: skip
 #: mixed_bundle.pdf's documents with a form header the heuristics can type (not the letters)
 MIXED_TYPED = MIXED.documents[:8]
 
