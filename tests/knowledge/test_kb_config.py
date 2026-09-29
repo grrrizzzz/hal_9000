@@ -80,14 +80,16 @@ def test_embedding_prices_live_in_the_one_pricing_table():
 
 def test_committed_knowledge_yaml_parses():
     file = kc.load_knowledge_file(REPO / "config" / "knowledge.yaml")
-    assert file.active_profile is None
+    # the plan's baseline, the default for the first ingest until G-K2 replaces it
+    assert file.active_profile == "pdfium.structure-768.hdr.te3s-1536"
     assert file.retrieval.rrf_k == 60 and file.retrieval.top_k_vector == 30
     assert file.retrieval.context_budget_tokens == 2000
     assert file.answer.wall_clock_seconds == 90 and file.answer.questions_per_minute == 20
     assert file.ingest.max_upload_bytes == 100 * 1024 * 1024
     assert file.trace_retention_days == 180
+    assert file.require_active_profile() == file.active_profile
     with pytest.raises(kc.ConfigMissing, match="active_profile"):
-        file.require_active_profile()
+        kc.KnowledgeFile().require_active_profile()
 
 
 def test_knowledge_yaml_defaults_typos_and_shape(tmp_path, monkeypatch):

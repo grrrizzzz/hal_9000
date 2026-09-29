@@ -1,0 +1,39 @@
+# Build context for deploy/docker/Dockerfile.kb (context = the repository root).
+# Only what the image needs goes in: pyproject.toml, uv.lock, README.md, src/,
+# vendor/, config/, scripts/, web/ (sources; dist is built in the image).
+# House data and secrets must never reach the build context.
+.env
+.env.*
+**/.env
+data/
+**/data/knowledge*
+
+# VCS, environments and caches
+.git
+.github
+.venv
+**/.venv
+**/__pycache__
+**/*.py[cod]
+.pytest_cache
+.ruff_cache
+.coverage
+.coverage.*
+htmlcov/
+build/
+dist/
+*.egg-info
+
+# Node: installed and built inside the image
+**/node_modules
+web/dist
+web/test-results
+web/playwright-report
+web/blob-report
+web/.vite
+
+# Not needed at run time
+tests/
+docs/
+deploy/
+.pre-commit-config.yaml
