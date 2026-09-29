@@ -387,3 +387,25 @@ def test_fake_mode_triggers(settings, conn):
     assert events.of("sources")[0].banner == BANNER_EMBEDDING and answer.outcome == "answered"
     answer, _ = ask(pipeline, conn, "Is there a swimming pool heater?")
     assert answer.outcome == "abstained"
+
+
+def test_a_paid_answer_reaches_the_ledger_and_the_trace(settings, conn, embedder, meter_factory):
+    from hal9000.llm import Usage
+
+    def paid(prompt, tier="fast", *, on_usage=None, **kw):
+        yield FURNACE_OK
+        usage = Usage(model="openai/gpt-5-mini", prompt=1200, cached=0, completion=40)
+        on_usage(usage)
+        yield usage
+
+    meter = meter_factory(cap=100.0)
+    pipeline = make(settings, paid, embedder=embedder, meter=meter)
+    answer, _ = ask(pipeline, conn, "How old is the furnace?")
+    trace = load_trace(conn, answer.trace_id)
+    assert answer.cost_usd > 0 and trace.cost_usd == pytest.approx(answer.cost_usd, abs=1e-6)
+    assert trace.tokens_by_model["openai/gpt-5-mini"] == {
+        "prompt": 1200,
+        "cached": 0,
+        "completion": 40,
+    }
+    assert meter.month_spend("knowledge") == pytest.approx(answer.cost_usd, abs=1e-6)

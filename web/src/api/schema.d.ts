@@ -443,7 +443,11 @@ export interface paths {
         get: operations["get_profile"];
         /**
          * Put Profile
-         * @description Make an existing, built profile the one that serves the chat.
+         * @description Switch to an existing, built profile.
+         *
+         *     The switch runs as a background ``reindex`` job (a built profile is not
+         *     rebuilt: the job only activates it), so the UI follows it on the job
+         *     stream like any re-index; answers keep using the old profile until then.
          */
         put: operations["put_profile"];
         post?: never;

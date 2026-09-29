@@ -616,3 +616,27 @@ def test_the_ui_is_served_with_a_history_fallback(api: Api, tmp_path):
     assert unknown.status_code == 404 and unknown.headers["content-type"] == "application/json"
     assert client.get("/../../etc/passwd").text.startswith("<!doctype html>")
     assert client.get("/health").headers["content-type"] == "application/json"
+
+
+# ------------------------------------------------------------------ services
+def test_the_real_services_are_metered_and_report_the_cap(tmp_path, monkeypatch):
+    from hal9000.knowledge.api.services import _meter, build_services
+    from tests.knowledge.answer.conftest import make_settings
+
+    monkeypatch.setenv("HAL_DATA_DIR", str(tmp_path / "hal"))
+    settings = make_settings(tmp_path, monthly_cap_usd=0.5)
+    meter = _meter(settings)
+    assert meter.monthly_caps == {"knowledge": 0.5, "knowledge-eval": 10.0}
+    services = build_services(settings, meter=meter, start_worker=False)
+    try:
+        assert services.meter is meter and services.answerer.deps.meter is meter
+        assert services.ingest.meter is meter and services.fake is False
+        assert services.month_spend() == 0.0 and services.retrieval_only() is False
+        meter.db.add_ledger("earlier", "knowledge", {"model": "openai/gpt-5-mini"}, 0.75)
+        assert services.retrieval_only() is True
+        client = TestClient(create_app(services, web_dist=False))
+        body = client.get("/health").json()
+        assert body["status"] == "degraded" and body["retrieval_only"] is True
+        assert body["month_spend_usd"] == 0.75 and body["month_cap_usd"] == 0.5
+    finally:
+        services.close()

@@ -1737,7 +1737,7 @@
           "profile"
         ],
         "summary": "Put Profile",
-        "description": "Make an existing, built profile the one that serves the chat.",
+        "description": "Switch to an existing, built profile.\n\nThe switch runs as a background ``reindex`` job (a built profile is not\nrebuilt: the job only activates it), so the UI follows it on the job\nstream like any re-index; answers keep using the old profile until then.",
         "operationId": "put_profile",
         "requestBody": {
           "content": {
