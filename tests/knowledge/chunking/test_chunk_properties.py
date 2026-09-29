@@ -13,10 +13,10 @@ import pytest
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
-from hal9000.knowledge.chunking import ChunkDraft, ChunkInput, chunk
+from hal9000.knowledge.chunking import ChunkDraft, ChunkInput, chunk, overlap_tokens
 from hal9000.knowledge.tokens import count_tokens
 
-from .synthetic import chunk_inputs, doc_texts, sizes
+from .synthetic import chunk_inputs, doc_texts, inspection_doc, sizes
 
 PROPERTY = settings(
     max_examples=300,
@@ -150,3 +150,15 @@ def test_sentence_overlap_never_exceeds_the_configured_value(name: str, case) ->
     if kw["overlap"] == 0:
         for a, b in zip(drafts, drafts[1:]):
             assert b.char_start >= a.char_end
+
+
+@pytest.mark.parametrize("size", [256, 512, 768, 1024, 1536])
+def test_fixed_windows_end_at_sentence_or_line_ends(size: int) -> None:
+    """On wrapped report text every final tenth holds a line end, so no window cuts a line."""
+    doc = inspection_doc().input
+    drafts = chunk(doc, "fixed", size=size, overlap=overlap_tokens(size, 15))
+    assert len(drafts) >= 3
+    for d in drafts[:-1]:
+        assert d.text.endswith((".", "!", "?", ":")) or doc.text[d.char_end] == "\n", d.text[-60:]
+    sentence_ends = sum(d.text.endswith(".") for d in drafts[:-1])
+    assert sentence_ends >= len(drafts[:-1]) / 2

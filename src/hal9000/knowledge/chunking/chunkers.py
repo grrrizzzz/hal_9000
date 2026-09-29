@@ -145,23 +145,19 @@ class _Chunker:
         while s < b:
             ts = ix.token_at(s)
             te = ts + limit
-            lo = s + 1
-            if te >= ix.n_tokens or ix.offsets[te] >= b:
-                e = b
-            else:
-                e_max = ix.offsets[te]
-                lo = max(lo, ix.offsets[te - tail])
-                e = e_max
-                for points in (ix.sentence_ends, ix.line_ends, ix.word_ends):
-                    found = ix.last_in(points, lo, e_max)
-                    if found is not None:
-                        e = found
-                        break
+            lo = max(s + 1, ix.token_start(te - tail))  # the window's final 10%
+            window_end = ix.token_start(te)
 
             def snap(s2: int, end: int, lo: int = lo) -> int:
-                found = ix.last_in(ix.word_ends, max(lo, s2 + 1), end)
+                """The last sentence end in ``[lo, end]``, else line end, else word end."""
+                for points in (ix.sentence_ends, ix.line_ends):
+                    found = ix.last_in(points, max(lo, s2 + 1), end)
+                    if found is not None:
+                        return found
+                found = ix.last_in(ix.word_ends, s2 + 1, end)
                 return end if found is None else found
 
+            e = b if window_end >= b else snap(s, window_end)
             e = self._shrink(s, e, limit, snap)
             spans.append(ix.trim(s, e))
             end = spans[-1][1]
