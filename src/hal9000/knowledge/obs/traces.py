@@ -17,6 +17,14 @@ and, at most once a day per process, deletes rows older than
 ``error`` and still records it. Observability never breaks the request: a
 failure to persist or export is logged, not raised.
 
+Errors are counted from the trace (``kb_errors_total``): each failing stage
+once, at its innermost level, including failures the pipeline handled (an
+embedding call that fell back to BM25-only), and ``stage="request"`` for a
+failure outside any stage. So don't also call ``record_error`` for exceptions
+that left a ``stage()`` block of an observed request. Tokens and cost come from
+``metrics.record_usage`` (call it from the usage sink), which also fills
+``trace.tokens_by_model`` and ``trace.cost_usd``.
+
 The ``traces`` columns other than ``body`` are what Grafana's SQLite panels
 read; none of them holds question text. ``body`` is the full trace as JSON
 (question and standalone query included) for the Query Inspector.
