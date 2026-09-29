@@ -34,7 +34,7 @@ from hal9000.knowledge.chunking.text import TextIndex, text_index
 from hal9000.knowledge.chunking.units import Node, build_tree, detect_units
 from hal9000.knowledge.contracts import ChunkerName, IndexProfile
 from hal9000.knowledge.obs.timing import Stage, stage
-from hal9000.knowledge.tokens import EMBEDDING_ENCODING, encoding_for_model
+from hal9000.knowledge.tokens import EMBEDDING_ENCODING, count_tokens, encoding_for_model
 
 __all__ = ["CHUNKERS", "MIN_SIZE", "chunk", "chunk_document"]
 
@@ -379,6 +379,10 @@ class _Chunker:
             if self.header
             else ""
         )
+        tokens = self.ix.exact(a, b)
+        index_tokens = (
+            count_tokens(f"{header}\n{inp.text[a:b]}", self.ix.encoding_name) if header else tokens
+        )
         return ChunkDraft(
             key=key,
             document_id=inp.document_id,
@@ -386,7 +390,8 @@ class _Chunker:
             char_end=b,
             text=inp.text[a:b],
             header=header,
-            tokens=self.ix.exact(a, b),
+            tokens=tokens,
+            index_tokens=index_tokens,
             page_start=inp.page_of(a),
             page_end=inp.page_of(b - 1),
             section_path=path,

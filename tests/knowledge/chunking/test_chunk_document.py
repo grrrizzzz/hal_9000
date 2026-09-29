@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 
 import pytest
 
 from hal9000.knowledge.chunking import (
+    PAGE_JOINER,
     ChunkInput,
     chunk,
     chunk_document,
@@ -99,13 +100,61 @@ def test_unknown_chunker_is_rejected() -> None:
 
 
 # -------------------------------------------------------------------- inputs
-def test_from_pages_joins_pages_and_maps_offsets() -> None:
+def test_from_pages_skips_empty_pages_and_maps_offsets() -> None:
     inp = ChunkInput.from_pages(7, [(4, "Page four text."), (5, ""), (6, "Page six text.")], **META)
-    assert inp.text == "Page four text.\n\n\n\nPage six text."
-    assert inp.page_starts == ((0, 4), (17, 5), (19, 6))
-    assert inp.page_of(0) == 4 and inp.page_of(16) == 4 and inp.page_of(19) == 6
+    assert inp.text == "Page four text.\n\nPage six text."
+    assert inp.page_starts == ((0, 4), (17, 6))  # the separator belongs to page 4
+    assert inp.page_of(0) == 4 and inp.page_of(16) == 4 and inp.page_of(17) == 6
     (d,) = chunk(inp, "fixed", size=64)
     assert (d.page_start, d.page_end) == (4, 6)
+
+
+@dataclass
+class _Page:
+    page: int
+
+
+@dataclass
+class _PagedText:
+    """The shape of KWP1's cleaned ``PagedText`` (duck-typed; no KWP1 import)."""
+
+    text: str
+    pages: list
+    starts: list[int]
+
+
+@pytest.mark.parametrize("page", [lambda n: n, _Page])
+def test_from_paged_adapts_kwp1_paged_text(page) -> None:
+    pages = [(3, "First page words."), (4, "Second page words."), (6, "Fourth page.")]
+    text = PAGE_JOINER.join(t for _, t in pages)
+    starts = [0, len(pages[0][1]) + 2, len(pages[0][1]) + len(pages[1][1]) + 4]
+    paged = _PagedText(text, [page(n) for n, _ in pages], starts)
+    inp = ChunkInput.from_paged(paged, 9, **META)
+    assert inp == ChunkInput.from_pages(9, pages, **META)
+    assert (inp.document_id, inp.title) == (9, META["title"])
+    for number, t in pages:
+        assert inp.page_of(text.index(t)) == number
+    drafts = chunk(inp, "fixed", size=8)
+    assert all(d.text == paged.text[d.char_start : d.char_end] for d in drafts)
+    assert {p for d in drafts for p in (d.page_start, d.page_end)} == {3, 4, 6}
+
+
+def test_from_paged_rejects_mismatched_pages() -> None:
+    with pytest.raises(ValueError, match="pages"):
+        ChunkInput.from_paged(_PagedText("abc", [1, 2], [0]), 1)
+
+
+def test_empty_paged_text_gives_no_chunks() -> None:
+    for inp in [
+        ChunkInput.from_paged(_PagedText("", [], []), 1),
+        ChunkInput.from_pages(1, []),
+        ChunkInput.from_pages(1, [(5, ""), (6, "")]),
+    ]:
+        assert inp.text == ""
+        for name in ["fixed", "recursive", "structure"]:
+            assert chunk(inp, name, size=64) == []
+        assert chunk(inp, "parent_child", size=64, parent_size=128) == []
+    assert ChunkInput.from_pages(1, [(5, ""), (6, "")]).page_starts == ((0, 5),)
 
 
 @pytest.mark.parametrize(

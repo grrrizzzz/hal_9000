@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from hal9000.knowledge.chunking.chunkers import CHUNKERS, MIN_SIZE, chunk, chunk_document
 from hal9000.knowledge.chunking.header import build_header
-from hal9000.knowledge.chunking.inputs import ChunkDraft, ChunkInput, Unit
+from hal9000.knowledge.chunking.inputs import PAGE_JOINER, ChunkDraft, ChunkInput, Unit
 from hal9000.knowledge.chunking.profiles import (
     EMBED_ALIASES,
     make_profile,
@@ -24,6 +24,7 @@ __all__ = [
     "CHUNKERS",
     "EMBED_ALIASES",
     "MIN_SIZE",
+    "PAGE_JOINER",
     "ChunkDraft",
     "ChunkInput",
     "Unit",

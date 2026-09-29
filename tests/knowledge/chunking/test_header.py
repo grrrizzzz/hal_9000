@@ -8,6 +8,7 @@ import pytest
 
 from hal9000.knowledge.chunking import ChunkInput, build_header, chunk
 from hal9000.knowledge.contracts import Chunk
+from hal9000.knowledge.tokens import count_tokens
 
 from .synthetic import META, inspection_doc
 
@@ -57,6 +58,7 @@ def test_header_is_indexed_but_not_displayed(name: str) -> None:
             "Synthetic Home Inspection (inspection report, Example Inspections LLC, 2023-06-22)"
         )
         assert d.index_text == f"{d.header}\n{d.text}"
+        assert d.index_tokens == count_tokens(d.index_text) > d.tokens
         assert d.header not in d.text
         assert d.text == DOC.input.text[d.char_start : d.char_end]
         row = d.to_chunk(profile_id=4, parent_id=None)
@@ -78,6 +80,7 @@ def test_no_header_means_index_text_is_the_text(name: str) -> None:
     for d in chunk(DOC.input, name, header=False, **_kw(name)):
         assert d.header == ""
         assert d.index_text == d.text
+        assert d.index_tokens == d.tokens
 
 
 def test_chunks_before_any_heading_have_the_document_header_only() -> None:

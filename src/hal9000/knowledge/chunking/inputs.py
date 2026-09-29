@@ -3,8 +3,10 @@
 ``ChunkInput`` is one logical document as the chunkers see it: its cleaned
 text (boilerplate already removed by KWP1's cleaning), where each page starts
 in that text, optional structural units (headings, numbered findings) and the
-metadata the contextual header is built from. KWP1's parse/clean/segment
-output is adapted to it; :meth:`ChunkInput.from_pages` covers the common case.
+metadata the contextual header is built from. KWP1's cleaned ``PagedText`` is
+adapted with :meth:`ChunkInput.from_paged`; :meth:`ChunkInput.from_pages`
+builds the same layout from ``(page_number, text)`` pairs. An input with no
+text is valid and every chunker returns ``[]`` for it.
 
 ``ChunkDraft`` is one chunk before it has a database id. ``text`` is exactly
 ``input.text[char_start:char_end]`` and is what citations display;
@@ -17,13 +19,15 @@ from bisect import bisect_right
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Literal
+from typing import Any, Literal
 
 from hal9000.knowledge.contracts import Chunk
 
-__all__ = ["ChunkDraft", "ChunkInput", "Role", "Unit"]
+__all__ = ["PAGE_JOINER", "ChunkDraft", "ChunkInput", "Role", "Unit"]
 
 Role = Literal["chunk", "parent", "child"]
+#: How KWP1 joins the non-empty cleaned pages of a document.
+PAGE_JOINER = "\n\n"
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,21 +96,46 @@ class ChunkInput:
         document_id: int,
         pages: Iterable[tuple[int, str]],
         *,
-        joiner: str = "\n\n",
-        **meta,
+        joiner: str = PAGE_JOINER,
+        **meta: Any,
     ) -> ChunkInput:
-        """Join cleaned ``(page_number, text)`` pages into one document text."""
+        """Join cleaned ``(page_number, text)`` pages the way KWP1's ``PagedText`` does.
+
+        Empty pages are skipped, the rest are joined with ``joiner``, and each
+        separator belongs to the page before it, so offsets index the stored
+        cleaned text. With no non-empty page the text is ``""`` (no chunks).
+        """
+        pages = list(pages)
         parts: list[str] = []
         starts: list[tuple[int, int]] = []
         pos = 0
         for number, text in pages:
+            if not text:
+                continue
             if parts:
                 parts.append(joiner)
                 pos += len(joiner)
             starts.append((pos, number))
             parts.append(text)
             pos += len(text)
+        if not starts:
+            starts.append((0, pages[0][0] if pages else 1))
         return cls(document_id=document_id, text="".join(parts), page_starts=tuple(starts), **meta)
+
+    @classmethod
+    def from_paged(cls, paged: Any, document_id: int, **meta: Any) -> ChunkInput:
+        """Adapt KWP1's cleaned ``PagedText`` (duck-typed, so no KWP1 import).
+
+        ``paged.text`` is the cleaned document text, ``paged.starts[i]`` the
+        offset where page ``paged.pages[i]`` begins (a page number, or an object
+        with a ``.page`` number). Empty text gives an input with no chunks.
+        """
+        numbers = [p if isinstance(p, int) else p.page for p in paged.pages]
+        starts = [int(o) for o in paged.starts]
+        if len(numbers) != len(starts):
+            raise ValueError("paged text has a different number of pages and page starts")
+        page_starts = tuple(zip(starts, numbers)) or ((0, 1),)
+        return cls(document_id=document_id, text=paged.text, page_starts=page_starts, **meta)
 
     def page_of(self, offset: int) -> int:
         """The page holding the character at ``offset``."""
@@ -115,7 +144,15 @@ class ChunkInput:
 
 @dataclass(frozen=True, slots=True)
 class ChunkDraft:
-    """A chunk before storage. ``key`` is its index in the chunker's output."""
+    """A chunk before storage. ``key`` is its index in the chunker's output.
+
+    Only ``searchable`` drafts are embedded and keyword-indexed. For
+    ``parent_child`` the output lists each parent first, then its children
+    (whose ``parent_key`` is the parent's ``key``); parents are stored so
+    ``select`` can expand to them, but never searched. ``tokens`` counts
+    ``text`` (what *N* limits); ``index_tokens`` counts ``index_text``
+    (header + text), for budgets when headers are sent.
+    """
 
     key: int
     document_id: int
@@ -124,6 +161,7 @@ class ChunkDraft:
     text: str
     header: str
     tokens: int
+    index_tokens: int
     page_start: int
     page_end: int
     section_path: tuple[str, ...] = ()

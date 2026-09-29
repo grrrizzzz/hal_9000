@@ -98,6 +98,7 @@ def test_no_chunk_exceeds_n_tokens_header_excluded(name: str, case) -> None:
     drafts = _run(name, inp, kw)
     for d in drafts:
         assert d.tokens == count_tokens(d.text)
+        assert d.index_tokens == count_tokens(d.index_text)
         limit = kw["parent_size"] if d.role == "parent" else kw["size"]
         assert d.tokens <= limit
         if d.header:  # the header is extra: it never counts against N
