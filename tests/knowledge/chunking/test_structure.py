@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import re
+import time
 
 import pytest
 
@@ -163,6 +163,11 @@ def test_detector_heading_forms(line: str, title: str, level: int) -> None:
         "A",
         "OK",
         "#hashtag",
+        "2.1 The roof was inspected from the ground.",  # a numbered sentence
+        "3.5 Gallons were found…",
+        "12 Years Old",  # a single number needs an upper-case title, or "N." and title case
+        "$1,234.00 TOTAL DUE",  # an amount line, not a heading
+        "TOTAL DUE $1,234.00",
         "1.2.3",
     ],
 )
@@ -182,9 +187,69 @@ def test_caps_label_inside_a_finding_is_a_sub_unit() -> None:
 
 
 def test_detector_is_deterministic_and_fast() -> None:
-    text = DOC.input.text * 20
-    assert detect_units(text) == detect_units(text)
-    assert re.search(r"\n\n", text)
+    text = DOC.input.text * 20  # ~70k tokens, about twice the whole house corpus
+    start = time.perf_counter()
+    units = detect_units(text)
+    elapsed = time.perf_counter() - start
+    assert units == detect_units(text)
+    assert len(units) == 20 * len(detect_units(DOC.input.text))
+    assert elapsed < 0.5, elapsed
+
+
+REPORT_WITH_LABELS = """3 PLUMBING
+Plumbing was inspected where visible.
+
+3.1.1 Plumbing – Water Heater: Valve Leak
+The relief valve drips at the discharge line.
+
+RECOMMENDATION
+Repair by a licensed plumber.
+
+3.1.2 Plumbing – Drains: Slow Drain
+The tub drains slowly and gurgles.
+
+RECOMMENDATION
+Repair by a licensed plumber.
+
+4 ELECTRICAL
+The panel was inspected.
+"""
+
+
+def test_caps_label_after_a_blank_line_stays_inside_its_finding() -> None:
+    units = detect_units(REPORT_WITH_LABELS)
+    assert [(u.title, u.level) for u in units] == [
+        ("3 PLUMBING", 1),
+        ("3.1.1 Plumbing – Water Heater: Valve Leak", 3),
+        ("RECOMMENDATION", 4),
+        ("3.1.2 Plumbing – Drains: Slow Drain", 3),
+        ("RECOMMENDATION", 4),
+        ("4 ELECTRICAL", 1),
+    ]
+    text = REPORT_WITH_LABELS
+    inp = ChunkInput(document_id=1, text=text)
+    drafts = chunk(inp, "structure", size=40)
+    assert all(d.section_path and d.section_path[0] != "RECOMMENDATION" for d in drafts)
+    for title in ["3.1.1", "3.1.2"]:
+        start = text.index(title)
+        end = text.index("plumber.", start) + len("plumber.")
+        holder = [d for d in drafts if d.char_start <= start and d.char_end >= end]
+        assert holder, f"{title} lost its recommendation"
+        assert holder[0].section_path[0] == "3 PLUMBING"
+    last = next(d for d in drafts if "panel" in d.text)
+    assert last.section_path == ("4 ELECTRICAL",)
+
+
+def test_a_section_that_fits_is_exactly_one_structure_chunk() -> None:
+    text = DOC.input.text
+    start = text.index("\n\n1 ROOF\n") + 2
+    end = text.index("\n\n2 EXTERIOR\n")
+    size = count_tokens(text[start:end])
+    assert size < count_tokens(text) // 2
+    drafts = chunk(DOC.input, "structure", size=size)
+    touching = [d for d in drafts if d.char_start < end and d.char_end > start]
+    assert [(d.char_start, d.char_end) for d in touching] == [(start, end)]
+    assert touching[0].section_path == ("1 ROOF",)
 
 
 @pytest.mark.parametrize("size", [256, 512, 1024])

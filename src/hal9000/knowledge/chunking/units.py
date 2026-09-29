@@ -5,13 +5,17 @@ recognises, one line at a time:
 
 * numbered headings and findings: ``3.1.2 Plumbing – Water Heater: Valve Leak``
   (level = number of components). A dotted number needs a title starting with
-  a capital; a single number (``3 PLUMBING``, ``4. Heating and Cooling``) needs
-  an upper-case or title-case title without end punctuation, so numbered list
-  items (``1. Replace the valve.``) are not headings;
+  a capital, and without a ``:`` or ``–`` it must not end in punctuation
+  (``2.1 The roof was inspected.`` is a sentence). A single number needs an
+  upper-case title (``3 PLUMBING``), or a title-case title after ``N.``
+  (``4. Heating and Cooling``) without end punctuation, so numbered list items
+  (``1. Replace the valve.``) and phrases (``12 Years Old``) are not headings;
 * Markdown headings: ``## Water Heater`` (level = number of ``#``);
-* upper-case lines: ``PLUMBING SYSTEM``. After a blank line (or at the top)
-  they are level-1 headings; directly under a numbered or Markdown unit they
-  are labels inside it (``RECOMMENDATION``), one level deeper.
+* upper-case lines starting with a letter, with no currency sign:
+  ``PLUMBING SYSTEM``. Inside a numbered finding (level ≥ 2) they are always
+  labels one level deeper (``RECOMMENDATION``), blank line before them or not.
+  Elsewhere, after a blank line (or at the top) they are level-1 headings;
+  directly under a numbered or Markdown heading they are labels inside it.
 
 :func:`build_tree` nests units by containment. A unit without an explicit end
 runs to the next unit of the same or a higher level, like a heading.
@@ -28,16 +32,27 @@ from hal9000.knowledge.chunking.inputs import Unit
 
 __all__ = ["Node", "build_tree", "detect_units"]
 
-_NUMBERED = re.compile(r"(?P<num>\d{1,3}(?:\.\d{1,3})*)\.?[ \t]+(?P<title>\S.*)")
+_NUMBERED = re.compile(r"(?P<num>\d{1,3}(?:\.\d{1,3})*)(?P<dot>\.?)[ \t]+(?P<title>\S.*)")
 _MARKDOWN = re.compile(r"(?P<hashes>#{1,6})[ \t]+(?P<title>\S.*)")
 _SMALL_WORDS = frozenset("a an and as at by for in of on or the to vs with".split())
-_END_PUNCTUATION = tuple(".,;:!?")
+_END_PUNCTUATION = tuple(".,;:!?…")
+_CURRENCY = frozenset("$€£¥¢")
 _MAX_HEADING_CHARS = 160
 
 
 def _is_caps(text: str) -> bool:
     letters = [c for c in text if c.isalpha()]
     return len(letters) >= 3 and all(c.isupper() for c in letters)
+
+
+def _is_caps_heading(line: str) -> bool:
+    return (
+        line[0].isalpha()
+        and _is_caps(line)
+        and len(line) <= 80
+        and not line.endswith(".")
+        and not _CURRENCY.intersection(line)
+    )
 
 
 def _is_title_case(text: str) -> bool:
@@ -53,10 +68,14 @@ def _numbered(line: str) -> tuple[int, str] | None:
         return None
     depth = m["num"].count(".") + 1
     title = m["title"].rstrip()
+    ends_open = not title.endswith(_END_PUNCTUATION)
     if depth > 1:
-        return (depth, "finding") if title[0].isupper() else None
-    short = len(title) <= 60 and not title.endswith(_END_PUNCTUATION)
-    if _is_caps(title) or (short and _is_title_case(title)):
+        if not title[0].isupper():
+            return None
+        if ":" in title or " – " in title:
+            return depth, "finding"
+        return (depth, "heading") if ends_open else None
+    if _is_caps(title) or (m["dot"] and len(title) <= 60 and ends_open and _is_title_case(title)):
         return 1, "heading"
     return None
 
@@ -65,6 +84,7 @@ def detect_units(text: str) -> list[Unit]:
     """Headings and numbered findings in ``text``, in order (see the module docstring)."""
     units: list[Unit] = []
     context: int | None = None  # level of the last numbered or Markdown unit
+    in_finding = False  # that unit is a numbered finding (level >= 2)
     after_blank = True
     pos = 0
     for line in text.splitlines(keepends=True):
@@ -80,19 +100,17 @@ def detect_units(text: str) -> list[Unit]:
         if m := _MARKDOWN.fullmatch(stripped):
             level = len(m["hashes"])
             units.append(Unit(start=start, title=m["title"].strip(), level=level))
-            context = level
+            context, in_finding = level, False
         elif found := _numbered(stripped):
             level, kind = found
-            if kind == "finding" and ":" not in stripped and " – " not in stripped:
-                kind = "heading"
             units.append(Unit(start=start, title=stripped, level=level, kind=kind))  # type: ignore[arg-type]
-            context = level
-        elif _is_caps(stripped) and len(stripped) <= 80 and not stripped.endswith("."):
-            if was_blank or context is None:
-                units.append(Unit(start=start, title=stripped, level=1))
-                context = 1
-            else:
+            context, in_finding = level, level >= 2
+        elif _is_caps_heading(stripped):
+            if context is not None and (in_finding or not was_blank):
                 units.append(Unit(start=start, title=stripped, level=context + 1))
+            else:
+                units.append(Unit(start=start, title=stripped, level=1))
+                context, in_finding = 1, False
     return units
 
 
