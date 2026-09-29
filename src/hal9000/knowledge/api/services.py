@@ -14,25 +14,22 @@ watchdog.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from hal9000.knowledge.answer.pipeline import AnswerPipeline
 from hal9000.knowledge.auth import Auth, RateLimiter, SessionStore, load_secret
 from hal9000.knowledge.config import AGENT, KnowledgeFile, KnowledgeSettings, load_knowledge_file
+from hal9000.knowledge.health import HEALTH_FILE
 
 __all__ = ["HEALTH_FILE", "Services", "build_services"]
 
 log = logging.getLogger(__name__)
-
-HEALTH_FILE = "knowledge_health.json"
 
 
 @dataclass
@@ -47,6 +44,7 @@ class Services:
     fake: bool = False
     chat_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(20, 60.0))
     sessions: SessionStore | None = None
+    unwatch_health: Any | None = None  # unsubscribes the health file from ingestion updates
 
     def __post_init__(self) -> None:
         if self.sessions is None:
@@ -84,31 +82,28 @@ class Services:
             self.worker.notify()
 
     def write_health(self, conn: sqlite3.Connection) -> dict[str, Any]:
-        """``data/knowledge_health.json`` (plan §16); returns what was written."""
-        question = conn.execute(
-            "SELECT MAX(created_at) FROM traces WHERE kind = 'question' AND outcome = 'answered'"
-        ).fetchone()[0]
-        ingest = conn.execute(
-            "SELECT MAX(updated_at) FROM jobs WHERE kind = 'ingest' AND status = 'done'"
-        ).fetchone()[0]
-        body = {
-            "updated_at": datetime.now(UTC).isoformat(timespec="seconds"),
-            "last_successful_question_at": question,
-            "last_ingestion_at": ingest,
-            "month_spend_usd": self.month_spend(),
-            "month_cap_usd": self.settings.monthly_cap_usd,
-        }
-        target = self.settings.data_dir / HEALTH_FILE
+        """``data/knowledge_health.json`` (plan §16, :mod:`hal9000.knowledge.health`)."""
+        from hal9000.knowledge.health import write_health
+
+        return write_health(
+            conn,
+            self.settings.data_dir,
+            month_spend=self.month_spend(),
+            month_cap=self.settings.monthly_cap_usd,
+        )
+
+    def refresh_health(self) -> dict[str, Any]:
+        """:meth:`write_health` on a connection of its own (any thread)."""
+        conn = self.connect()
         try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            tmp = target.with_suffix(".tmp")
-            tmp.write_text(json.dumps(body, indent=2) + "\n")
-            tmp.replace(target)
-        except OSError:  # pragma: no cover - a read-only data dir must not break /health
-            log.exception("could not write %s", target)
-        return body
+            return self.write_health(conn)
+        finally:
+            conn.close()
 
     def close(self) -> None:
+        if self.unwatch_health is not None:
+            self.unwatch_health()
+            self.unwatch_health = None
         if self.worker is not None:
             self.worker.stop(timeout=10)
         if self.ingest is not None:
@@ -185,7 +180,7 @@ def build_services(
     worker = ingest.worker(settings.db_path, locked=True) if ingest is not None else None
     if worker is not None and start_worker:
         worker.start()
-    return Services(
+    services = Services(
         settings=settings,
         auth=auth,
         answerer=AnswerPipeline(settings, deps),
@@ -196,3 +191,7 @@ def build_services(
         fake=fake,
         chat_limiter=RateLimiter(chat_limit or kf.answer.questions_per_minute, 60.0),
     )
+    from hal9000.knowledge.health import watch_ingestions
+
+    services.unwatch_health = watch_ingestions(BUS, services.refresh_health)
+    return services
