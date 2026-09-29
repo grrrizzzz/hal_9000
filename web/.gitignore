@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+# Playwright output and the K12 visual-check screenshots (never committed)
+test-results/
+playwright-report/
+e2e-screenshots/
+*.tsbuildinfo

@@ -1,0 +1,185 @@
+@import "tailwindcss";
+@import "@fontsource-variable/inter";
+
+/*
+ * Design tokens. A calm, warm-neutral palette; one teal accent for focus,
+ * links and citations; status colours used sparingly. Light and dark follow
+ * the system setting (plan §10, rule K12) — there is no manual toggle.
+ */
+:root {
+  --background: oklch(0.985 0.002 85);
+  --surface: oklch(1 0 0);
+  --surface-2: oklch(0.97 0.003 85);
+  --foreground: oklch(0.22 0.006 60);
+  --muted-foreground: oklch(0.5 0.01 60);
+  --subtle: oklch(0.955 0.004 85);
+  --border: oklch(0.905 0.005 80);
+  --border-strong: oklch(0.84 0.007 80);
+  --primary: oklch(0.27 0.008 60);
+  --primary-foreground: oklch(0.985 0.002 85);
+  --accent: oklch(0.52 0.085 195);
+  --accent-soft: oklch(0.95 0.025 195);
+  --accent-foreground: oklch(0.36 0.07 195);
+  --ring: oklch(0.6 0.09 195);
+  --success: oklch(0.52 0.11 155);
+  --success-soft: oklch(0.95 0.035 155);
+  --warning: oklch(0.55 0.12 70);
+  --warning-soft: oklch(0.96 0.045 85);
+  --danger: oklch(0.55 0.17 27);
+  --danger-soft: oklch(0.955 0.03 27);
+  --mark: oklch(0.9 0.13 95 / 0.65);
+  --mark-strong: oklch(0.82 0.16 90 / 0.85);
+  --shadow: 0 1px 2px oklch(0.2 0.01 60 / 0.06), 0 1px 1px oklch(0.2 0.01 60 / 0.03);
+  --shadow-lg: 0 12px 32px -8px oklch(0.2 0.01 60 / 0.18), 0 2px 6px oklch(0.2 0.01 60 / 0.06);
+  /* Chart palette: the dataviz reference instance (validated order, never cycled). */
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --series-3: #1baf7a;
+  --series-4: #eda100;
+  --chart-grid: #e1e0d9;
+  --chart-axis: #c3c2b7;
+  --chart-muted: #898781;
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --background: oklch(0.165 0.004 60);
+    --surface: oklch(0.205 0.005 60);
+    --surface-2: oklch(0.235 0.005 60);
+    --foreground: oklch(0.94 0.004 80);
+    --muted-foreground: oklch(0.7 0.008 70);
+    --subtle: oklch(0.25 0.005 60);
+    --border: oklch(0.3 0.006 60);
+    --border-strong: oklch(0.38 0.008 60);
+    --primary: oklch(0.93 0.004 80);
+    --primary-foreground: oklch(0.2 0.005 60);
+    --accent: oklch(0.74 0.09 195);
+    --accent-soft: oklch(0.3 0.04 195);
+    --accent-foreground: oklch(0.85 0.07 195);
+    --ring: oklch(0.72 0.09 195);
+    --success: oklch(0.74 0.12 155);
+    --success-soft: oklch(0.3 0.05 155);
+    --warning: oklch(0.8 0.12 80);
+    --warning-soft: oklch(0.31 0.05 75);
+    --danger: oklch(0.72 0.15 25);
+    --danger-soft: oklch(0.3 0.06 25);
+    --mark: oklch(0.72 0.13 90 / 0.45);
+    --mark-strong: oklch(0.78 0.15 90 / 0.7);
+    --shadow: 0 1px 2px oklch(0 0 0 / 0.3);
+    --shadow-lg: 0 16px 40px -8px oklch(0 0 0 / 0.55), 0 2px 6px oklch(0 0 0 / 0.3);
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --series-3: #199e70;
+    --series-4: #c98500;
+    --chart-grid: #2c2c2a;
+    --chart-axis: #383835;
+    --chart-muted: #898781;
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, monospace;
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-foreground: var(--foreground);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-subtle: var(--subtle);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-soft: var(--accent-soft);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-success-soft: var(--success-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-mark: var(--mark);
+  --color-mark-strong: var(--mark-strong);
+  --shadow-card: var(--shadow);
+  --shadow-pop: var(--shadow-lg);
+  --radius-card: 0.875rem;
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-series-3: var(--series-3);
+  --color-series-4: var(--series-4);
+}
+
+@layer base {
+  *,
+  ::before,
+  ::after {
+    border-color: var(--border);
+  }
+  html {
+    -webkit-text-size-adjust: 100%;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv11", "ss01";
+    -webkit-font-smoothing: antialiased;
+  }
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+  ::selection {
+    background: var(--mark-strong);
+  }
+}
+
+@utility tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* pdf.js text layer: the highlight produced by customTextRenderer. */
+.pdf-page .textLayer mark,
+mark.hl {
+  background: var(--mark);
+  color: transparent;
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px var(--mark-strong);
+}
+mark.hl {
+  color: inherit;
+}
+.pdf-page .textLayer ::selection {
+  background: oklch(0.6 0.12 240 / 0.35);
+}
+
+@keyframes caret-blink {
+  50% {
+    opacity: 0;
+  }
+}
+.stream-caret::after {
+  content: "";
+  display: inline-block;
+  width: 0.5ch;
+  height: 1em;
+  margin-left: 1px;
+  vertical-align: -0.12em;
+  background: currentColor;
+  opacity: 0.6;
+  animation: caret-blink 1s steps(1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
