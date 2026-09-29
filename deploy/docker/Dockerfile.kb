@@ -112,10 +112,12 @@ COPY scripts/kb_sqlite_vec_check.py scripts/
 RUN uv sync --frozen --no-dev $(cat /tmp/uv-groups)
 
 # Trim the third-party test suites (pandas, scipy, numpy: about 90 MB, never
-# imported), then fail the build here, not on first start, if the interpreter
+# imported); byte-compile hal9000 itself (uv compiles only site-packages, and
+# the non-root runtime can't write __pycache__), then fail the build here, not on first start, if the interpreter
 # can't load sqlite-vec (gate G-K0b) or the service's modules don't import.
 # The vendored tiktoken encodings must be present too (no runtime download).
 RUN find /app/.venv/lib -type d -name tests -prune -exec rm -rf {} + \
+ && /app/.venv/bin/python -m compileall -q --invalidation-mode unchecked-hash /app/src \
  && test -s vendor/tiktoken/9b5ad71b2ce5302211f9c61530b329a4922fc6a4 \
  && test -s vendor/tiktoken/fb374d419588a4632f3f557e76b4b70aebbca790 \
  && /app/.venv/bin/python scripts/kb_sqlite_vec_check.py \

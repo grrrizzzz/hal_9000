@@ -278,6 +278,15 @@ def test_dependencies_come_from_the_lock_without_dev_tools(dockerfile):
     assert re.search(r"pip install \"uv==\$\{UV_VERSION\}\"", runs)
 
 
+def test_every_uv_sync_is_frozen_and_the_code_is_byte_compiled(dockerfile):
+    runs = [rest for keyword, rest in dockerfile if keyword == "RUN"]
+    syncs = [cmd for run in runs for cmd in run.split("&&") if "uv sync" in cmd]
+    assert len(syncs) >= 2  # dependencies, then the project
+    for cmd in syncs:
+        assert "--frozen" in cmd and "--no-dev" in cmd, cmd
+    assert any("python -m compileall" in run and "/app/src" in run for run in runs)
+
+
 def test_the_vendored_tiktoken_encodings_are_baked_in(dockerfile, runtime_stage):
     copies = [rest for keyword, rest in dockerfile if keyword == "COPY"]
     assert "vendor/tiktoken/ vendor/tiktoken/" in copies
