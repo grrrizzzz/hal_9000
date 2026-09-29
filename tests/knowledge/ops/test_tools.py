@@ -287,3 +287,47 @@ def test_ensure_registered_restores_a_cleared_catalogue(clean_tool_registry):
     assert names == ["search_house_docs"]
     assert registry.tools_by_tag[tools.KNOWLEDGE_READ] == ["search_house_docs"]
     assert PythonActionRegistry(tags=[tools.KNOWLEDGE_READ]).get_action("search_house_docs")
+
+
+# ------------------------------------------------------------------ the ceiling holds for any input
+def test_a_long_query_is_refused_and_one_at_the_limit_fits(data_dir):
+    with pytest.raises(KnowledgeToolInputError, match="too long") as error:
+        docs(data_dir).search("water heater " * 3000)
+    assert error.value.recoverable
+    at_limit = " ".join(["water heater"] * (tools.MAX_QUERY_TOKENS // 2))
+    assert count_tokens(at_limit) <= tools.MAX_QUERY_TOKENS
+    body = docs(data_dir, max_passages=50).search(at_limit)
+    assert body["passages"] and body["query"] == at_limit
+    assert result_tokens(body) <= tools.MAX_RESULT_TOKENS
+
+
+def test_long_titles_and_vendors_are_cut_and_the_result_fits(data_dir):
+    conn = sqlite3.connect(data_dir / "knowledge.db")
+    with conn:
+        conn.execute(
+            "UPDATE documents SET title = ?, vendor = ?",
+            ("Very long synthetic title " * 200, "Vendor name " * 300),
+        )
+    conn.close()
+    body = docs(data_dir, max_passages=50).search("water heater relief valve")
+    assert body["passages"]
+    assert result_tokens(body) <= tools.MAX_RESULT_TOKENS
+    for passage in body["passages"]:
+        assert len(passage["title"]) <= tools.MAX_FIELD_CHARS
+        assert len(passage["vendor"]) <= tools.MAX_FIELD_CHARS
+        assert passage["title"].endswith("...")
+        assert len(passage["citation"]) <= tools.MAX_FIELD_CHARS + 40
+
+
+def test_the_guidance_is_in_the_message_the_base_environment_passes_on(tmp_path, data_dir):
+    action = tools.knowledge_registry().get_action("search_house_docs")
+    missing = ActionContext({"house_docs": HouseDocs(db_path=tmp_path / "none.db")})
+    result = PythonEnvironment().execute_action(None, missing, action, {"query": "x"})
+    assert KnowledgeIndexMissing.guidance in result["error"]
+    context = ActionContext({"house_docs": docs(data_dir)})
+    result = PythonEnvironment().execute_action(
+        None, context, action, {"query": "x", "doc_type": "receipt"}
+    )
+    assert KnowledgeToolInputError.guidance in result["error"]
+    error = KnowledgeIndexMissing("no index")
+    assert error.detail == "no index" and str(error) == f"no index {error.guidance}"

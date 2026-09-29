@@ -29,10 +29,16 @@ keyword (BM25) search, like the chat's retrieval-only mode, and says so.
 
 **Errors the model can act on.** No index yet, or no active profile, raises
 :class:`KnowledgeIndexMissing` (``recoverable``, with guidance: answer without
-the house documents). A bad ``doc_type`` or an empty query raises
-:class:`KnowledgeToolInputError` naming the allowed values. Both carry the
-``error_type`` / ``recoverable`` / ``guidance`` attributes the environments
-turn into structured tool results.
+the house documents). A bad ``doc_type``, an empty query or one over
+:data:`MAX_QUERY_TOKENS` raises :class:`KnowledgeToolInputError` saying what
+to fix. Both carry the ``error_type`` / ``recoverable`` / ``guidance``
+attributes the solar-style environments turn into structured tool results,
+and the guidance is also the end of the message, so the base environment
+(which passes only the message) still tells the model what to do.
+
+**The token ceiling holds for any input**: the query is at most
+:data:`MAX_QUERY_TOKENS`, titles and vendors are cut to
+:data:`MAX_FIELD_CHARS`, and passage text is dropped or shortened to fit.
 """
 
 from __future__ import annotations
@@ -51,6 +57,8 @@ from hal9000.tools.decorators import register_tool
 __all__ = [
     "DOC_TYPES",
     "KNOWLEDGE_READ",
+    "MAX_FIELD_CHARS",
+    "MAX_QUERY_TOKENS",
     "MAX_RESULT_TOKENS",
     "HouseDocs",
     "KnowledgeIndexMissing",
@@ -70,16 +78,30 @@ KNOWLEDGE_READ = "knowledge_read"
 MAX_RESULT_TOKENS = 2000
 #: How many passages the tool returns at most.
 MAX_PASSAGES = 5
+#: Longer queries are refused (the query is echoed in the result).
+MAX_QUERY_TOKENS = 200
+#: Titles and vendors longer than this are cut (a title appears twice per passage).
+MAX_FIELD_CHARS = 120
 #: The document types the model may filter by.
 DOC_TYPES: tuple[str, ...] = get_args(DocType)
 
 
 class KnowledgeToolError(RuntimeError):
-    """A failure the calling agent should read and work around."""
+    """A failure the calling agent should read and work around.
+
+    The message ends with the ``guidance``, so even the base
+    :class:`~hal9000.core.environment.PythonEnvironment` (which passes only
+    ``str(error)`` to the model) tells the model what to do next. ``detail`` is
+    the message without it.
+    """
 
     error_type = "KnowledgeUnavailable"
     recoverable = True
     guidance = "Answer without the house documents, and say they could not be searched."
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(f"{detail} {self.guidance}")
 
 
 class KnowledgeIndexMissing(KnowledgeToolError):
@@ -99,6 +121,10 @@ class KnowledgeToolInputError(ValueError):
     recoverable = True
     guidance = "Fix the arguments as the error describes and call the tool again."
 
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(f"{detail} {self.guidance}")
+
 
 # ------------------------------------------------------------------ citations
 def _pages(chunk: RetrievedChunk) -> str:
@@ -107,9 +133,19 @@ def _pages(chunk: RetrievedChunk) -> str:
     return f"p. {chunk.page_start}"
 
 
+def _cap(text: str | None, limit: int = MAX_FIELD_CHARS) -> str | None:
+    """``text`` cut to ``limit`` characters (with ``...``), or ``None``."""
+    if text is None or len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
 def citation(chunk: RetrievedChunk) -> str:
-    """``"Home inspection report (2023-06-22), p. 12"``; undated: ``"Pool log, pp. 1-2"``."""
-    title = chunk.title or "Untitled document"
+    """``"Home inspection report (2023-06-22), p. 12"``; undated: ``"Pool log, pp. 1-2"``.
+
+    A title longer than :data:`MAX_FIELD_CHARS` is cut.
+    """
+    title = _cap(chunk.title) or "Untitled document"
     dated = f"{title} ({chunk.doc_date.isoformat()})" if chunk.doc_date else title
     return f"{dated}, {_pages(chunk)}"
 
@@ -117,9 +153,9 @@ def citation(chunk: RetrievedChunk) -> str:
 def _passage(chunk: RetrievedChunk, text: str | None = None) -> dict[str, Any]:
     body: dict[str, Any] = {
         "citation": citation(chunk),
-        "title": chunk.title,
+        "title": _cap(chunk.title),
         "doc_type": chunk.doc_type,
-        "vendor": chunk.vendor,
+        "vendor": _cap(chunk.vendor),
         "date": chunk.doc_date.isoformat() if chunk.doc_date else None,
         "page": chunk.page_start,
     }
@@ -237,6 +273,13 @@ class HouseDocs:
         query = (query or "").strip()
         if not query:
             raise KnowledgeToolInputError("query is empty: say what to look for.")
+        from hal9000.knowledge.tokens import count_tokens
+
+        if count_tokens(query) > MAX_QUERY_TOKENS:
+            raise KnowledgeToolInputError(
+                f"query is too long (over {MAX_QUERY_TOKENS} tokens): ask for one thing in a "
+                "short phrase or question."
+            )
         if doc_type in ("", "any", "all"):
             doc_type = None
         if doc_type is not None and doc_type not in DOC_TYPES:
