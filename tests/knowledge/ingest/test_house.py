@@ -20,7 +20,13 @@ from pathlib import Path
 import pytest
 
 from hal9000.knowledge.config import settings as kb_settings
-from hal9000.knowledge.ingest.clean import clean_pages
+from hal9000.knowledge.ingest.clean import (
+    DEFAULT_REPEAT_FRACTION,
+    body_lines,
+    clean_pages,
+    normalize_line,
+    running_lines,
+)
 from hal9000.knowledge.ingest.parsers import parse_file
 from hal9000.knowledge.ingest.segment import segment_file
 
@@ -68,6 +74,31 @@ def test_heuristics_find_at_least_nine_of_the_eleven_boundaries(house_pages):
         f"heuristic starts: {sorted(found)}; missed {sorted(expected - found)}; extra {sorted(found - expected)}"
     )
     assert len(found & expected) >= 9
+
+
+def test_heuristic_labels_type_at_least_nine_of_the_eleven_documents(house_pages):
+    # --no-llm (no key, budget exhausted): types and titles must still be sensible
+    documents = segment_file(house_pages, file_sha="0" * 64, use_llm=False).documents
+    got = {(d.page_start, d.page_end): d.doc_type for d in documents}
+    typed = sum(got.get((start, end)) == doc_type for start, end, doc_type in APPENDIX_A)
+    print(f"heuristic doc_type matches Appendix A: {typed}/{len(APPENDIX_A)}")
+    assert typed >= 9
+
+    # no title is running furniture: an e-signature envelope line (an ID), a page
+    # number, or a running header or footer of the file or of its own document
+    texts = [page.text for page in house_pages]
+    body = body_lines(texts)
+    running = running_lines(texts, DEFAULT_REPEAT_FRACTION, body=body)
+    for d in documents:
+        part = texts[d.page_start - 1 : d.page_end]
+        running |= running_lines(part, DEFAULT_REPEAT_FRACTION, body=body, per_document=True)
+    furniture = {normalize_line(key) for _, _, key in running}
+    for d in documents:
+        key = normalize_line(d.title)
+        assert d.title and len(d.title) <= 120, d.page_start
+        assert "<id>" not in key and "envelope" not in key, d.page_start
+        assert not re.search(r"page # of #", key), d.page_start
+        assert key not in furniture, d.page_start
 
 
 def test_no_running_header_survives_cleaning(house_pages):
