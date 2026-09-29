@@ -465,14 +465,158 @@ def test_restore_refuses_a_manifest_missing_a_part(data_dir, tmp_path, capsys):
     del manifest["sha256"][ops.BACKUP_TAR]
     (report.folder / ops.MANIFEST).write_text(json.dumps(manifest))
     assert kb("restore", str(report.folder), "--into", str(tmp_path / "t")) == 1
-    assert "doesn't list both of its parts" in capsys.readouterr().err
+    assert "must list exactly" in capsys.readouterr().err
 
 
-def test_restore_refuses_a_backup_from_newer_code(data_dir, tmp_path, capsys):
-    report = ops.backup(data_dir / "knowledge.db", data_dir / "knowledge", tmp_path / "b")
-    manifest = json.loads((report.folder / ops.MANIFEST).read_text())
-    manifest["schema_version"] = 999
-    (report.folder / ops.MANIFEST).write_text(json.dumps(manifest))
-    assert kb("restore", str(report.folder), "--into", str(tmp_path / "t")) == 1
-    assert "made by newer code" in capsys.readouterr().err
-    assert not (tmp_path / "t" / "knowledge.db").exists()
+# ------------------------------------------------------------------ refused before touching
+def snapshot_tree(root: Path) -> dict[str, object]:
+    """Every path under ``root`` (and its parent's entries) with its bytes: to prove "untouched"."""
+    tree: dict[str, object] = {"<parent>": sorted(p.name for p in root.parent.iterdir())}
+    for path in sorted(root.rglob("*")):
+        key = str(path.relative_to(root))
+        if path.is_symlink():
+            tree[key] = ("link", str(path.readlink()))
+        elif path.is_dir():
+            tree[key] = "dir"
+        else:
+            tree[key] = (path.read_bytes(), path.stat().st_mtime_ns)
+    return tree
+
+
+def reseal(folder: Path) -> None:
+    """Recompute the manifest's checksums after a test tampers with a part."""
+    manifest = json.loads((folder / ops.MANIFEST).read_text())
+    for name in manifest["sha256"]:
+        manifest["sha256"][name] = ops._sha256(folder / name)
+    (folder / ops.MANIFEST).write_text(json.dumps(manifest))
+
+
+@pytest.fixture
+def backup_copy(data_dir: Path, tmp_path: Path) -> Path:
+    """A fresh backup of the fixture library, to tamper with."""
+    return ops.backup(data_dir / "knowledge.db", data_dir / "knowledge", tmp_path / "b").folder
+
+
+def _refused_untouched(backup: Path, data_dir: Path, capsys, message: str) -> None:
+    """A forced restore over the populated library is refused and changes nothing."""
+    before = snapshot_tree(data_dir)
+    assert kb("restore", str(backup), "--into", str(data_dir), "--force") == 1
+    assert message in capsys.readouterr().err
+    assert snapshot_tree(data_dir) == before
+    assert not list(data_dir.parent.glob(".kb-restore-*"))
+
+
+def _tar_with(folder: Path, bad: tarfile.TarInfo, payload: bytes | None = None) -> None:
+    ok = tarfile.TarInfo("files/" + "a" * 64)
+    ok.size = 3
+    with tarfile.open(folder / ops.BACKUP_TAR, "w:gz") as tar:
+        tar.addfile(ok, io.BytesIO(b"abc"))
+        tar.addfile(bad, io.BytesIO(payload) if payload is not None else None)
+    reseal(folder)
+
+
+def _entry(name: str, kind: bytes, linkname: str = "", size: int = 0) -> tarfile.TarInfo:
+    info = tarfile.TarInfo(name)
+    info.type, info.linkname, info.size = kind, linkname, size
+    if kind in (tarfile.CHRTYPE, tarfile.BLKTYPE):
+        info.devmajor, info.devminor = 1, 3
+    return info
+
+
+@pytest.mark.parametrize(
+    ("entry", "payload"),
+    [
+        (_entry("files/inside-link", tarfile.SYMTYPE, "a" * 64), None),
+        (_entry("files/outside-link", tarfile.SYMTYPE, "/etc/passwd"), None),
+        (_entry("eval/up-link", tarfile.SYMTYPE, "../../../escaped"), None),
+        (_entry("files/hard", tarfile.LNKTYPE, "files/" + "a" * 64), None),
+        (_entry("files/hard-out", tarfile.LNKTYPE, "/etc/passwd"), None),
+        (_entry("/files/absolute", tarfile.REGTYPE, size=4), b"evil"),
+        (_entry("/etc/cron.d/absolute", tarfile.REGTYPE, size=4), b"evil"),
+        (_entry("files/device", tarfile.CHRTYPE), None),
+        (_entry("files/block", tarfile.BLKTYPE), None),
+        (_entry("files/fifo", tarfile.FIFOTYPE), None),
+        (_entry("other/file", tarfile.REGTYPE, size=4), b"evil"),
+        (_entry("knowledge.db", tarfile.REGTYPE, size=4), b"evil"),
+        (_entry("files", tarfile.DIRTYPE), None),
+        (_entry("files/../../escaped", tarfile.REGTYPE, size=4), b"evil"),
+    ],
+    ids=lambda v: v.name if isinstance(v, tarfile.TarInfo) else "",
+)
+def test_restore_refuses_unsafe_archive_entries_before_touching_anything(
+    backup_copy, data_dir, capsys, entry, payload
+):
+    _tar_with(backup_copy, entry, payload)
+    _refused_untouched(backup_copy, data_dir, capsys, "unexpected entry")
+    assert not (data_dir.parent / "escaped").exists()
+
+
+def test_the_unsafe_entry_check_accepts_the_real_archive(backup_copy):
+    with tarfile.open(backup_copy / ops.BACKUP_TAR) as tar:
+        members = ops._safe_members(tar)
+    assert members and all(m.isreg() for m in members)
+
+
+def test_restore_checks_the_counts_before_touching_anything(backup_copy, data_dir, capsys):
+    manifest = json.loads((backup_copy / ops.MANIFEST).read_text())
+    manifest["counts"]["chunks"] += 1
+    (backup_copy / ops.MANIFEST).write_text(json.dumps(manifest))
+    _refused_untouched(backup_copy, data_dir, capsys, "but its manifest says")
+
+
+def test_restore_checks_integrity_before_touching_anything(backup_copy, data_dir, capsys):
+    db = backup_copy / ops.BACKUP_DB
+    data = db.read_bytes()
+    db.write_bytes(data[: len(data) // 2])
+    reseal(backup_copy)
+    _refused_untouched(backup_copy, data_dir, capsys, "failed its integrity check")
+
+
+def test_restore_refuses_a_backup_from_newer_code(backup_copy, data_dir, capsys):
+    conn = sqlite3.connect(backup_copy / ops.BACKUP_DB)
+    with conn:
+        conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (999, 'x')")
+    conn.close()
+    reseal(backup_copy)
+    _refused_untouched(backup_copy, data_dir, capsys, "made by newer code")
+
+
+def test_a_refused_non_empty_target_is_untouched(backup_copy, data_dir, capsys):
+    before = snapshot_tree(data_dir)
+    assert kb("restore", str(backup_copy), "--into", str(data_dir)) == 1
+    assert "already holds a knowledge library" in capsys.readouterr().err
+    assert snapshot_tree(data_dir) == before
+
+
+@pytest.mark.parametrize("parts", [{ops.BACKUP_DB}, {ops.BACKUP_DB, ops.BACKUP_TAR, "run.sh"}])
+def test_the_manifest_must_name_exactly_the_parts_before_anything_is_hashed(
+    backup_copy, data_dir, capsys, monkeypatch, parts
+):
+    manifest = json.loads((backup_copy / ops.MANIFEST).read_text())
+    manifest["sha256"] = {name: "0" * 64 for name in parts}
+    (backup_copy / ops.MANIFEST).write_text(json.dumps(manifest))
+
+    def no_hashing(path):
+        raise AssertionError(f"hashed {path} before checking the manifest")
+
+    monkeypatch.setattr(ops, "_sha256", no_hashing)
+    _refused_untouched(backup_copy, data_dir, capsys, "must list exactly")
+
+
+def test_an_unreadable_manifest_is_refused(backup_copy, data_dir, capsys):
+    (backup_copy / ops.MANIFEST).write_text("{not json")
+    _refused_untouched(backup_copy, data_dir, capsys, "unreadable")
+
+
+def test_a_failure_after_moving_the_library_aside_says_where_it_went(
+    backup_copy, data_dir, capsys, monkeypatch
+):
+    def disk_full(*args, **kw):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(ops.shutil, "move", disk_full)
+    assert kb("restore", str(backup_copy), "--into", str(data_dir), "--force") == 1
+    err = capsys.readouterr().err
+    (aside,) = list(data_dir.glob("knowledge-replaced-*"))
+    assert "disk full" in err and f"the previous library was moved to {aside}" in err
+    assert (aside / "knowledge.db").is_file() and (aside / "files").is_dir()

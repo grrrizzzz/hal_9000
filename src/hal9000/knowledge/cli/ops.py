@@ -21,14 +21,20 @@ timestamped folder ``knowledge-<UTC time>/`` holding:
 - ``manifest.json``: schema version, counts and SHA-256 checksums (no
   document text, file names or questions).
 
-**Restore** (``kb restore FROM [--into DIR] [--force]``) checks the checksums,
-then restores into the data directory (default ``KB_DATA_DIR``). It refuses a
-data directory that already holds a library (``knowledge.db`` or anything in
+**Restore** (``kb restore FROM [--into DIR] [--force]``) first checks
+everything it can without touching the data directory (default
+``KB_DATA_DIR``): the manifest names exactly the database and the archive, both
+match their checksums, every archive entry is a regular file under ``files/``
+or ``eval/`` (no links, devices, absolute paths or ``..``), and a temporary copy
+of the database passes ``PRAGMA integrity_check``, has a schema this code knows
+and holds the counts the manifest records. Only then does it take the writer
+lock (refusing while the service holds it) and restore. It refuses a data
+directory that already holds a library (``knowledge.db`` or anything in
 ``knowledge/files`` or ``knowledge/eval``) unless ``--force``, which moves the
-old library aside to ``knowledge-replaced-<time>/`` rather than deleting it. It
-never touches anything else in the directory (``hal9000.db`` belongs to the
-solar agent), and refuses while the service's writer lock is held. The restored
-database is migrated and integrity-checked before the command reports success.
+old library aside to ``knowledge-replaced-<time>/`` rather than deleting it; if
+a later step fails, the error says where it went. It never touches anything
+else in the directory (``hal9000.db`` belongs to the solar agent). The restored
+database is migrated before the command reports success.
 
 **Stats**: documents, pages and chunks per profile, the active profile, the
 database size, the month's knowledge spend against its cap, the last ingestion
@@ -44,6 +50,7 @@ import shutil
 import sqlite3
 import sys
 import tarfile
+import tempfile
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -91,6 +98,8 @@ def _integrity(path: Path) -> None:
     conn = sqlite3.connect(path)
     try:
         result = conn.execute("PRAGMA integrity_check").fetchone()[0]
+    except sqlite3.DatabaseError as error:
+        result = str(error)
     finally:
         conn.close()
     if result != "ok":
@@ -209,36 +218,81 @@ def library_is_empty(data_dir: Path) -> bool:
     return True
 
 
+#: the parts a backup folder's manifest must list, exactly
+PARTS = frozenset({BACKUP_DB, BACKUP_TAR})
+
+
 def _check(source: Path) -> dict[str, Any]:
+    """The manifest, once it names exactly the expected parts and each matches its checksum."""
     manifest_path = source / MANIFEST
     if not manifest_path.is_file():
         raise BackupError(f"{source} is not a `kb backup` folder (no {MANIFEST})")
-    manifest = json.loads(manifest_path.read_text())
-    for name, expected in manifest.get("sha256", {}).items():
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise BackupError(f"the backup's {MANIFEST} is unreadable: {error}") from error
+    checksums = manifest.get("sha256") if isinstance(manifest, dict) else None
+    if not isinstance(checksums, dict) or set(checksums) != PARTS:
+        raise BackupError(
+            f"the backup's manifest must list exactly {', '.join(sorted(PARTS))}; it lists "
+            f"{', '.join(sorted(checksums or {})) or 'nothing'}"
+        )
+    if not isinstance(manifest.get("counts"), dict):
+        raise BackupError("the backup's manifest has no counts")
+    for name in sorted(PARTS):
         path = source / name
         if not path.is_file():
             raise BackupError(f"the backup is incomplete: {name} is missing")
-        if _sha256(path) != expected:
+        if _sha256(path) != checksums[name]:
             raise BackupError(f"the backup is damaged: {name} doesn't match its checksum")
-    if set(manifest.get("sha256", {})) != {BACKUP_DB, BACKUP_TAR}:
-        raise BackupError("the backup's manifest doesn't list both of its parts")
     return manifest
 
 
 def _safe_members(tar: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    """Every entry, if each is a regular file under ``files/`` or ``eval/``; else refuse.
+
+    Links (symbolic or hard), devices, FIFOs, directories, absolute paths, ``..``
+    and any other top folder are refused, so extraction can only create regular
+    files inside the library folders.
+    """
     members = []
     for member in tar.getmembers():
         parts = Path(member.name).parts
         if (
-            not member.isfile()
+            not member.isreg()
             or member.name.startswith("/")
             or ".." in parts
-            or not parts
+            or len(parts) < 2
             or parts[0] not in LIBRARY_DIRS
         ):
             raise BackupError(f"the backup's archive holds an unexpected entry: {member.name!r}")
         members.append(member)
     return members
+
+
+def _verify_db(copy: Path, manifest: dict[str, Any]) -> dict[str, int]:
+    """Integrity check and counts on a copy of the backup's database, before anything moves."""
+    from hal9000.knowledge.storage import SCHEMA_VERSION, schema_version
+
+    _integrity(copy)
+    conn = sqlite3.connect(copy)
+    try:
+        version = schema_version(conn)
+        counts = _counts(conn)
+    except sqlite3.DatabaseError as error:
+        raise BackupError(f"the backup's database can't be read: {error}") from error
+    finally:
+        conn.close()
+    if version > SCHEMA_VERSION:
+        raise BackupError(
+            f"the backup was made by newer code (schema {version}, this code knows "
+            f"{SCHEMA_VERSION}); update hal9000 before restoring it"
+        )
+    if counts != manifest["counts"]:
+        raise BackupError(
+            f"the backup's database holds {counts}, but its manifest says {manifest['counts']}"
+        )
+    return counts
 
 
 @dataclass
@@ -248,57 +302,70 @@ class RestoreReport:
     replaced: Path | None = None
 
 
+def _refuse_non_empty(data_dir: Path) -> None:
+    raise BackupError(
+        f"{data_dir} already holds a knowledge library; restore into an empty data "
+        "directory, or pass --force to move the current one aside"
+    )
+
+
 def restore(source: Path, data_dir: Path, *, force: bool = False) -> RestoreReport:
-    """Restore the backup folder ``source`` into ``data_dir`` (see the module docstring)."""
+    """Restore the backup folder ``source`` into ``data_dir`` (see the module docstring).
+
+    Everything that can be checked is checked before the data directory is
+    touched: the manifest and checksums, every archive entry, and the database
+    (integrity, schema version, counts against the manifest) on a temporary copy
+    next to the data directory. Only then is the writer lock taken and the old
+    library moved aside (``--force``). If a later step fails, the error says
+    where the old library went.
+    """
     from hal9000.knowledge.ingest.jobs import WriterLock
-    from hal9000.knowledge.storage import SCHEMA_VERSION, open_db
+    from hal9000.knowledge.storage import open_db
 
     source, data_dir = Path(source), Path(data_dir)
     manifest = _check(source)
-    if int(manifest.get("schema_version", 0)) > SCHEMA_VERSION:
-        raise BackupError(
-            f"the backup was made by newer code (schema {manifest['schema_version']}, this code "
-            f"knows {SCHEMA_VERSION}); update hal9000 before restoring it"
-        )
-    knowledge = data_dir / "knowledge"
-    lock = WriterLock(knowledge / "worker.lock")
-    if not lock.acquire():
-        raise BackupError(
-            "the knowledge service (or an ingest) is running on this data directory; stop it "
-            "before restoring"
-        )
-    try:
-        replaced = None
-        if not library_is_empty(data_dir):
-            if not force:
-                raise BackupError(
-                    f"{data_dir} already holds a knowledge library; restore into an empty data "
-                    "directory, or pass --force to move the current one aside"
-                )
-            replaced = data_dir / f"knowledge-replaced-{_stamp()}"
-            replaced.mkdir(parents=True)
-            for path in _library_paths(data_dir):
-                if path.exists():
-                    path.rename(replaced / path.name)
+    with tarfile.open(source / BACKUP_TAR, "r:gz") as tar:
+        _safe_members(tar)
+    if not force and not library_is_empty(data_dir):
+        _refuse_non_empty(data_dir)
 
-        # the archive first: a failure there leaves no database pointing at missing files
-        knowledge.mkdir(parents=True, exist_ok=True)
-        with tarfile.open(source / BACKUP_TAR, "r:gz") as tar:
-            tar.extractall(knowledge, members=_safe_members(tar), filter="data")
-        db = data_dir / "knowledge.db"
-        tmp = db.with_name("knowledge.db.restoring")
-        shutil.copyfile(source / BACKUP_DB, tmp)
-        _integrity(tmp)
-        tmp.replace(db)
-        conn = open_db(db)  # migrates a backup made by older code; refuses a newer one
+    data_dir.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".kb-restore-", dir=data_dir.parent) as scratch:
+        staged = Path(scratch) / BACKUP_DB
+        shutil.copyfile(source / BACKUP_DB, staged)
+        counts = _verify_db(staged, manifest)
+
+        knowledge = data_dir / "knowledge"
+        lock = WriterLock(knowledge / "worker.lock")
+        if not lock.acquire():
+            raise BackupError(
+                "the knowledge service (or an ingest) is running on this data directory; stop "
+                "it before restoring"
+            )
+        replaced = None
         try:
-            counts = _counts(conn)
+            if not library_is_empty(data_dir):
+                if not force:  # filled in since the first look
+                    _refuse_non_empty(data_dir)
+                replaced = data_dir / f"knowledge-replaced-{_stamp()}"
+                replaced.mkdir(parents=True)
+                for path in _library_paths(data_dir):
+                    if path.exists():
+                        path.rename(replaced / path.name)
+            try:
+                with tarfile.open(source / BACKUP_TAR, "r:gz") as tar:
+                    tar.extractall(knowledge, members=_safe_members(tar), filter="data")
+                shutil.move(staged, data_dir / "knowledge.db")
+                conn = open_db(data_dir / "knowledge.db")  # migrates a backup from older code
+                conn.close()
+            except Exception as error:
+                if replaced is None:
+                    raise
+                raise BackupError(
+                    f"the restore failed ({error}); the previous library was moved to {replaced}"
+                ) from error
         finally:
-            conn.close()
-        if counts != manifest.get("counts", counts):  # pragma: no cover - checksums guard this
-            raise BackupError(f"restored counts {counts} differ from the backup's")
-    finally:
-        lock.release()
+            lock.release()
     return RestoreReport(data_dir=data_dir, counts=counts, replaced=replaced)
 
 
