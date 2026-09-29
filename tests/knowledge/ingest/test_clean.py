@@ -99,6 +99,17 @@ def test_body_lines_outside_the_edge_zone_are_not_header_candidates():
     assert "Bottom" not in text
 
 
+def test_pseudo_pages_never_lose_repeated_lines():
+    pages = [
+        ParsedPage(page=n, text="Checked the pump basket.\nVisit notes follow.") for n in (1, 2, 3)
+    ]
+    result = clean_pages(pages, file_sha=SHA, parser="text", pseudo_pages=True)
+    assert all(
+        page.text == "Checked the pump basket.\nVisit notes follow." for page in result.pages
+    )
+    assert result.removed == frozenset()
+
+
 def test_single_page_file_keeps_everything():
     result = clean_pages([_page(1, "Just one page.", 1)], file_sha=SHA, parser="pdfium")
     assert HEADER in result.pages[0].text

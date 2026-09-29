@@ -33,6 +33,7 @@ dev = [
     "ruff>=0.6",
     "hypothesis>=6.100",
     "openapi-spec-validator>=0.7",
+    "reportlab>=5.0.1",
 ]
 # House knowledge base (plan KNOWLEDGE_PLAN.md §3.1, §4). The base group must
 # stay lean enough for the Pi (< 300 MB, rule K11); heavy extras are separate

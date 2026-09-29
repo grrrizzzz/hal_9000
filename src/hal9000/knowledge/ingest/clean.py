@@ -380,15 +380,22 @@ def clean_pages(
     repeat_fraction: float = DEFAULT_REPEAT_FRACTION,
     zone: int = DEFAULT_ZONE,
     vocabulary: Iterable[str] | None = None,
+    pseudo_pages: bool = False,
 ) -> CleanResult:
     """Clean every page of one file, timed as ``stage("clean")`` (rule K7).
 
     Header and footer frequency is counted across the whole file, before it is
-    segmented, as plan §5.1 orders the steps.
+    segmented, as plan §5.1 orders the steps. Pseudo-pages (DOCX, HTML,
+    Markdown, TXT; ``ParsedFile.pseudo_pages``) have no running headers, so
+    nothing is removed from them for repeating.
     """
     with stage(Stage.CLEAN):
         words = _vocab(vocabulary)
-        running = running_lines([page.text for page in pages], repeat_fraction, zone)
+        running = (
+            set()
+            if pseudo_pages
+            else running_lines([page.text for page in pages], repeat_fraction, zone)
+        )
         cleaned: list[Page] = []
         for page in pages:
             tracked = _clean_tracked(_Tracked.of(page.text), running, zone, words)
