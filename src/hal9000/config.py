@@ -63,6 +63,11 @@ MODEL_RATES: dict[str, tuple[float, float, float]] = {
     "gpt-5-nano": (0.05, 0.005, 0.4),
     "claude-haiku-4-5": (1.0, 0.1, 5.0),
     "claude-sonnet-5": (2.0, 0.2, 10.0),
+    # Embeddings (knowledge base, plan §13): input tokens only, so the cached
+    # rate equals the input rate and there is no output rate. OpenAI pricing
+    # page checked 2026-09: $0.02 and $0.13 per million input tokens.
+    "text-embedding-3-small": (0.02, 0.02, 0.0),
+    "text-embedding-3-large": (0.13, 0.13, 0.0),
 }
 DEFAULT_RATES: tuple[float, float, float] = (5.0, 0.5, 25.0)
 
