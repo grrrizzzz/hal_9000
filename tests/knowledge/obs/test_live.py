@@ -342,9 +342,26 @@ def _session(app, root: Path, live: dict) -> None:
     client.close()
 
 
+def _as_a_fresh_process() -> None:
+    """Drop the labelled series other tests created, as a new ``kb serve`` process has none.
+
+    Without this a query could select a series some earlier test made (an
+    ingestion error, another model's tokens), not one this session did.
+    Unlabelled metrics are always present; deltas still measure the session.
+    """
+    for metric in (
+        metrics.STAGE_SECONDS, metrics.QUESTIONS_TOTAL, metrics.ERRORS_TOTAL,
+        metrics.TOKENS_TOTAL, metrics.COST_USD_TOTAL, metrics.GROUNDING_FAILURES_TOTAL,
+        metrics.FEEDBACK_TOTAL, metrics.INGEST_FILES_TOTAL, metrics.INGEST_PAGES_TOTAL,
+    ):  # fmt: skip
+        metric.clear()
+    metrics._start_closed_sets_at_zero()
+
+
 @pytest.fixture(scope="module")
 def live(tmp_path_factory) -> Live:
     root = tmp_path_factory.mktemp("live")
+    _as_a_fresh_process()
     captured: dict = {"answers": {}, "sql": {}, "trace_status": {}}
 
     def drive(app, host, port, log_level, proxy_headers):

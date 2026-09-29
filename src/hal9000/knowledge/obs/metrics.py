@@ -253,17 +253,22 @@ METRICS: Mapping[str, tuple[str, tuple[str, ...]]] = {
     EVAL_METRIC_NAME: ("gauge", ("profile", "metric")),
 }
 
-# Closed label sets start at zero, so rate() and ratios work before the first event.
-for _v in OUTCOMES:
-    QUESTIONS_TOTAL.labels(outcome=_v)
-for _v in GROUNDING_KINDS:
-    GROUNDING_FAILURES_TOTAL.labels(kind=_v)
-for _v in FEEDBACK_RATINGS:
-    FEEDBACK_TOTAL.labels(rating=_v)
-for _v in INGEST_STATUSES:
-    INGEST_FILES_TOTAL.labels(status=_v)
-for _v in ("yes", "no"):
-    INGEST_PAGES_TOTAL.labels(text_layer=_v)
+
+def _start_closed_sets_at_zero() -> None:
+    """Closed label sets start at zero, so rate() and ratios work before the first event."""
+    for value in OUTCOMES:
+        QUESTIONS_TOTAL.labels(outcome=value)
+    for value in GROUNDING_KINDS:
+        GROUNDING_FAILURES_TOTAL.labels(kind=value)
+    for value in FEEDBACK_RATINGS:
+        FEEDBACK_TOTAL.labels(rating=value)
+    for value in INGEST_STATUSES:
+        INGEST_FILES_TOTAL.labels(status=value)
+    for value in ("yes", "no"):
+        INGEST_PAGES_TOTAL.labels(text_layer=value)
+
+
+_start_closed_sets_at_zero()
 
 
 # ------------------------------------------------------------------ helpers
