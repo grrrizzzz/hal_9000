@@ -98,6 +98,22 @@ for (const width of [390, 1440]) {
         await page.waitForTimeout(500);
         await page.screenshot({ path: `e2e-screenshots/viewer-${width}-${scheme}.png` });
         await page.keyboard.press("Escape");
+
+        // The Account menu and the "Sign out everywhere" confirmation (cancelled here).
+        if (width < 1024) await page.getByRole("button", { name: "Open menu" }).click();
+        await page.getByRole("button", { name: "Account" }).click();
+        const everywhere = page.getByRole("button", { name: "Sign out everywhere…" });
+        await expect(everywhere).toBeVisible();
+        await page.screenshot({ path: `e2e-screenshots/account-menu-${width}-${scheme}.png` });
+        await everywhere.click();
+        const confirm = page.getByRole("alertdialog", { name: "Sign out everywhere?" });
+        await expect(confirm).toBeVisible();
+        const box = (await confirm.boundingBox())!;
+        expect(box.x >= 0 && box.x + box.width <= width, `confirm dialog fits at ${width}px`).toBe(true);
+        await page.screenshot({ path: `e2e-screenshots/account-confirm-${width}-${scheme}.png` });
+        await confirm.getByRole("button", { name: "Cancel" }).click();
+        await expect(confirm).toBeHidden();
+
         await page.goto("/sign-in");
         await expect(page.getByLabel("Passcode")).toBeVisible();
         await page.screenshot({ path: `e2e-screenshots/sign-in-${width}-${scheme}.png` });

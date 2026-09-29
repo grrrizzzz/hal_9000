@@ -33,7 +33,8 @@ export function ConfirmDialog({
   return (
     <A.Root open={open} onOpenChange={onOpenChange}>
       <A.Portal>
-        <A.Overlay className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]" />
+        {/* z-50, after the mobile menu drawer (also z-50) in the DOM, so it dims the drawer too. */}
+        <A.Overlay className="fixed inset-0 z-50 bg-black/40 backdrop-blur-[2px]" />
         <A.Content className="fixed top-1/2 left-1/2 z-50 w-[min(26rem,calc(100vw-2rem))] -translate-x-1/2 -translate-y-1/2 rounded-2xl border border-border bg-surface p-5 shadow-pop">
           <A.Title className="text-[15px] font-semibold">{title}</A.Title>
           <A.Description className="mt-1.5 text-sm text-muted-foreground">{description}</A.Description>
