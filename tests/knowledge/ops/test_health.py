@@ -55,7 +55,45 @@ def test_the_file_is_written_atomically(tmp_path, kb_db):
     body = health.write_health(kb_db, tmp_path / "data", month_spend=None, month_cap=10.0)
     written = json.loads((tmp_path / "data" / health.HEALTH_FILE).read_text())
     assert written == body and written["month_spend_usd"] is None
-    assert not list((tmp_path / "data").glob("*.tmp"))
+    assert sorted(p.name for p in (tmp_path / "data").iterdir()) == [health.HEALTH_FILE]
+
+
+def test_concurrent_writers_never_share_a_temporary_file(tmp_path):
+    import threading
+
+    errors = []
+
+    def write(n: int) -> None:
+        try:
+            for i in range(25):
+                health.write_health_file(tmp_path, {"writer": n, "i": i})
+        except Exception as error:  # pragma: no cover - the failure being tested for
+            errors.append(error)
+
+    threads = [threading.Thread(target=write, args=(n,)) for n in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert json.loads((tmp_path / health.HEALTH_FILE).read_text())["i"] == 24
+    assert sorted(p.name for p in tmp_path.iterdir()) == [health.HEALTH_FILE]
+
+
+def test_a_failed_write_leaves_no_temporary_file(tmp_path, monkeypatch):
+    import os
+
+    def refuse(*args):
+        raise OSError("no")
+
+    monkeypatch.setattr(os, "replace", refuse)
+    try:
+        health.write_health_file(tmp_path, {"a": 1})
+    except OSError:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected OSError")
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_an_unwritable_data_dir_is_logged_not_raised(tmp_path, kb_db, caplog):

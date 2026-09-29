@@ -9,15 +9,18 @@ ingestion" is fresh without waiting for the next health probe. ``kb stats``
 reads the same two timestamps with :func:`last_question_at` and
 :func:`last_ingestion_at`.
 
-It is written atomically (a temporary file, then a rename), so a reader never
-sees half a file.
+It is written atomically (a unique temporary file in the same folder, then
+``os.replace``), so a reader never sees half a file and two writers never
+share a temporary file.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
+import tempfile
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -69,9 +72,16 @@ def write_health_file(data_dir: Path, body: dict[str, Any]) -> Path:
     """Write ``body`` to ``data_dir/knowledge_health.json`` atomically; returns the path."""
     target = Path(data_dir) / HEALTH_FILE
     target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_suffix(".tmp")
-    tmp.write_text(json.dumps(body, indent=2) + "\n")
-    tmp.replace(target)
+    # a unique temporary file per writer: concurrent writers (the worker thread after an
+    # ingestion, a /health request) never share one, and os.replace is atomic
+    fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=f".{HEALTH_FILE}.", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(json.dumps(body, indent=2) + "\n")
+        os.replace(tmp, target)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
     return target
 
 
