@@ -12,6 +12,7 @@ export function ConfirmDialog({
   tone = "primary",
   onConfirm,
   busy,
+  keepOpen = false,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -21,7 +22,14 @@ export function ConfirmDialog({
   tone?: "primary" | "danger";
   onConfirm: () => void;
   busy?: boolean;
+  /** Don't close on confirm: the caller closes it when the action succeeds (or shows its error). */
+  keepOpen?: boolean;
 }) {
+  const confirm = (
+    <Button variant={tone} onClick={onConfirm} disabled={busy}>
+      {confirmLabel}
+    </Button>
+  );
   return (
     <A.Root open={open} onOpenChange={onOpenChange}>
       <A.Portal>
@@ -33,11 +41,7 @@ export function ConfirmDialog({
             <A.Cancel asChild>
               <Button variant="secondary">Cancel</Button>
             </A.Cancel>
-            <A.Action asChild>
-              <Button variant={tone} onClick={onConfirm} disabled={busy}>
-                {confirmLabel}
-              </Button>
-            </A.Action>
+            {keepOpen ? confirm : <A.Action asChild>{confirm}</A.Action>}
           </div>
         </A.Content>
       </A.Portal>

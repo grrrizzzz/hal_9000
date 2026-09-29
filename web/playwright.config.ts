@@ -32,8 +32,10 @@ export default defineConfig({
     viewport: { width: 1440, height: 900 },
   },
   projects: [
-    { name: "flows", testIgnore: /visual\.spec\.ts/, use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } },
+    { name: "flows", testIgnore: /(visual|session)\.spec\.ts/, use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } },
     { name: "visual", testMatch: /visual\.spec\.ts/, use: { ...devices["Desktop Chrome"] } },
+    // Revokes every session on the server, so it runs last.
+    { name: "session", testMatch: /session\.spec\.ts/, dependencies: ["flows", "visual"], use: { ...devices["Desktop Chrome"], viewport: { width: 1440, height: 900 } } },
   ],
   webServer: external
     ? undefined

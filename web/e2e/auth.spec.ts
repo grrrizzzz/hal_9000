@@ -15,7 +15,10 @@ test("signing in sets the session and returns to the page you asked for", async 
   await expect(page).toHaveURL(/\/library$/);
   await expect(page.getByRole("heading", { name: "Library" })).toBeVisible();
 
-  // Signing out sends you back to Sign in.
-  await page.getByRole("button", { name: "Sign out" }).click();
+  // Signing out (Account menu) revokes this session and sends you back to Sign in.
+  await page.getByRole("button", { name: "Account" }).click();
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
   await expect(page).toHaveURL(/\/sign-in/);
+  await page.goto("/library");
+  await expect(page).toHaveURL(/\/sign-in\?next=%2Flibrary$/);
 });
