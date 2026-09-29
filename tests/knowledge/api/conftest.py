@@ -20,6 +20,12 @@ from hal9000.knowledge.ingest.pipeline import IngestPipeline
 from tests.knowledge.answer.conftest import CORPUS, make_settings
 
 PASSCODE = "open-the-pod-bay-doors"
+#: what a browser sends from the app's own pages (the request guard's CSRF check)
+SAME_ORIGIN = {"sec-fetch-site": "same-origin"}
+
+
+def client_for(app) -> TestClient:
+    return TestClient(app, headers=SAME_ORIGIN)
 
 
 @dataclass
@@ -78,7 +84,7 @@ def make_api(tmp_path: Path, *, seed: bool = True, chat_limit: int | None = None
             seed_library(conn, ingest, CORPUS)
         finally:
             conn.close()
-    return Api(TestClient(create_app(services, web_dist=False)), services, bus)
+    return Api(client_for(create_app(services, web_dist=False)), services, bus)
 
 
 @pytest.fixture

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from hal9000.knowledge.answer.pipeline import AnswerPipeline
-from hal9000.knowledge.auth import Auth, RateLimiter, load_secret
+from hal9000.knowledge.auth import Auth, RateLimiter, SessionStore, load_secret
 from hal9000.knowledge.config import AGENT, KnowledgeFile, KnowledgeSettings, load_knowledge_file
 
 __all__ = ["HEALTH_FILE", "Services", "build_services"]
@@ -46,6 +46,11 @@ class Services:
     bus: Any | None = None  # ProgressBus
     fake: bool = False
     chat_limiter: RateLimiter = field(default_factory=lambda: RateLimiter(20, 60.0))
+    sessions: SessionStore | None = None
+
+    def __post_init__(self) -> None:
+        if self.sessions is None:
+            self.sessions = SessionStore(self.settings.db_path)
 
     def connect(self) -> sqlite3.Connection:
         from hal9000.knowledge.storage import connect
@@ -54,6 +59,12 @@ class Services:
 
     def knowledge_file(self) -> KnowledgeFile:
         return load_knowledge_file(self.settings.yaml_path)
+
+    def max_upload_bytes(self) -> int:
+        """``ingest.max_upload_bytes``: the ingest pipeline's limit, else the yaml's."""
+        if self.ingest is not None and getattr(self.ingest, "knowledge_file", None) is not None:
+            return int(self.ingest.max_bytes)
+        return self.knowledge_file().ingest.max_upload_bytes
 
     def month_spend(self) -> float | None:
         if self.meter is None:

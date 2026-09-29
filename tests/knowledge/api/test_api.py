@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 from hal9000.knowledge.api import ROUTES, create_app
 from hal9000.knowledge.auth import COOKIE
 from hal9000.knowledge.ingest.jobs import create_job, update_job
-from tests.knowledge.api.conftest import PASSCODE, Api, make_api
+from tests.knowledge.api.conftest import PASSCODE, Api, client_for, make_api
 from tests.knowledge.fixtures import corpus
 
 SHA = "ab" * 32
@@ -172,7 +172,7 @@ def test_retrieval_only_and_embedding_down_over_the_api(signed):
 
 def test_conversations_are_private_to_their_session(api: Api, signed, tmp_path):
     answer = done(chat(signed, "How old is the furnace?"))
-    other = TestClient(api.client.app)
+    other = client_for(api.client.app)
     api.sign_in(other)
     assert other.get("/api/conversations").json() == []
     assert other.get(f"/api/conversations/{answer['conversation_id']}").status_code == 404
@@ -605,16 +605,21 @@ def test_the_ui_is_served_with_a_history_fallback(api: Api, tmp_path):
     (dist / "assets").mkdir(parents=True)
     (dist / "index.html").write_text("<!doctype html><title>HAL</title>")
     (dist / "assets" / "app.js").write_text("console.log('synthetic')")
-    client = TestClient(create_app(api.services, web_dist=dist))
+    client = client_for(create_app(api.services, web_dist=dist))
     assert client.get("/").text.startswith("<!doctype html>")
     assert client.get("/traces/0123abcd").text.startswith("<!doctype html>")
     assert client.get("/c/12").text.startswith("<!doctype html>")
     asset = client.get("/assets/app.js")
     assert asset.status_code == 200 and "synthetic" in asset.text
     assert "immutable" in asset.headers["cache-control"]
+    assert client.get("/api/nope").status_code == 401  # not the UI, and not before sign-in
+    api.sign_in(client)
     unknown = client.get("/api/nope")
     assert unknown.status_code == 404 and unknown.headers["content-type"] == "application/json"
     assert client.get("/../../etc/passwd").text.startswith("<!doctype html>")
+    for raw in (b"//etc/passwd", b"/assets/../../../etc/passwd", b"/%2Fetc%2Fpasswd"):
+        status, body = _raw_get(client.app, raw)
+        assert status in (200, 404) and b"root:" not in body, raw
     assert client.get("/health").headers["content-type"] == "application/json"
 
 
@@ -640,3 +645,37 @@ def test_the_real_services_are_metered_and_report_the_cap(tmp_path, monkeypatch)
         assert body["month_spend_usd"] == 0.75 and body["month_cap_usd"] == 0.5
     finally:
         services.close()
+
+
+def _raw_get(app, raw_path: bytes) -> tuple[int, bytes]:
+    """GET with an exact raw path (an HTTP client would normalise ``//etc/passwd``)."""
+    import asyncio
+    from urllib.parse import unquote
+
+    sent: dict = {"body": b""}
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        if message["type"] == "http.response.start":
+            sent["status"] = message["status"]
+        elif message["type"] == "http.response.body":
+            sent["body"] += message.get("body", b"")
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": unquote(raw_path.decode()),
+        "raw_path": raw_path,
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"test")],
+        "client": ("127.0.0.1", 1),
+        "server": ("test", 80),
+    }
+    asyncio.run(app(scope, receive, send))
+    return sent["status"], sent["body"]

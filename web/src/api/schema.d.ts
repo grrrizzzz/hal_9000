@@ -16,11 +16,14 @@ export interface paths {
         /**
          * Create Session
          * @description Exchange the household passcode for a signed session cookie (30 days).
+         *
+         *     At most 10 attempts a minute per address are evaluated; each is counted
+         *     before the passcode is checked, and a success clears the count.
          */
         post: operations["create_session"];
         /**
          * Delete Session
-         * @description Sign out.
+         * @description Sign out: this session is revoked on the server; ``everywhere`` revokes every session.
          */
         delete: operations["delete_session"];
         options?: never;
@@ -40,6 +43,10 @@ export interface paths {
         /**
          * Create Uploads
          * @description Upload many files; folder paths become collections. Returns job IDs.
+         *
+         *     Multipart ``files`` with one ``relative_path`` each, in order. The body
+         *     is parsed as it streams in; each file is written once, to the upload
+         *     spool, and stops being written at ``ingest.max_upload_bytes``.
          */
         post: operations["create_uploads"];
         delete?: never;
@@ -1681,7 +1688,7 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Too many failed attempts */
+            /** @description Too many attempts */
             429: {
                 headers: {
                     [name: string]: unknown;
@@ -1694,7 +1701,9 @@ export interface operations {
     };
     delete_session: {
         parameters: {
-            query?: never;
+            query?: {
+                everywhere?: boolean;
+            };
             header?: never;
             path?: never;
             cookie?: never;
@@ -1715,6 +1724,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -1743,6 +1761,15 @@ export interface operations {
             };
             /** @description Not signed in */
             401: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description The body is too large */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -445,7 +445,7 @@ class EvalRun(_Model):
 
 
 class SessionRequest(_Model):
-    passcode: str = Field(min_length=1)
+    passcode: str = Field(min_length=1, max_length=256)
 
 
 class SessionResponse(_Model):
@@ -552,7 +552,7 @@ class SearchFilters(_Model):
 
 class ChatRequest(_Model):
     conversation_id: int | None = None
-    message: str = Field(min_length=1)
+    message: str = Field(min_length=1, max_length=4000)
     filters: SearchFilters | None = None
 
 

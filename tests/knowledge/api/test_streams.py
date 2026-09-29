@@ -13,7 +13,11 @@ from tests.knowledge.api.conftest import Api
 
 
 def _scope(method: str, path: str, token: str, body: bytes = b"") -> dict:
-    headers = [(b"host", b"test"), (b"cookie", f"{COOKIE}={token}".encode())]
+    headers = [
+        (b"host", b"test"),
+        (b"cookie", f"{COOKIE}={token}".encode()),
+        (b"sec-fetch-site", b"same-origin"),
+    ]
     if body:
         headers.append((b"content-type", b"application/json"))
     return {

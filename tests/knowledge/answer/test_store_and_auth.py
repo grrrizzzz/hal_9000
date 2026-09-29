@@ -14,7 +14,7 @@ from hal9000.knowledge.auth import Auth, RateLimiter, load_secret
 from hal9000.knowledge.contracts import FeedbackRequest
 from hal9000.knowledge.storage import migrate, open_db
 from hal9000.knowledge.storage.db import statements
-from hal9000.knowledge.storage.schema import MIGRATIONS
+from hal9000.knowledge.storage.schema import MIGRATIONS, SCHEMA_VERSION
 
 
 # ------------------------------------------------------------------ store
@@ -80,7 +80,7 @@ def test_migration_4_keeps_the_latest_feedback_per_message(tmp_path):
         [(1, "first"), (-1, "second")],
     )
     conn.commit()
-    assert migrate(conn) == 4
+    assert migrate(conn) == SCHEMA_VERSION
     rows = conn.execute("SELECT rating, comment, updated_at FROM feedback").fetchall()
     assert [tuple(r) for r in rows] == [(-1, "second", "a")]
     columns = {r[1] for r in conn.execute("PRAGMA table_info(messages)")}

@@ -108,7 +108,15 @@ def run(args: argparse.Namespace) -> int:
     # handler the process would die before the cleanup below, so exit instead.
     previous = signal.signal(signal.SIGTERM, _exit_on_sigterm)
     try:
-        uvicorn.run(create_app(services), host=args.host, port=port, log_level="info")
+        # no reverse proxy in this design: never trust X-Forwarded-* (the sign-in
+        # limit is per client address)
+        uvicorn.run(
+            create_app(services),
+            host=args.host,
+            port=port,
+            log_level="info",
+            proxy_headers=False,
+        )
     except SystemExit:
         pass
     finally:

@@ -64,10 +64,11 @@ def test_ask_refuses_without_a_passcode_free_config_error(monkeypatch, capsys):
 def test_serve_fake_seeds_the_synthetic_library_and_serves(monkeypatch, tmp_path, capsys):
     served = {}
 
-    def fake_run(app, host, port, log_level):
+    def fake_run(app, host, port, log_level, proxy_headers):
+        assert proxy_headers is False
         from fastapi.testclient import TestClient
 
-        client = TestClient(app)
+        client = TestClient(app, headers={"sec-fetch-site": "same-origin"})
         assert client.post("/api/session", json={"passcode": "pod-bay-doors"}).status_code == 200
         docs = client.get("/api/documents").json()
         served["titles"] = {d["document"]["title"] for d in docs}
@@ -78,6 +79,7 @@ def test_serve_fake_seeds_the_synthetic_library_and_serves(monkeypatch, tmp_path
         answer = client.post("/api/chat", json={"message": "How old is the furnace?"})
         served["chat"] = answer.text
         served["where"] = (host, port)
+        served["docs"] = [client.get(path).text for path in ("/docs", "/redoc", "/openapi.json")]
 
     monkeypatch.setattr("uvicorn.run", fake_run)
     monkeypatch.setattr(serve_cli, "_temp_root", lambda: tmp_path / "fake")
@@ -87,6 +89,9 @@ def test_serve_fake_seeds_the_synthetic_library_and_serves(monkeypatch, tmp_path
     finally:
         enable_fake_mode(False)
     assert served["where"] == ("127.0.0.1", 8931)
+    for body in served["docs"]:  # no docs or schema (at most the UI's own index page)
+        assert "swagger" not in body.lower() and "redoc" not in body.lower()
+        assert '"openapi"' not in body
     assert {"Home inspection report", "Invoice 1001 — termite repair"} <= served["titles"]
     assert len(served["drafts"]) >= 2 and served["drafts"][0]["evidence"][0]["page"] == 2
     labels = served["labels"]

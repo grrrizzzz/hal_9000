@@ -12,17 +12,17 @@
           "session"
         ],
         "summary": "Create Session",
-        "description": "Exchange the household passcode for a signed session cookie (30 days).",
+        "description": "Exchange the household passcode for a signed session cookie (30 days).\n\nAt most 10 attempts a minute per address are evaluated; each is counted\nbefore the passcode is checked, and a success clears the count.",
         "operationId": "create_session",
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SessionRequest"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {
@@ -46,7 +46,7 @@
             }
           },
           "429": {
-            "description": "Too many failed attempts",
+            "description": "Too many attempts",
             "content": {
               "application/json": {
                 "schema": {
@@ -72,53 +72,23 @@
           "session"
         ],
         "summary": "Delete Session",
-        "description": "Sign out.",
+        "description": "Sign out: this session is revoked on the server; ``everywhere`` revokes every session.",
         "operationId": "delete_session",
+        "parameters": [
+          {
+            "name": "everywhere",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Everywhere"
+            }
+          }
+        ],
         "responses": {
           "204": {
             "description": "Successful Response"
-          },
-          "401": {
-            "description": "Not signed in",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/uploads": {
-      "post": {
-        "tags": [
-          "library"
-        ],
-        "summary": "Create Uploads",
-        "description": "Upload many files; folder paths become collections. Returns job IDs.",
-        "operationId": "create_uploads",
-        "requestBody": {
-          "content": {
-            "multipart/form-data": {
-              "schema": {
-                "$ref": "#/components/schemas/Body_create_uploads"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UploadResponse"
-                }
-              }
-            }
           },
           "401": {
             "description": "Not signed in",
@@ -140,6 +110,68 @@
               }
             }
           }
+        }
+      }
+    },
+    "/api/uploads": {
+      "post": {
+        "tags": [
+          "library"
+        ],
+        "summary": "Create Uploads",
+        "description": "Upload many files; folder paths become collections. Returns job IDs.\n\nMultipart ``files`` with one ``relative_path`` each, in order. The body\nis parsed as it streams in; each file is written once, to the upload\nspool, and stops being written at ``ingest.max_upload_bytes``.",
+        "operationId": "create_uploads",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "The body is too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_create_uploads"
+              }
+            }
+          },
+          "required": true
         }
       }
     },
@@ -2141,6 +2173,7 @@
           },
           "message": {
             "type": "string",
+            "maxLength": 4000,
             "minLength": 1,
             "title": "Message"
           },
@@ -4368,6 +4401,7 @@
         "properties": {
           "passcode": {
             "type": "string",
+            "maxLength": 256,
             "minLength": 1,
             "title": "Passcode"
           }

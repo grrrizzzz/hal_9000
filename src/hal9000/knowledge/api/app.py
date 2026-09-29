@@ -29,7 +29,6 @@ import asyncio
 import contextvars
 import logging
 import sqlite3
-import tempfile
 import threading
 from collections.abc import AsyncIterator, Iterator
 from datetime import date
@@ -40,13 +39,10 @@ from fastapi import (
     APIRouter,
     Depends,
     FastAPI,
-    File,
-    Form,
     HTTPException,
     Query,
     Request,
     Response,
-    UploadFile,
 )
 from fastapi import (
     Path as PathParam,
@@ -55,6 +51,7 @@ from fastapi.responses import FileResponse
 from fastapi.routing import APIRoute
 
 from hal9000 import __version__
+from hal9000.knowledge.api.security import RequestGuard
 from hal9000.knowledge.auth import COOKIE, Session
 from hal9000.knowledge.contracts import (
     ChatEventEnvelope,
@@ -142,6 +139,32 @@ _ERRORS = {
 _SSE = {"content": {"text/event-stream": {"schema": {"type": "string"}}}}
 Sha = Annotated[str, PathParam(pattern=r"^[0-9a-f]{64}$")]
 _END = object()
+#: ``POST /api/uploads``'s form, as FastAPI documented it when it parsed the form itself.
+_UPLOAD_FORM = {
+    "properties": {
+        "files": {
+            "items": {"type": "string", "contentMediaType": "application/octet-stream"},
+            "type": "array",
+            "title": "Files",
+            "description": "the files",
+        },
+        "relative_path": {
+            "items": {"type": "string"},
+            "type": "array",
+            "title": "Relative Path",
+            "description": "each file's path within its chosen folder, in order",
+        },
+    },
+    "type": "object",
+    "required": ["files", "relative_path"],
+    "title": "Body_create_uploads",
+}
+_VALIDATION_ERROR = {
+    "description": "Validation Error",
+    "content": {
+        "application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}
+    },
+}
 
 
 # ------------------------------------------------------------ dependencies
@@ -153,10 +176,13 @@ def services_of(request: Request):
 
 
 def require_session(request: Request) -> Session:
-    """The signed-in session, or ``401``."""
+    """The signed-in session (checked by :class:`RequestGuard` before the body), or ``401``."""
     services = services_of(request)
+    found = request.scope.get("state", {}).get("kb_session")
+    if found is not None:
+        return found
     session = services.auth.session(request.cookies.get(COOKIE))
-    if session is None:
+    if session is None or not services.sessions.valid(session):
         raise HTTPException(status_code=401, detail="Not signed in")
     return session
 
@@ -197,24 +223,32 @@ def _session_router() -> APIRouter:
         "/session",
         response_model=SessionResponse,
         tags=["session"],
-        responses={429: {"model": ErrorResponse, "description": "Too many failed attempts"}},
+        responses={429: {"model": ErrorResponse, "description": "Too many attempts"}},
     )
     def create_session(
         body: SessionRequest, request: Request, response: Response, services: Services
     ) -> SessionResponse:
-        """Exchange the household passcode for a signed session cookie (30 days)."""
+        """Exchange the household passcode for a signed session cookie (30 days).
+
+        At most 10 attempts a minute per address are evaluated; each is counted
+        before the passcode is checked, and a success clears the count.
+        """
+        from hal9000.knowledge.auth import TooManyAttempts
+
         auth = services.auth
         client = request.client.host if request.client else "unknown"
-        if auth.sign_ins.blocked(client):
+        try:
+            accepted = auth.sign_in(client, body.passcode)
+        except TooManyAttempts as error:
             raise HTTPException(
                 status_code=429,
                 detail="Too many attempts. Wait a minute and try again.",
-                headers={"Retry-After": str(auth.sign_ins.retry_after(client))},
-            )
-        if not auth.check_passcode(body.passcode):
-            auth.sign_ins.hit(client)
+                headers={"Retry-After": str(error.retry_after)},
+            ) from None
+        if not accepted:
             raise HTTPException(status_code=401, detail="That passcode isn't right.")
-        token, _session, expires = auth.issue()
+        token, session, expires = auth.issue()
+        services.sessions.create(session, expires)
         response.set_cookie(
             COOKIE,
             token,
@@ -233,45 +267,84 @@ def _api_router() -> APIRouter:
     r = APIRouter(prefix="/api", responses=_ERRORS, dependencies=[Depends(require_session)])
 
     @r.delete("/session", status_code=204, tags=["session"])
-    def delete_session(response: Response) -> None:
-        """Sign out."""
+    def delete_session(
+        response: Response, session: Signed, services: Services, everywhere: bool = False
+    ) -> None:
+        """Sign out: this session is revoked on the server; ``everywhere`` revokes every session."""
+        if everywhere:
+            services.sessions.revoke_all()
+        else:
+            services.sessions.revoke(session)
         response.delete_cookie(COOKIE, path="/", httponly=True, samesite="strict")
 
     # -- uploads and jobs (plan §5) ---------------------------------------------
-    @r.post("/uploads", response_model=UploadResponse, tags=["library"])
-    def create_uploads(
-        files: Annotated[list[UploadFile], File(description="the files")],
-        relative_path: Annotated[
-            list[str], Form(description="each file's path within its chosen folder, in order")
-        ],
-        services: Services,
-        conn: Db,
-    ) -> UploadResponse:
-        """Upload many files; folder paths become collections. Returns job IDs."""
+    @r.post(
+        "/uploads",
+        response_model=UploadResponse,
+        tags=["library"],
+        responses={413: {"model": ErrorResponse, "description": "The body is too large"}},
+    )
+    async def create_uploads(request: Request, services: Services) -> UploadResponse:
+        """Upload many files; folder paths become collections. Returns job IDs.
+
+        Multipart ``files`` with one ``relative_path`` each, in order. The body
+        is parsed as it streams in; each file is written once, to the upload
+        spool, and stops being written at ``ingest.max_upload_bytes``.
+        """
+        from starlette.concurrency import run_in_threadpool
+
+        from hal9000.knowledge.api.library import display_collection
+        from hal9000.knowledge.api.uploads import parse_upload_form
+        from hal9000.knowledge.ingest.pipeline import ALLOWED_TYPES, _type_and_size
+
         if services.ingest is None:
             raise HTTPException(status_code=503, detail="ingestion is not available")
-        if len(files) != len(relative_path):
-            raise HTTPException(
-                status_code=422, detail="send one relative_path for every file, in order"
-            )
-        from hal9000.knowledge.api.library import display_collection
+        max_bytes = services.max_upload_bytes()
+        form = await parse_upload_form(
+            request.headers.get("content-type", ""),
+            request.stream(),
+            spool=services.settings.data_dir / "knowledge" / "tmp",
+            max_bytes=max_bytes,
+            allowed_suffixes=frozenset(ALLOWED_TYPES),
+        )
+        try:
+            if not form.files or len(form.files) != len(form.relative_paths):
+                raise HTTPException(
+                    status_code=422, detail="send one relative_path for every file, in order"
+                )
 
-        results: list[UploadResult] = []
-        spool = services.settings.data_dir / "knowledge" / "tmp"
-        spool.mkdir(parents=True, exist_ok=True)
-        for upload, rel in zip(files, relative_path):
-            name = rel or upload.filename or "upload"
-            with tempfile.NamedTemporaryFile(dir=spool, delete=False) as tmp:
-                while chunk := upload.file.read(1 << 20):
-                    tmp.write(chunk)
-                path = Path(tmp.name)
-            try:
-                result = services.ingest.submit(conn, path, name)
-            finally:
-                path.unlink(missing_ok=True)
-            results.append(
-                result.model_copy(update={"collection": display_collection(result.collection)})
-            )
+            def submit_all() -> list[UploadResult]:
+                results: list[UploadResult] = []
+                conn = services.connect()
+                try:
+                    for part, rel in zip(form.files, form.relative_paths):
+                        name = rel or part.filename or "upload"
+                        refused = _type_and_size(name, part.size, max_bytes)
+                        if part.path is None or refused is not None:
+                            refused = refused or _type_and_size(name, max_bytes + 1, max_bytes)
+                            assert refused is not None
+                            from hal9000.knowledge.obs.metrics import record_ingest_file
+
+                            record_ingest_file(refused.status)
+                            result = UploadResult(
+                                relative_path=refused.relative_path,
+                                status=refused.status,  # type: ignore[arg-type]
+                                reason=refused.reason,
+                            )
+                        else:
+                            result = services.ingest.submit(conn, part.path, name)
+                        results.append(
+                            result.model_copy(
+                                update={"collection": display_collection(result.collection)}
+                            )
+                        )
+                finally:
+                    conn.close()
+                return results
+
+            results = await run_in_threadpool(submit_all)
+        finally:
+            form.discard()
         services.notify_worker()
         return UploadResponse(results=results)
 
@@ -882,14 +955,19 @@ def _static(app: FastAPI, dist: Path) -> None:
 
 def create_app(services: Any | None = None, *, web_dist: Path | None | bool = None) -> FastAPI:
     """Build the app. ``web_dist``: the UI build to serve (default ``web/dist`` if built)."""
+    serving = services is not None  # the running service publishes no docs or schema
     app = FastAPI(
         title="HAL 9000 house knowledge",
         version=__version__,
         description="The contract between the knowledge-base backend and its web UI "
         "(docs/KNOWLEDGE_PLAN.md §11).",
         generate_unique_id_function=_operation_id,
+        docs_url=None if serving else "/docs",
+        redoc_url=None if serving else "/redoc",
+        openapi_url=None if serving else "/openapi.json",
     )
     app.state.services = services
+    app.add_middleware(RequestGuard)
     app.include_router(_session_router())
     app.include_router(_api_router())
     app.include_router(_ops_router(services.settings.db_path if services else None))
@@ -915,6 +993,20 @@ def _document_chat_stream(app: FastAPI) -> None:
             ok["content"] = {
                 "text/event-stream": {"schema": {"$ref": "#/components/schemas/ChatEventEnvelope"}}
             }
+            # the upload handler parses its own stream; document its form as before
+            schema["paths"]["/api/uploads"]["post"]["requestBody"] = {
+                "content": {
+                    "multipart/form-data": {
+                        "schema": {"$ref": "#/components/schemas/Body_create_uploads"}
+                    }
+                },
+                "required": True,
+            }
+            schema["paths"]["/api/uploads"]["post"]["responses"].setdefault(
+                "422", _VALIDATION_ERROR
+            )
+            schema["components"]["schemas"]["Body_create_uploads"] = _UPLOAD_FORM
+            schema["components"]["schemas"] = dict(sorted(schema["components"]["schemas"].items()))
             app.openapi_schema = schema
         return app.openapi_schema
 

@@ -274,8 +274,20 @@ ALTER TABLE feedback_v4 RENAME TO feedback;
 ALTER TABLE judge_labels ADD COLUMN citations TEXT NOT NULL DEFAULT '[]';
 """
 
+# KWP6 (review): server-side sessions, so signing out revokes a cookie for good
+# and "sign out everywhere" revokes them all. A signed cookie is honoured only
+# while its session row exists.
+_V5 = """
+CREATE TABLE sessions (
+    id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL
+);
+CREATE INDEX ix_sessions_expires ON sessions(expires_at);
+"""
+
 #: (version, script). Append only.
-MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _V1), (2, _V2), (3, _V3), (4, _V4))
+MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _V1), (2, _V2), (3, _V3), (4, _V4), (5, _V5))
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
 #: Every plan §12 table created by the migrations (the per-profile tables are separate,

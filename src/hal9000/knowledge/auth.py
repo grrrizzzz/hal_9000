@@ -8,8 +8,13 @@
   ``data/knowledge/session.key`` (created ``0600`` on first start), so
   sessions survive a restart; the signer's salt includes a fingerprint of the
   passcode, so changing the passcode signs everyone out.
-- **Rate limits** (sliding windows, in memory): failed sign-ins per client
-  address (10 a minute), and questions per session (20 a minute, plan §7.4).
+- **Server-side revocation** (:class:`SessionStore`): a signed cookie is
+  honoured only while its row in ``knowledge.db`` ``sessions`` exists. Signing
+  out deletes the row; "sign out everywhere" deletes them all.
+- **Rate limits** (sliding windows, in memory): sign-in attempts per client
+  address (10 a minute), recorded atomically *before* the passcode is hashed,
+  so concurrent attempts can't overshoot; a success clears the address. And
+  questions per session (20 a minute, plan §7.4).
 """
 
 from __future__ import annotations
@@ -32,6 +37,8 @@ __all__ = [
     "Auth",
     "RateLimiter",
     "Session",
+    "SessionStore",
+    "TooManyAttempts",
     "load_secret",
 ]
 
@@ -79,6 +86,10 @@ class RateLimiter:
             events.append(now)
             return True
 
+    def clear(self, key: str) -> None:
+        with self._lock:
+            self._events.pop(key, None)
+
     def retry_after(self, key: str) -> int:
         with self._lock:
             events = self._trim(key, self.clock())
@@ -90,6 +101,84 @@ class RateLimiter:
 @dataclass(frozen=True)
 class Session:
     id: str
+
+
+class TooManyAttempts(RuntimeError):
+    """Sign-in refused: this address used up its attempts for the minute."""
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__("too many sign-in attempts")
+        self.retry_after = retry_after
+
+
+class SessionStore:
+    """Session rows in ``knowledge.db`` (migration 5); a small cache of known-good IDs.
+
+    The service is one process, and every revocation goes through it, so the
+    cache is dropped exactly when a row is deleted.
+    """
+
+    def __init__(self, db_path: Path | str) -> None:
+        self.db_path = db_path
+        self._known: set[str] = set()
+        self._lock = threading.Lock()
+
+    def _connect(self):
+        from hal9000.knowledge.storage import connect
+
+        return connect(self.db_path, vec=False)
+
+    def create(self, session: Session, expires_at: datetime) -> None:
+        now = datetime.now(UTC).isoformat(timespec="seconds")
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM sessions WHERE expires_at < ?", (now,))
+                conn.execute(
+                    "INSERT INTO sessions (id, created_at, expires_at) VALUES (?, ?, ?)",
+                    (session.id, now, expires_at.isoformat(timespec="seconds")),
+                )
+        finally:
+            conn.close()
+        with self._lock:
+            self._known.add(session.id)
+
+    def valid(self, session: Session) -> bool:
+        with self._lock:
+            if session.id in self._known:
+                return True
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sessions WHERE id = ? AND expires_at >= ?",
+                (session.id, datetime.now(UTC).isoformat(timespec="seconds")),
+            ).fetchone()
+        finally:
+            conn.close()
+        if row is not None:
+            with self._lock:
+                self._known.add(session.id)
+        return row is not None
+
+    def revoke(self, session: Session) -> None:
+        with self._lock:
+            self._known.discard(session.id)
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM sessions WHERE id = ?", (session.id,))
+        finally:
+            conn.close()
+
+    def revoke_all(self) -> int:
+        with self._lock:
+            self._known.clear()
+        conn = self._connect()
+        try:
+            with conn:
+                return conn.execute("DELETE FROM sessions").rowcount
+        finally:
+            conn.close()
 
 
 def load_secret(path: Path | str) -> bytes:
@@ -136,6 +225,19 @@ class Auth:
 
     def check_passcode(self, attempt: str) -> bool:
         return hmac.compare_digest(self._digest(attempt), self._hash)
+
+    def sign_in(self, client: str, attempt: str) -> bool:
+        """Count the attempt for ``client`` first (atomically), then check the passcode.
+
+        Raises :class:`TooManyAttempts` without hashing anything once the
+        address has used its attempts for the window; a success clears it.
+        """
+        if not self.sign_ins.allow(client):
+            raise TooManyAttempts(self.sign_ins.retry_after(client))
+        if not self.check_passcode(attempt):
+            return False
+        self.sign_ins.clear(client)
+        return True
 
     def issue(self) -> tuple[str, Session, datetime]:
         """A new session: ``(cookie value, session, expiry)``."""
