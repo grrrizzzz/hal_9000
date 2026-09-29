@@ -78,7 +78,6 @@ from hal9000.knowledge.index.profiles import (
     active_profile,
     build_profile,
     configured_profile,
-    get_profile,
     parser_key,
 )
 from hal9000.knowledge.index.writer import (
@@ -492,14 +491,7 @@ class IngestPipeline:
             name = extra if isinstance(extra, str) else extra.name
             if any(p.name == name for p in out):
                 continue
-            stored = get_profile(conn, name)
-            if (
-                stored is None
-                or conn.execute("SELECT status FROM profiles WHERE name = ?", (name,)).fetchone()[0]
-                != "ready"
-            ):
-                stored = self.build(conn, extra).profile
-            out.append(stored)
+            out.append(self.build(conn, extra).profile)  # a no-op once it is ready
         return out
 
     # -- 4-10: one file ------------------------------------------------------------
