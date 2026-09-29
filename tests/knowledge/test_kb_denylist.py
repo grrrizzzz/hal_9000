@@ -54,7 +54,7 @@ def _run(root: Path, env: dict[str, str], capsys) -> tuple[int, str]:
 
 
 def test_a_listed_string_fails_and_is_not_printed(repo, capsys):
-    _track(repo, "docs/notes.md", "line one\nThe owner is zebulon QUARTERMAIN.\n")
+    _track(repo, "docs/notes.md", f"line one\nThe owner is {SECRET.swapcase()}.\n")
     code, output = _run(repo, {"KB_DENYLIST": f"{SECRET}\n{REFERENCE}"}, capsys)
     assert code == 1
     assert "docs/notes.md:2: contains denylist entry #1" in output  # case-insensitive
