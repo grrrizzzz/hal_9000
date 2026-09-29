@@ -4,8 +4,7 @@ import { Dialog as D } from "radix-ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useMatch, useNavigate } from "react-router";
 import { api } from "@/api/client";
-import type { MessageOutPending } from "@/api/pending-contract";
-import type { Citation, SearchFilters } from "@/api/types";
+import type { Citation, MessageOut, SearchFilters } from "@/api/types";
 import { Composer } from "@/components/chat/Composer";
 import { ConversationList } from "@/components/chat/ConversationList";
 import { Filters } from "@/components/chat/Filters";
@@ -69,7 +68,7 @@ export function ChatPage() {
 
   const visibleTurns = turns.filter((t) => t.view === view);
   const busy = visibleTurns.some((t) => t.state.phase === "streaming");
-  const serverMessages = (conversationId !== null ? (convo.data?.messages ?? []) : []) as MessageOutPending[];
+  const serverMessages = (conversationId !== null ? (convo.data?.messages ?? []) : []) as MessageOut[];
   // Turns streamed on this page stay mounted (they carry the grounding result and
   // feedback state); the same messages coming back from the server are skipped.
   const localIds = new Set(turns.map((t) => t.state.answer?.message_id).filter((id): id is number => typeof id === "number"));

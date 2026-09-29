@@ -2,7 +2,8 @@ import { useMutation } from "@tanstack/react-query";
 import { Check, Info, ListPlus, ThumbsDown, ThumbsUp } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router";
-import { pendingApi, type FeedbackRequestPending } from "@/api/pending-contract";
+import { api } from "@/api/client";
+import type { FeedbackRequest } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -18,7 +19,9 @@ export function AnswerActions({ messageId, traceId }: { messageId: number | null
 
   // One feedback row per message: rating and "Add to question set" update the same row.
   const send = useMutation({
-    mutationFn: (body: Omit<FeedbackRequestPending, "message_id">) => pendingApi.feedback({ message_id: messageId!, ...body }),
+    // add_to_gold: false never removes an item already added; the server keeps the row's earlier choice.
+    mutationFn: ({ add_to_gold = false, ...body }: Omit<FeedbackRequest, "message_id" | "add_to_gold"> & { add_to_gold?: boolean }) =>
+      api.post("/api/feedback", { body: { message_id: messageId!, add_to_gold, ...body } }),
   });
 
   if (!messageId) return null;

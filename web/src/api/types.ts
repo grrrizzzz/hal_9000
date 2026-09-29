@@ -33,6 +33,10 @@ export type ChatRequest = Schemas["ChatRequest"];
 export type Outcome = NonNullable<Schemas["Answer"]["outcome"]>;
 export type Grounding = NonNullable<Schemas["Answer"]["grounding"]>;
 export type GoldCategory = Schemas["GoldItem"]["category"];
+export type FeedbackRequest = Schemas["FeedbackRequest"];
+export type FeedbackResponse = Schemas["FeedbackResponse"];
+export type EvalQuestionResult = Schemas["EvalQuestionResult"];
+export type EvalResultsPage = Schemas["EvalResultsPage"];
 
 /** Every event on the POST /api/chat stream (the `data:` line of each SSE message). */
 export type ChatEvent =

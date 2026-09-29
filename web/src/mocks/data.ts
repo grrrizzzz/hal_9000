@@ -2,11 +2,12 @@
  * Synthetic seed data for the mocks (rule K2: no house data, ever).
  * Everything here describes an imaginary house at "12 Example Lane".
  */
-import type { EvalQuestionResult, JudgeLabelPending } from "@/api/pending-contract";
 import type {
   Citation,
   DocumentSummary,
+  EvalQuestionResult,
   EvalRun,
+  JudgeLabel,
   GoldItem,
   IndexProfile,
   MetricCI,
@@ -309,11 +310,11 @@ function cite(marker: string, chunkId: number, documentId: number, page: number,
   };
 }
 
-export function seedJudgeLabels(): JudgeLabelPending[] {
+export function seedJudgeLabels(): JudgeLabel[] {
   const furnace = cite("S1", 12, 1, 2, "The furnace is a forced-air gas unit located in the garage. It was installed in 2009 and is near the end of its expected life.");
   const invoice = cite("S1", 14, 2, 3, "INVOICE 1001 - Brightline Pest Co.\nTermite damage repair at the rear deck ledger.\nTotal due: $1,234.00\nCompleted July 14, 2023.");
   const gas = cite("S1", 13, 1, 2, "A flexible gas connector is routed through the cabinet wall. Recommend evaluation by a licensed HVAC contractor.");
-  const labels: JudgeLabelPending[] = [
+  const labels: JudgeLabel[] = [
     {
       id: 1,
       gold_item_id: 1,
@@ -358,7 +359,7 @@ export function seedJudgeLabels(): JudgeLabelPending[] {
   return labels;
 }
 
-/** Synthetic per-question results for a run (pending contract item 4). */
+/** Synthetic per-question results for a run (GET /api/eval/runs/{id}/results). */
 export function seedRunResults(runId: string, n: number, recall2k: number): EvalQuestionResult[] {
   let seed = [...runId].reduce((a, c) => a * 31 + c.charCodeAt(0), 7) >>> 0;
   const r = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);

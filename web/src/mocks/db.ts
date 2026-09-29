@@ -1,5 +1,4 @@
 /** The mocks' in-memory state. Reset between Vitest tests; lives for the page in the browser. */
-import type { JudgeLabelPending, MessageOutPending } from "@/api/pending-contract";
 import type {
   ConversationDetail,
   DocumentSummary,
@@ -7,6 +6,8 @@ import type {
   GoldItem,
   IndexProfile,
   Job,
+  JudgeLabel,
+  MessageOut,
   Trace,
 } from "@/api/types";
 import { seedDocuments, seedGold, seedJudgeLabels, seedProfiles, seedRuns, seedTraces } from "./data";
@@ -14,11 +15,13 @@ import { seedDocuments, seedGold, seedJudgeLabels, seedProfiles, seedRuns, seedT
 export interface MockDb {
   signedIn: boolean;
   failedSignIns: number;
+  /** Times DELETE /api/session?everywhere=true was called (for tests). */
+  revokedEverywhere: number;
   documents: DocumentSummary[];
   jobs: Job[];
-  conversations: (Omit<ConversationDetail, "messages"> & { messages: MessageOutPending[] })[];
+  conversations: (Omit<ConversationDetail, "messages"> & { messages: MessageOut[] })[];
   gold: GoldItem[];
-  judgeLabels: JudgeLabelPending[];
+  judgeLabels: JudgeLabel[];
   runs: EvalRun[];
   profiles: IndexProfile[];
   traces: Trace[];
@@ -41,6 +44,7 @@ function fresh(): MockDb {
   return {
     signedIn: false,
     failedSignIns: 0,
+    revokedEverywhere: 0,
     documents: seedDocuments(),
     jobs: [],
     conversations: [],

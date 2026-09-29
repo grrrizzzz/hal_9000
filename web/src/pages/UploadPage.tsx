@@ -1,7 +1,7 @@
 import { AlertCircle, CheckCircle2, Copy, Loader2, RotateCw } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
-import { pendingApi } from "@/api/pending-contract";
+import { api } from "@/api/client";
 import type { Job, UploadResult } from "@/api/types";
 import { Page, PageHeader } from "@/components/layout/PageHeader";
 import { Badge } from "@/components/ui/badge";
@@ -79,7 +79,7 @@ export function UploadPage() {
     if (row.phase === "sent" && jobId !== null && jobId !== undefined) {
       // The file is stored; only its processing failed. Re-run the job.
       try {
-        const job = await pendingApi.retryJob(jobId);
+        const job = await api.post("/api/jobs/{id}/retry", { params: { id: jobId } });
         patch(row.id, { result: { ...row.result!, job_id: job.id ?? jobId }, retried: job });
       } catch (e) {
         patch(row.id, { phase: "error", error: (e as Error).message });
