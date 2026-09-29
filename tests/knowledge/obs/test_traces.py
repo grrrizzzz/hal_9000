@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from hal9000.knowledge.contracts import RetrievalResult, RetrievedChunk, Trace, TraceHit
-from hal9000.knowledge.obs import traces
+from hal9000.knowledge.obs import metrics, traces
 from hal9000.knowledge.obs.metrics import REGISTRY
 from hal9000.knowledge.obs.timing import stage
 from hal9000.knowledge.obs.traces import (
@@ -169,6 +169,24 @@ def test_a_handled_stage_failure_is_counted_but_the_answer_stands(kb_db):
         _get("kb_errors_total", {"stage": "embed_query", "kind": "ConnectionError"}) == before + 1
     )
     assert load_trace(kb_db, trace.id).outcome == "answered"
+
+
+def test_a_handled_failure_reported_again_is_counted_once(kb_db):
+    """The retriever catches the embedding error outside the stage and reports it too."""
+    labels = {"stage": "embed_query", "kind": "ConnectionError"}
+    before = _get("kb_errors_total", labels)
+    with observe(kb_db, question=QUESTION) as trace:
+        try:
+            with stage("embed_query"):
+                raise ConnectionError
+        except ConnectionError as error:
+            metrics.record_error("embed_query", error)  # already in the trace: not again
+            metrics.record_error("vector", error)  # a stage that didn't fail: counted
+        trace.outcome = "answered"
+    assert _get("kb_errors_total", labels) == before + 1
+    # outside an observed request every report counts
+    metrics.record_error("embed_query", ConnectionError())
+    assert _get("kb_errors_total", labels) == before + 2
 
 
 def test_ingest_traces_do_not_count_as_questions(kb_db):

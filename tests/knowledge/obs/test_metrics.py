@@ -249,6 +249,20 @@ def test_month_budget_can_be_read_at_scrape_time():
     assert _get("kb_month_spend_usd") == 0
 
 
+def test_without_a_meter_nothing_is_spent_and_the_cap_is_the_configured_one(monkeypatch):
+    """``kb serve --fake`` binds no meter: spend 0, cap KB_MONTHLY_CAP_USD (never 0/0)."""
+    try:
+        monkeypatch.setenv("KB_MONTHLY_CAP_USD", "7.5")
+        metrics.use_configured_month_budget()
+        assert _get("kb_month_spend_usd") == 0 and _get("kb_month_cap_usd") == 7.5
+        monkeypatch.setenv("KB_MONTHLY_CAP_USD", "3")  # read at scrape time
+        assert _get("kb_month_cap_usd") == 3
+        monkeypatch.setenv("KB_MONTHLY_CAP_USD", "lots")  # a bad value doesn't break the scrape
+        assert math.isnan(REGISTRY.get_sample_value("kb_month_cap_usd", {}))
+    finally:
+        metrics.use_configured_month_budget()  # the process default, read at scrape time
+
+
 def test_install_db_collector_replaces_and_removes(db_path):
     first = metrics.install_db_collector(db_path)
     second = metrics.install_db_collector(db_path)

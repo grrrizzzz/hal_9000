@@ -74,6 +74,8 @@ __all__ = [
     "TOP_SCORE",
     "TTFT_SECONDS",
     "bind_month_budget",
+    "configured_month_cap",
+    "count_trace_error",
     "install_db_collector",
     "metrics_router",
     "record_error",
@@ -85,6 +87,7 @@ __all__ = [
     "record_usage",
     "render_metrics",
     "set_month_budget",
+    "use_configured_month_budget",
 ]
 
 # ------------------------------------------------------------ closed label sets
@@ -363,11 +366,31 @@ def record_usage(usage: Mapping, purpose: str, *, cost_usd: float | None = None)
     return cost_usd
 
 
-def record_error(stage: str | Stage, kind: str | BaseException | type[BaseException]) -> None:
-    """Count an error. ``stage`` is a stage name or ``request``; ``kind`` is a type name."""
+def count_trace_error(stage: str | Stage, kind: str | BaseException | type[BaseException]) -> None:
+    """Count an error unconditionally (``traces.finish_trace`` counts a trace's errors with it)."""
     stage_value = stage.value if isinstance(stage, Stage) else str(stage)
     _closed(stage_value, ERROR_STAGES, "stage")
     ERRORS_TOTAL.labels(stage=stage_value, kind=_kind(kind)).inc()
+
+
+def record_error(stage: str | Stage, kind: str | BaseException | type[BaseException]) -> None:
+    """Count an error. ``stage`` is a stage name or ``request``; ``kind`` is a type name.
+
+    Inside an observed request, an error that already left a ``stage()`` block
+    of that name (the bound trace holds the failed timing) is not counted here:
+    the trace counts it when it finishes, so a caller that catches the
+    exception outside the stage and also reports it (the retriever's
+    BM25-only fallback) doesn't count it twice.
+    """
+    stage_value = stage.value if isinstance(stage, Stage) else str(stage)
+    _closed(stage_value, ERROR_STAGES, "stage")
+    kind_value = _kind(kind)
+    trace = current_trace()
+    if trace is not None and any(
+        t.stage.value == stage_value and t.error == kind_value for t in trace.stages
+    ):
+        return
+    ERRORS_TOTAL.labels(stage=stage_value, kind=kind_value).inc()
 
 
 def record_grounding_failure(kind: str) -> None:
@@ -394,6 +417,39 @@ def record_ingest_pages(*, with_text_layer: int = 0, without_text_layer: int = 0
     INGEST_PAGES_TOTAL.labels(text_layer="no").inc(without_text_layer)
 
 
+def configured_month_cap() -> float:
+    """``KB_MONTHLY_CAP_USD`` as configured now (``knowledge.config.settings()``)."""
+    from hal9000.knowledge.config import settings
+
+    return float(settings().monthly_cap_usd)
+
+
+def _safe(fn: Callable[[], float]) -> Callable[[], float]:
+    """A scrape-time reader that reports ``NaN`` instead of breaking the scrape."""
+
+    def read() -> float:
+        try:
+            return float(fn())
+        except Exception:
+            return float("nan")
+
+    return read
+
+
+def use_configured_month_budget() -> None:
+    """The default: nothing spent, and the cap as configured (read at scrape time).
+
+    This is what a process that binds no meter reports (``kb serve --fake``,
+    where nothing is paid), so the spend-vs-cap panel and alert never divide
+    by a zero cap. The real service replaces it with :func:`bind_month_budget`.
+    """
+    MONTH_SPEND_USD.set_function(lambda: 0.0)
+    MONTH_CAP_USD.set_function(_safe(configured_month_cap))
+
+
+use_configured_month_budget()
+
+
 def set_month_budget(spend_usd: float, cap_usd: float) -> None:
     """Set month-to-date spend and the cap (e.g. after each metered call).
 
@@ -413,19 +469,9 @@ def bind_month_budget(spend: Callable[[], float], cap: float | Callable[[], floa
     ingest) shows up too. A failing callable reports ``NaN`` rather than
     breaking the scrape.
     """
-
-    def safe(fn: Callable[[], float]) -> Callable[[], float]:
-        def read() -> float:
-            try:
-                return float(fn())
-            except Exception:
-                return float("nan")
-
-        return read
-
-    MONTH_SPEND_USD.set_function(safe(spend))
+    MONTH_SPEND_USD.set_function(_safe(spend))
     if callable(cap):
-        MONTH_CAP_USD.set_function(safe(cap))
+        MONTH_CAP_USD.set_function(_safe(cap))
     else:
         MONTH_CAP_USD.set_function(lambda: float(cap))
 

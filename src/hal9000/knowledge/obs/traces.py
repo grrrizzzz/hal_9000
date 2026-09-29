@@ -38,8 +38,10 @@ open they commit their own write. A dedicated connection for traces is simplest.
 Errors are counted from the trace (``kb_errors_total``): each failing stage
 once, at its innermost level, including failures the pipeline handled (an
 embedding call that fell back to BM25-only), and ``stage="request"`` for a
-failure outside any stage. So don't also call ``record_error`` for exceptions
-that left a ``stage()`` block of an observed request. Tokens and cost come from
+failure outside any stage. ``metrics.record_error`` for an exception that
+already left a ``stage()`` block of the observed request is ignored (the trace
+counts it), so reporting a handled failure again never counts it twice.
+Tokens and cost come from
 ``metrics.record_usage`` (call it from the usage sink), which also fills
 ``trace.tokens_by_model`` and ``trace.cost_usd``.
 
@@ -265,9 +267,9 @@ def _count_errors(trace: Trace, *, ignore: str | None = None) -> None:
             for other in failing
         )
         if not inner:
-            metrics.record_error(timing.stage, timing.error)
+            metrics.count_trace_error(timing.stage, timing.error)
     if trace.error and not failing and _error_kind(trace.error) != ignore:
-        metrics.record_error("request", _error_kind(trace.error))
+        metrics.count_trace_error("request", _error_kind(trace.error))
 
 
 def finish_trace(
