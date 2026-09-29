@@ -34,6 +34,7 @@ __all__ = [
     "STAGE_SECONDS",
     "Stage",
     "current_trace",
+    "recorded_by_trace",
     "stage",
     "start_trace",
 ]
@@ -94,6 +95,32 @@ def _coerce(name: str | Stage) -> Stage:
         ) from None
 
 
+def _mark(exc: BaseException, current: Stage) -> None:
+    """Note on the exception that the bound trace recorded it failing ``current``.
+
+    ``metrics.record_error`` skips exactly this exception object for this
+    stage (the trace counts it once, when it finishes).
+    """
+    trace = _trace.get()
+    if trace is None:
+        return
+    try:
+        marked = exc.__dict__.setdefault("_kb_trace_stages", (trace, set()))
+    except (AttributeError, TypeError):  # pragma: no cover - an exception without a __dict__
+        return
+    if marked[0] is trace:
+        marked[1].add(current.value)
+    else:  # re-raised inside another request's trace
+        exc.__dict__["_kb_trace_stages"] = (trace, {current.value})
+
+
+def recorded_by_trace(exc: object, stage_name: str) -> bool:
+    """Whether the bound trace already recorded ``exc`` failing stage ``stage_name``."""
+    trace = _trace.get()
+    marked = getattr(exc, "__dict__", {}).get("_kb_trace_stages") if trace is not None else None
+    return marked is not None and marked[0] is trace and stage_name in marked[1]
+
+
 def current_trace() -> Trace | None:
     """The trace bound to this request, if any."""
     return _trace.get()
@@ -134,12 +161,16 @@ def stage(name: str | Stage) -> Iterator[None]:
         yield
     except BaseException as exc:
         error = type(exc).__name__
+        _mark(exc, current)
         raise
     finally:
         elapsed = time.perf_counter() - start
         _open.reset(token)
-        STAGE_SECONDS.labels(stage=current.value).observe(elapsed)
         trace = _trace.get()
+        # the live question latencies are questions' own: retrievals inside an
+        # ingestion (the post-ingest regression) only go in that trace's row
+        if trace is None or trace.kind == "question" or current not in QUESTION_STAGES:
+            STAGE_SECONDS.labels(stage=current.value).observe(elapsed)
         if trace is not None:
             t0 = trace._t0 or start
             trace.stages.append(

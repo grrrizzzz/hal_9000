@@ -42,7 +42,7 @@ def test_the_whole_fixture_corpus_ingests_under_five_seconds(conn, make_pipeline
     constructed = time.perf_counter()
     # the default configuration: parsing isolated with a time limit; the pipeline warms up
     # when it is built (the parse process, the token encoding), as the service does at start
-    pipeline = make_pipeline()
+    pipeline = make_pipeline(regression=lambda conn, profile: None)
     assert pipeline.isolate_parse and pipeline.parse_process.starts == 1
     before = {name: stage_count(name) for name in INGEST_STAGES}
     started = time.perf_counter()
@@ -66,6 +66,9 @@ def test_the_whole_fixture_corpus_ingests_under_five_seconds(conn, make_pipeline
     assert counts["documents"] == expected_docs
     assert counts["pages"] == sum(item.page_count for item in corpus.ALL_FILES)
     assert counts[fts_table(profile.id)] == counts[vec_table(profile.id)] == counts["chunks"] > 0
+    # the regression check the files queued: one job, once the queue drained
+    [check] = pipeline.worker(":unused:").run_pending(conn)
+    assert (check.kind, check.status) == ("regression", "done")
     # every ingestion stage was timed under its plan name (rule K7)
     for name in (
         "screen",
@@ -417,6 +420,24 @@ def test_a_parse_over_its_time_limit_kills_and_restarts_the_process(tmp_path):
         process.close()
 
 
+def test_a_file_the_child_cannot_parse_fails_inside_the_parse_stage(tmp_path):
+    """The child's ParseError is raised within stage("parse"): it counts there, not as "request"."""
+    from hal9000.knowledge.ingest.parsers import ParseError, get_parser
+    from hal9000.knowledge.ingest.pipeline import ParseProcess
+    from hal9000.knowledge.obs.timing import start_trace
+
+    broken = tmp_path / "broken.pdf"
+    broken.write_bytes(b"%PDF-1.7\n" + b"\x00 not a pdf \x00" * 40)
+    process = ParseProcess()
+    try:
+        with start_trace(kind="ingest") as trace, pytest.raises(ParseError):
+            process.parse(broken, get_parser("pdfium"), timeout_s=30, max_chars=3000)
+    finally:
+        process.close()
+    [timing] = trace.stages
+    assert timing.stage == "parse" and timing.error == "ParseError"
+
+
 # ------------------------------------------------------------ segmentation
 def _llm_reply(documents: list[dict]) -> str:
     return json.dumps({"tool": "record_documents", "args": {"documents": documents}})
@@ -520,19 +541,57 @@ def test_extra_profiles_are_indexed_too(conn, make_pipeline):
     assert pipeline.outcomes[job.id].chunks == {PROFILE: counts[active.id], extra: counts[other.id]}
 
 
-def test_the_regression_hook_runs_after_ingestion_and_cannot_fail_it(conn, make_pipeline):
+def _regression_jobs(conn) -> list[tuple[str, str]]:
+    return conn.execute(
+        "SELECT status, detail FROM jobs WHERE kind = 'regression' ORDER BY id"
+    ).fetchall()
+
+
+def test_a_bulk_upload_is_checked_once_when_the_queue_drains(conn, make_pipeline):
+    """Each finished file queues the check unless one is queued; it runs after the files."""
     seen = []
     pipeline = make_pipeline(regression=lambda c, profile: seen.append(profile.name))
-    ingest_all(conn, pipeline, [corpus.INVOICE])
-    assert seen == [PROFILE]
+    files = [corpus.INVOICE, corpus.ESTIMATE, corpus.TEXT]
+    for item in files:
+        assert pipeline.submit(conn, item.path, f"Bulk/{item.name}").status == "added"
+    jobs = pipeline.worker(":unused:").run_pending(conn)  # oldest first, as the thread runs
+    assert [j.kind for j in jobs] == ["ingest"] * len(files) + ["regression"]
+    assert [j.status for j in jobs] == ["done"] * (len(files) + 1), [j.error for j in jobs]
+    assert seen == [PROFILE]  # once for the three files
+    assert [tuple(r) for r in _regression_jobs(conn)] == [
+        ("done", f"regression check done ({PROFILE})")
+    ]
 
+
+def test_a_check_queued_before_more_files_waits_for_them(conn, make_pipeline):
+    seen = []
+    pipeline = make_pipeline(regression=lambda c, profile: seen.append(profile.name))
+    worker = pipeline.worker(":unused:")
+    first = pipeline.submit(conn, corpus.INVOICE.path, "Later/invoice.pdf")
+    worker.run_job(conn, first.job_id)  # queues the check
+    second = pipeline.submit(conn, corpus.ESTIMATE.path, "Later/estimate.pdf")  # after it
+    jobs = worker.run_pending(conn)
+    assert [j.kind for j in jobs] == ["regression", "ingest", "regression"]
+    assert jobs[0].detail.startswith("skipped: 1 file job(s) still queued")
+    assert jobs[1].id == second.job_id and seen == [PROFILE]  # once, after the second file
+
+
+def test_without_a_hook_no_check_is_queued(conn, make_pipeline):
+    pipeline = make_pipeline()
+    [job] = ingest_all(conn, pipeline, [corpus.INVOICE])
+    assert job.status == "done" and _regression_jobs(conn) == []
+
+
+def test_a_failing_hook_fails_only_the_check_never_the_ingestion(conn, make_pipeline):
     def broken(c, profile):
         raise RuntimeError("scorer down")
 
     pipeline = make_pipeline(regression=broken)
     [job] = ingest_all(conn, pipeline, [corpus.ESTIMATE])
     assert job.status == "done"
-    assert pipeline.outcomes[job.id].warnings == ["regression check failed: RuntimeError"]
+    [check] = pipeline.worker(":unused:").run_pending(conn)
+    assert check.kind == "regression" and check.status == "failed"
+    assert "RuntimeError: scorer down" in check.error
 
 
 def test_a_parse_failure_fails_the_job_with_the_original_name(conn, make_pipeline):

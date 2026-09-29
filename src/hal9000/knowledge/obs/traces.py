@@ -38,8 +38,10 @@ open they commit their own write. A dedicated connection for traces is simplest.
 Errors are counted from the trace (``kb_errors_total``): each failing stage
 once, at its innermost level, including failures the pipeline handled (an
 embedding call that fell back to BM25-only), and ``stage="request"`` for a
-failure outside any stage. So don't also call ``record_error`` for exceptions
-that left a ``stage()`` block of an observed request. Tokens and cost come from
+failure outside any stage. ``metrics.record_error`` for an exception that
+already left a ``stage()`` block of the observed request is ignored (the trace
+counts it), so reporting a handled failure again never counts it twice.
+Tokens and cost come from
 ``metrics.record_usage`` (call it from the usage sink), which also fills
 ``trace.tokens_by_model`` and ``trace.cost_usd``.
 
@@ -57,6 +59,7 @@ import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from hal9000.knowledge.contracts import RetrievalResult, RetrievedChunk, Trace, TraceHit
 from hal9000.knowledge.obs import metrics, otel
@@ -66,6 +69,8 @@ __all__ = [
     "ERROR_MESSAGE_CHARS",
     "RETENTION_DAYS",
     "RetentionJob",
+    "configure_retention",
+    "configured_retention_days",
     "describe_error",
     "finish_trace",
     "hits_from_retrieval",
@@ -81,7 +86,7 @@ __all__ = [
 
 log = logging.getLogger(__name__)
 
-#: plan §12: traces are kept 180 days.
+#: plan §12: traces are kept 180 days (``knowledge.yaml`` ``trace_retention_days``).
 RETENTION_DAYS = 180
 #: ``trace.error`` keeps at most this much of an exception's message.
 ERROR_MESSAGE_CHARS = 200
@@ -175,14 +180,52 @@ def purge_traces(
     return cursor.rowcount
 
 
-class RetentionJob:
-    """Runs :func:`purge_traces` at most once per ``interval_s`` in this process."""
+def configured_retention_days(yaml_path: Path | str | None = None) -> int:
+    """``trace_retention_days`` from ``config/knowledge.yaml`` (default :data:`RETENTION_DAYS`).
 
-    def __init__(self, *, days: int = RETENTION_DAYS, interval_s: float = 86_400.0) -> None:
-        self.days = days
+    An unreadable file or a value under one day falls back to the default, with
+    a warning: retention must never break a request.
+    """
+    from hal9000.knowledge.config import load_knowledge_file
+
+    try:
+        days = int(load_knowledge_file(yaml_path).trace_retention_days)
+    except Exception as error:
+        log.warning("trace retention: cannot read knowledge.yaml (%s); keeping %d days",
+                    error, RETENTION_DAYS)  # fmt: skip
+        return RETENTION_DAYS
+    if days < 1:
+        log.warning(
+            "trace_retention_days must be >= 1, got %d; keeping %d days", days, RETENTION_DAYS
+        )
+        return RETENTION_DAYS
+    return days
+
+
+class RetentionJob:
+    """Runs :func:`purge_traces` at most once per ``interval_s`` in this process.
+
+    ``days`` fixes the retention; without it, ``trace_retention_days`` is read
+    from ``yaml_path`` (default: the configured ``config/knowledge.yaml``) each
+    time the job runs, so an edit applies from the next daily purge.
+    """
+
+    def __init__(
+        self,
+        *,
+        days: int | None = None,
+        interval_s: float = 86_400.0,
+        yaml_path: Path | str | None = None,
+    ) -> None:
+        self._days = days
+        self.yaml_path = yaml_path
         self.interval_s = interval_s
         self._last: float | None = None
         self._lock = threading.Lock()
+
+    @property
+    def days(self) -> int:
+        return self._days if self._days is not None else configured_retention_days(self.yaml_path)
 
     def maybe_run(self, conn: sqlite3.Connection, *, now: datetime | None = None) -> int | None:
         """Purge if the interval has passed; returns rows deleted, or ``None`` if skipped."""
@@ -191,13 +234,20 @@ class RetentionJob:
             if self._last is not None and clock - self._last < self.interval_s:
                 return None
             self._last = clock
-        deleted = purge_traces(conn, days=self.days, now=now)
+        days = self.days
+        deleted = purge_traces(conn, days=days, now=now)
         if deleted:
-            log.info("deleted %d trace rows older than %d days", deleted, self.days)
+            log.info("deleted %d trace rows older than %d days", deleted, days)
         return deleted
 
 
 _retention = RetentionJob()
+
+
+def configure_retention(yaml_path: Path | str | None) -> None:
+    """Read ``trace_retention_days`` from this ``knowledge.yaml`` (the service's own)."""
+    global _retention
+    _retention = RetentionJob(yaml_path=yaml_path)
 
 
 # ------------------------------------------------------ building a trace
@@ -265,9 +315,9 @@ def _count_errors(trace: Trace, *, ignore: str | None = None) -> None:
             for other in failing
         )
         if not inner:
-            metrics.record_error(timing.stage, timing.error)
+            metrics.count_trace_error(timing.stage, timing.error)
     if trace.error and not failing and _error_kind(trace.error) != ignore:
-        metrics.record_error("request", _error_kind(trace.error))
+        metrics.count_trace_error("request", _error_kind(trace.error))
 
 
 def finish_trace(

@@ -1,7 +1,7 @@
 {
   "uid": "kb-ingestion",
   "title": "Knowledge: Ingestion",
-  "description": "Uploads, parsing, embedding and the size of the index (plan \u00a79.3).",
+  "description": "Uploads, parsing, embedding and the size of the index (plan §9.3).",
   "tags": [
     "hal9000",
     "knowledge"
@@ -500,7 +500,7 @@
     {
       "type": "table",
       "title": "Failed jobs",
-      "description": "The latest 50 failed ingest, reindex and regression jobs.",
+      "description": "The latest 50 failed ingest, reindex and regression jobs, with the error's type and the file's hash prefix only: a job's error message can name the file (the Upload page shows the message).",
       "datasource": {
         "type": "frser-sqlite-datasource",
         "uid": "kb-sqlite"
@@ -512,8 +512,8 @@
             "type": "frser-sqlite-datasource",
             "uid": "kb-sqlite"
           },
-          "queryText": "SELECT updated_at AS time, kind, substr(COALESCE(file_sha, ''), 1, 12) AS file,\n       error\nFROM jobs\nWHERE status = 'failed'\nORDER BY updated_at DESC LIMIT 50",
-          "rawQueryText": "SELECT updated_at AS time, kind, substr(COALESCE(file_sha, ''), 1, 12) AS file,\n       error\nFROM jobs\nWHERE status = 'failed'\nORDER BY updated_at DESC LIMIT 50",
+          "queryText": "SELECT updated_at AS time, kind, substr(COALESCE(file_sha, ''), 1, 12) AS file,\n       CASE WHEN instr(COALESCE(error, ''), ':') > 0\n            THEN substr(error, 1, instr(error, ':') - 1) ELSE 'unknown' END AS error_kind\nFROM jobs\nWHERE status = 'failed'\nORDER BY updated_at DESC LIMIT 50",
+          "rawQueryText": "SELECT updated_at AS time, kind, substr(COALESCE(file_sha, ''), 1, 12) AS file,\n       CASE WHEN instr(COALESCE(error, ''), ':') > 0\n            THEN substr(error, 1, instr(error, ':') - 1) ELSE 'unknown' END AS error_kind\nFROM jobs\nWHERE status = 'failed'\nORDER BY updated_at DESC LIMIT 50",
           "queryType": "table",
           "timeColumns": [
             "time"

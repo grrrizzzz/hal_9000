@@ -13,11 +13,10 @@ datasources:
       timeInterval: 30s
 
   # knowledge.db, opened read-only (mode=ro; the plugin also adds
-  # _pragma=query_only(1)). The whole data/ directory is mounted at /data (not
-  # the single file, or SQLite's -wal and -shm files would be hidden and recent
-  # rows missed). The mount is read-write because a WAL reader must be able to
-  # create and map the -shm file; mode=ro still stops every write. Grafana's
-  # user (uid 472) needs read and write access to the directory.
+  # _pragma=query_only(1)). The whole data/ directory is mounted read-only at
+  # /data (not the single file, or SQLite's -wal and -shm files would be hidden
+  # and recent rows missed). hal-kb keeps those files present while it runs;
+  # never mount the directory read-write (see grafana.ini for why).
   - name: Knowledge DB
     uid: kb-sqlite
     type: frser-sqlite-datasource

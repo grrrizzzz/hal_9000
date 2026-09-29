@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from hal9000.knowledge.contracts import RetrievalResult, RetrievedChunk, Trace, TraceHit
-from hal9000.knowledge.obs import traces
+from hal9000.knowledge.obs import metrics, traces
 from hal9000.knowledge.obs.metrics import REGISTRY
 from hal9000.knowledge.obs.timing import stage
 from hal9000.knowledge.obs.traces import (
@@ -171,6 +171,27 @@ def test_a_handled_stage_failure_is_counted_but_the_answer_stands(kb_db):
     assert load_trace(kb_db, trace.id).outcome == "answered"
 
 
+def test_a_handled_failure_reported_again_is_counted_once(kb_db):
+    """The retriever catches the embedding error outside the stage and reports it too."""
+    labels = {"stage": "embed_query", "kind": "ConnectionError"}
+    before = _get("kb_errors_total", labels)
+    with observe(kb_db, question=QUESTION) as trace:
+        try:
+            with stage("embed_query"):
+                raise ConnectionError
+        except ConnectionError as error:
+            metrics.record_error("embed_query", error)  # already in the trace: not again
+            metrics.record_error("vector", error)  # a stage that didn't fail: counted
+            metrics.record_error("embed_query", ConnectionError())  # another failure: counted
+            metrics.record_error("embed_query", "ConnectionError")  # by name: counted
+            caught = error
+        trace.outcome = "answered"
+    assert _get("kb_errors_total", labels) == before + 3  # the trace's one, and the two others
+    # outside that request even the same object counts
+    metrics.record_error("embed_query", caught)
+    assert _get("kb_errors_total", labels) == before + 4
+
+
 def test_ingest_traces_do_not_count_as_questions(kb_db):
     before = sum(_get("kb_questions_total", {"outcome": o}) for o in ("answered", "error"))
     with observe(kb_db, kind="ingest") as trace:
@@ -289,6 +310,53 @@ def test_retention_is_180_days(kb_db):
     assert purge_traces(kb_db, now=now) == 1
     assert {r[0] for r in kb_db.execute("SELECT id FROM traces")} == {"day-179"}
     assert RetentionJob().days == 180
+
+
+def test_retention_reads_trace_retention_days_from_knowledge_yaml(kb_db, tmp_path, caplog):
+    yaml_path = tmp_path / "knowledge.yaml"
+    job = RetentionJob(yaml_path=yaml_path, interval_s=0)
+    assert job.days == RETENTION_DAYS  # no file: the default
+    yaml_path.write_text("trace_retention_days: 30\n")
+    assert job.days == 30  # read when the job runs, so an edit applies at the next purge
+    now = datetime.now(UTC)
+    _insert(kb_db, "day-31", now - timedelta(days=31))
+    _insert(kb_db, "day-29", now - timedelta(days=29))
+    assert job.maybe_run(kb_db) == 1
+    assert {r[0] for r in kb_db.execute("SELECT id FROM traces")} == {"day-29"}
+    for bad in ("trace_retention_days: 0\n", "trace_retention_days: [\n", "no_such_key: 1\n"):
+        yaml_path.write_text(bad)
+        assert job.days == RETENTION_DAYS  # never breaks a request
+    assert "keeping 180 days" in caplog.text
+    assert RetentionJob(days=7, yaml_path=yaml_path).days == 7
+
+
+def test_the_service_points_retention_at_its_own_knowledge_yaml(tmp_path, monkeypatch):
+    monkeypatch.setattr(traces, "_retention", traces._retention)  # restored afterwards
+    traces.configure_retention(tmp_path / "knowledge.yaml")
+    (tmp_path / "knowledge.yaml").write_text("trace_retention_days: 90\n")
+    assert traces._retention.days == 90
+
+
+def test_question_stages_inside_an_ingestion_stay_out_of_the_live_latencies(kb_db):
+    """kb_stage_seconds for question stages is questions' own; the trace keeps every stage."""
+
+    def count(name):
+        return _get("kb_stage_seconds_count", {"stage": name})
+
+    vector, regression = count("vector"), count("regression")
+    with observe(None, kind="ingest") as trace:
+        with stage("regression"):
+            with stage("vector"):
+                pass
+    assert count("vector") == vector  # a regression's search: not a question's latency
+    assert count("regression") == regression + 1  # ingestion stages still count
+    assert [t.stage.value for t in trace.stages] == ["vector", "regression"]
+    with observe(None, question=QUESTION):
+        with stage("vector"):
+            pass
+    with stage("vector"):  # no trace at all (a CLI): observed as before
+        pass
+    assert count("vector") == vector + 2
 
 
 # ------------------------------------------------------------ cancellation

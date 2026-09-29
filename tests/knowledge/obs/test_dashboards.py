@@ -11,6 +11,7 @@ from __future__ import annotations
 import configparser
 import json
 import re
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -203,6 +204,15 @@ def test_every_prometheus_query_uses_exposed_metrics_and_labels(where, expr):
     check_promql(expr)
 
 
+def test_rates_over_questions_leave_out_cancelled_ones():
+    """A cancelled question (the client went away) is neither an error nor an abstention."""
+    ratios = [(w, e.split("/", 1)[1]) for w, e in PROM_QUERIES if "/" in e]
+    over_questions = [(w, d) for w, d in ratios if "kb_questions_total" in d]
+    assert len(over_questions) == 3  # error rate, abstain rate, the error-rate alert
+    for where, denominator in over_questions:
+        assert 'kb_questions_total{outcome!="cancelled"}' in denominator, where
+
+
 def test_every_plan_metric_is_on_a_dashboard_or_alert():
     text = " ".join(expr for _, expr in PROM_QUERIES)
     for name in metrics.METRICS:
@@ -297,6 +307,9 @@ def test_there_are_four_alert_rules_matching_the_plan():
     assert "kb_answer_seconds_bucket" in rules["kb-latency-p95"]["data"][0]["model"]["expr"]
     assert threshold(rules["kb-month-spend"]) == {"type": "gt", "params": [0.8]}
     assert threshold(rules["kb-regression-drop"]) == {"type": "gt", "params": [5]}
+    # the read-only mount can't open knowledge.db while hal-kb restarts: not a recall drop
+    assert rules["kb-regression-drop"]["execErrState"] == "KeepLast"
+    assert {rules[u]["execErrState"] for u in rules if u != "kb-regression-drop"} == {"Error"}
     for rule in rules.values():
         refs = {d["refId"] for d in rule["data"]}
         assert rule["condition"] in refs
@@ -336,6 +349,40 @@ def test_the_regression_alert_compares_the_latest_ingest_run_with_the_previous(k
 
 
 # ------------------------------------------------------ datasources and servers
+def test_a_mode_ro_reader_in_a_writable_directory_leaves_wal_files_behind(tmp_path):
+    """Why Grafana gets data/ read-only (grafana.ini): the reader would own -wal and -shm.
+
+    With no writer connected (hal-kb stopped), a ``mode=ro`` reader of a WAL
+    database creates ``-wal`` and ``-shm`` itself and can't remove them; in
+    Grafana's container they belong to uid 472, and hal-kb, another user, can
+    then no longer write. While a writer is connected, the files are the
+    writer's and a reader sees the rows that are only in the WAL.
+    """
+    from hal9000.knowledge.storage import open_db
+
+    db = tmp_path / "knowledge.db"
+    open_db(db).close()
+    wal, shm = Path(f"{db}-wal"), Path(f"{db}-shm")
+    assert not wal.exists() and not shm.exists()  # the last writer cleaned up
+
+    reader = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    reader.execute("SELECT COUNT(*) FROM traces").fetchone()
+    reader.close()
+    assert wal.exists() and shm.exists()  # created by the reader, and left behind
+
+    writer = open_db(db)  # hal-kb running: its connection owns the files
+    try:
+        with writer:
+            writer.execute(
+                "INSERT INTO traces (id, created_at, body) VALUES ('t', '2026-09-01T00:00:00Z', '{}')"
+            )
+        reader = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        assert reader.execute("SELECT COUNT(*) FROM traces").fetchone() == (1,)
+        reader.close()
+    finally:
+        writer.close()
+
+
 def test_datasources_open_knowledge_db_read_only_and_match_the_dashboards():
     doc = yaml.safe_load((GRAFANA / "provisioning" / "datasources" / "knowledge.yaml").read_text())
     by_uid = {d["uid"]: d for d in doc["datasources"]}
@@ -385,3 +432,47 @@ def test_prometheus_scrapes_hal_kb():
     job = jobs["hal-kb"]
     assert job["metrics_path"] == "/metrics"
     assert job["static_configs"][0]["targets"] == ["hal-kb:8910"]
+
+
+def test_the_pi_verification_steps_match_the_provisioning():
+    """deploy/grafana/VERIFY.md names the pinned plugin, the datasources, dashboards and rules."""
+    text = (GRAFANA / "VERIFY.md").read_text()
+    ini = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+    ini.read(GRAFANA / "grafana.ini")
+    version = ini.get("plugins", "preinstall_sync").split("@")[1]
+    assert f"`{version}`" in text
+    assert f"localhost:{ini.get('server', 'http_port')}" in text
+    for uid in (PROM_UID, SQL_UID):
+        assert f"uid/{uid}/health" in text
+    for path in DASHBOARDS:
+        assert f"`{_load(path)['title']}`" in text
+    assert "folderUIDs=kb" in text and "d/kb-live?var-kb_url=" in text
+    assert len(_rules()) == 4 and "four rules" in text
+    assert "promtool" in text and "./data:/data:ro" in text and "uid 472" in text
+    # as KWP11's compose runs it: .env's GRAFANA_ADMIN_PASSWORD becomes GF_SECURITY_...
+    assert 'C="docker compose --env-file .env -f deploy/docker/compose.knowledge.yaml"' in text
+    assert "grep '^GRAFANA_ADMIN_PASSWORD=' .env" in text
+    # the read-only mount with hal-kb stopped: SQLite can't open it (no -wal/-shm)
+    assert "while `hal-kb` is stopped, the SQLite\npanels" in text
+    stopped = text.split("If a step fails", 1)[1]
+    assert "`unable to open database file`" in text and "`unable to open database" in stopped
+    assert stopped.index("`hal-kb` is running") < stopped.index("chmod o+rx data")
+    assert "attempt to write a readonly database" not in text  # that is hal-kb's, on a rw mount
+    # step 7 can't pass on "null" or an error, and says so when it fails
+    assert '[[ "$NEWEST" == 20* && "$NEWEST" > "$ASKED" ]]' in text
+    assert "NOT visible within 60 s" in text
+    assert "```sh" not in text and "```bash" in text
+    assert "`jq`" in text and "prom/prometheus:v3.5.5" in text
+
+
+def test_grafana_ini_names_the_error_the_read_only_mount_gives():
+    text = (GRAFANA / "grafana.ini").read_text()
+    assert '"unable to open database file"' in text  # SQLite panels while hal-kb is stopped
+    assert '"attempt to write a readonly database"' in text  # hal-kb's, after a rw mount
+
+
+def test_the_plugin_provisioning_folder_exists_without_yaml():
+    """Grafana 12.4 logs "Failed to read plugin provisioning files" when it is missing."""
+    folder = GRAFANA / "provisioning" / "plugins"
+    assert folder.is_dir() and (folder / ".gitkeep").is_file()
+    assert not [p for p in folder.iterdir() if p.suffix in (".yaml", ".yml")]

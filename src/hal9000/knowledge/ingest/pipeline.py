@@ -31,7 +31,10 @@ one worker thread of :mod:`.jobs`) does the rest:
 9. **index**: documents, pages, chunks and the profile's FTS5 and ``vec0``
    rows, and superseding the file's older versions, in one transaction, so a
    crash never leaves half a file; then the metrics;
-10. the **regression** hook (a no-op until KWP5's scorer plugs in).
+10. the **regression** check: a finished ingestion queues one ``regression``
+    job (unless one is queued already), which runs the ``regression`` hook
+    (the service's is KWP5's post-ingest regression) once the file jobs queued
+    before it are done, so a bulk upload is checked once.
 
 Every step runs inside the ``stage()`` timer with its plan name. Re-running a
 file (a retried job) replaces its earlier rows and pays for nothing twice:
@@ -97,6 +100,7 @@ from hal9000.knowledge.index.profiles import (
     active_profile,
     build_profile,
     configured_profile,
+    get_profile,
     parser_key,
 )
 from hal9000.knowledge.index.writer import (
@@ -155,7 +159,7 @@ _TEXT_SUFFIXES = (".txt", ".md", ".markdown", ".html", ".htm")
 _CONTROL = re.compile(rb"[\x00-\x08\x0b\x0e-\x1f]")
 _LEADING = b"\xef\xbb\xbf \t\r\n\x0c"  # a UTF-8 BOM, then whitespace
 
-Regression = Callable[[sqlite3.Connection, IndexProfile], None]
+Regression = Callable[[sqlite3.Connection, IndexProfile], Any]
 
 
 def no_regression(conn: sqlite3.Connection, profile: IndexProfile) -> None:
@@ -389,7 +393,8 @@ class IngestPipeline:
         generate: the metered segmentation LLM, ``(prompt, tier) -> str``.
         use_llm: default for jobs that don't say (``--no-llm`` sets it per job).
         extra_profiles: also index into these (names or profiles), for evaluation.
-        regression: the post-ingest hook, called with the active profile.
+        regression: the post-ingest hook, called with the active profile by the
+            ``regression`` job a finished ingestion queues (none without a hook).
         isolate_parse: parse in the long-lived child process with the time limit
             (the default); ``False`` parses in-process with no limit.
 
@@ -770,14 +775,6 @@ class IngestPipeline:
             with_text_layer=outcome.pages - outcome.pages_without_text,
             without_text_layer=outcome.pages_without_text,
         )
-
-        if profiles:
-            note(0.97, "regression check")
-            try:
-                with stage(Stage.REGRESSION):
-                    self.regression(conn, profiles[0])
-            except Exception as error:  # a failed check never undoes an ingestion
-                outcome.warnings.append(f"regression check failed: {type(error).__name__}")
         return outcome
 
     # -- jobs ----------------------------------------------------------------------
@@ -796,7 +793,60 @@ class IngestPipeline:
             raise
         metrics.record_ingest_file("added")
         self.outcomes[job.id] = outcome
+        profile = next(iter(outcome.chunks), None)  # the active profile comes first
+        if profile is not None:
+            self.queue_regression(conn, profile)
         return outcome.summary
+
+    # -- 10: the regression check, once the queue drains ---------------------------
+    def queue_regression(self, conn: sqlite3.Connection, profile: str) -> Job | None:
+        """Queue one ``regression`` job for ``profile`` unless one is already queued.
+
+        Jobs run oldest first, so after a bulk upload the check runs once, after
+        the files queued before it; see :meth:`_regression_job` for files queued
+        after it. Nothing is queued without a hook.
+        """
+        if self.regression is no_regression:
+            return None
+        queued = conn.execute(
+            "SELECT 1 FROM jobs WHERE kind = 'regression' AND status = 'queued' "
+            "AND json_extract(params, '$.profile') = ? LIMIT 1",
+            (profile,),
+        ).fetchone()
+        if queued is not None:
+            return None
+        return create_job(
+            conn,
+            "regression",
+            params={"profile": profile},
+            detail="queued: regression check after ingestion",
+            bus=self.bus,
+        )
+
+    def _regression_job(self, conn: sqlite3.Connection, job: Job, report: Reporter) -> str:
+        """The post-ingest regression check (plan §9.2), in a trace of its own.
+
+        While ingestion or reindex jobs are still queued it is skipped: the next
+        finished ingestion queues it again, so a bulk upload is checked once, when
+        the queue drains. The hook never fails the job.
+        """
+        from hal9000.knowledge.obs.traces import observe
+
+        assert job.id is not None
+        waiting = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE kind IN ('ingest', 'reindex') AND status = 'queued'"
+        ).fetchone()[0]
+        if waiting:
+            return f"skipped: {waiting} file job(s) still queued; the check runs after them"
+        name = job_params(conn, job.id).get("profile")
+        profile = get_profile(conn, name) if name else None
+        if profile is None:
+            return f"skipped: no index profile named {name!r}"
+        report(0.1, f"regression check ({profile.name})")
+        with observe(None, kind="ingest"), stage(Stage.REGRESSION):
+            result = self.regression(conn, profile)
+        describe = getattr(result, "describe", None)
+        return describe() if callable(describe) else f"regression check done ({profile.name})"
 
     def _reindex_job(self, conn: sqlite3.Connection, job: Job, report: Reporter) -> str:
         assert job.id is not None
@@ -816,7 +866,11 @@ class IngestPipeline:
         )
 
     def handlers(self) -> dict[str, Callable[[sqlite3.Connection, Job, Reporter], str]]:
-        return {"ingest": self._ingest_job, "reindex": self._reindex_job}
+        return {
+            "ingest": self._ingest_job,
+            "reindex": self._reindex_job,
+            "regression": self._regression_job,
+        }
 
     def worker(self, db_path: Path | str, *, locked: bool = False) -> JobWorker:
         """A worker for this pipeline's jobs.

@@ -37,7 +37,13 @@ from prometheus_client.platform_collector import PlatformCollector
 from prometheus_client.process_collector import ProcessCollector
 
 from hal9000.knowledge.contracts import Outcome
-from hal9000.knowledge.obs.timing import REGISTRY, STAGE_SECONDS, Stage, current_trace
+from hal9000.knowledge.obs.timing import (
+    REGISTRY,
+    STAGE_SECONDS,
+    Stage,
+    current_trace,
+    recorded_by_trace,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - fastapi is imported only when the router is built
     from fastapi import APIRouter
@@ -74,6 +80,8 @@ __all__ = [
     "TOP_SCORE",
     "TTFT_SECONDS",
     "bind_month_budget",
+    "configured_month_cap",
+    "count_trace_error",
     "install_db_collector",
     "metrics_router",
     "record_error",
@@ -85,6 +93,7 @@ __all__ = [
     "record_usage",
     "render_metrics",
     "set_month_budget",
+    "use_configured_month_budget",
 ]
 
 # ------------------------------------------------------------ closed label sets
@@ -250,17 +259,22 @@ METRICS: Mapping[str, tuple[str, tuple[str, ...]]] = {
     EVAL_METRIC_NAME: ("gauge", ("profile", "metric")),
 }
 
-# Closed label sets start at zero, so rate() and ratios work before the first event.
-for _v in OUTCOMES:
-    QUESTIONS_TOTAL.labels(outcome=_v)
-for _v in GROUNDING_KINDS:
-    GROUNDING_FAILURES_TOTAL.labels(kind=_v)
-for _v in FEEDBACK_RATINGS:
-    FEEDBACK_TOTAL.labels(rating=_v)
-for _v in INGEST_STATUSES:
-    INGEST_FILES_TOTAL.labels(status=_v)
-for _v in ("yes", "no"):
-    INGEST_PAGES_TOTAL.labels(text_layer=_v)
+
+def _start_closed_sets_at_zero() -> None:
+    """Closed label sets start at zero, so rate() and ratios work before the first event."""
+    for value in OUTCOMES:
+        QUESTIONS_TOTAL.labels(outcome=value)
+    for value in GROUNDING_KINDS:
+        GROUNDING_FAILURES_TOTAL.labels(kind=value)
+    for value in FEEDBACK_RATINGS:
+        FEEDBACK_TOTAL.labels(rating=value)
+    for value in INGEST_STATUSES:
+        INGEST_FILES_TOTAL.labels(status=value)
+    for value in ("yes", "no"):
+        INGEST_PAGES_TOTAL.labels(text_layer=value)
+
+
+_start_closed_sets_at_zero()
 
 
 # ------------------------------------------------------------------ helpers
@@ -363,10 +377,27 @@ def record_usage(usage: Mapping, purpose: str, *, cost_usd: float | None = None)
     return cost_usd
 
 
-def record_error(stage: str | Stage, kind: str | BaseException | type[BaseException]) -> None:
-    """Count an error. ``stage`` is a stage name or ``request``; ``kind`` is a type name."""
+def count_trace_error(stage: str | Stage, kind: str | BaseException | type[BaseException]) -> None:
+    """Count an error unconditionally (``traces.finish_trace`` counts a trace's errors with it)."""
     stage_value = stage.value if isinstance(stage, Stage) else str(stage)
     _closed(stage_value, ERROR_STAGES, "stage")
+    ERRORS_TOTAL.labels(stage=stage_value, kind=_kind(kind)).inc()
+
+
+def record_error(stage: str | Stage, kind: str | BaseException | type[BaseException]) -> None:
+    """Count an error. ``stage`` is a stage name or ``request``; ``kind`` is a type name.
+
+    Inside an observed request, the very exception object that already left a
+    ``stage()`` block of that name is not counted here: the trace counts it
+    when it finishes, so a caller that catches it outside the stage and also
+    reports it (the retriever's BM25-only fallback) doesn't count it twice.
+    Any other report (another exception of the same type, a type or a name)
+    is counted.
+    """
+    stage_value = stage.value if isinstance(stage, Stage) else str(stage)
+    _closed(stage_value, ERROR_STAGES, "stage")
+    if isinstance(kind, BaseException) and recorded_by_trace(kind, stage_value):
+        return
     ERRORS_TOTAL.labels(stage=stage_value, kind=_kind(kind)).inc()
 
 
@@ -394,6 +425,39 @@ def record_ingest_pages(*, with_text_layer: int = 0, without_text_layer: int = 0
     INGEST_PAGES_TOTAL.labels(text_layer="no").inc(without_text_layer)
 
 
+def configured_month_cap() -> float:
+    """``KB_MONTHLY_CAP_USD`` as configured now (``knowledge.config.settings()``)."""
+    from hal9000.knowledge.config import settings
+
+    return float(settings().monthly_cap_usd)
+
+
+def _safe(fn: Callable[[], float]) -> Callable[[], float]:
+    """A scrape-time reader that reports ``NaN`` instead of breaking the scrape."""
+
+    def read() -> float:
+        try:
+            return float(fn())
+        except Exception:
+            return float("nan")
+
+    return read
+
+
+def use_configured_month_budget() -> None:
+    """The default: nothing spent, and the cap as configured (read at scrape time).
+
+    This is what a process that binds no meter reports (``kb serve --fake``,
+    where nothing is paid), so the spend-vs-cap panel and alert never divide
+    by a zero cap. The real service replaces it with :func:`bind_month_budget`.
+    """
+    MONTH_SPEND_USD.set_function(lambda: 0.0)
+    MONTH_CAP_USD.set_function(_safe(configured_month_cap))
+
+
+use_configured_month_budget()
+
+
 def set_month_budget(spend_usd: float, cap_usd: float) -> None:
     """Set month-to-date spend and the cap (e.g. after each metered call).
 
@@ -413,19 +477,9 @@ def bind_month_budget(spend: Callable[[], float], cap: float | Callable[[], floa
     ingest) shows up too. A failing callable reports ``NaN`` rather than
     breaking the scrape.
     """
-
-    def safe(fn: Callable[[], float]) -> Callable[[], float]:
-        def read() -> float:
-            try:
-                return float(fn())
-            except Exception:
-                return float("nan")
-
-        return read
-
-    MONTH_SPEND_USD.set_function(safe(spend))
+    MONTH_SPEND_USD.set_function(_safe(spend))
     if callable(cap):
-        MONTH_CAP_USD.set_function(safe(cap))
+        MONTH_CAP_USD.set_function(_safe(cap))
     else:
         MONTH_CAP_USD.set_function(lambda: float(cap))
 
