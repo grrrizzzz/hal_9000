@@ -48,19 +48,11 @@ QUESTIONS = (
 )
 #: Queries that may rightly return nothing after this session (no such event).
 MAY_BE_EMPTY = {
-    # no ingestion happens in this session, so no ingestion stage has failed
-    "knowledge-ingestion.json:Ingestion errors by stage and kind",
-    # nothing was uploaded: increase() over counters that never moved is still a
-    # series, but these divide by a zero page rate
-    "knowledge-ingestion.json:Parse and embed time per page",
-    # alert expressions that are empty when nothing is wrong or nothing happened
+    # empty unless the answer p95 is over 15 s
     "alert:Knowledge: answer p95 over 15 s",
-    # kb serve --fake writes no regression_runs row, and its seeded eval_runs name no
-    # profile (test_live.py writes both, as the CLI does, and checks them)
-    "knowledge-quality.json:Post-ingest regression recall @ 2k",
-    "knowledge-quality.json:Latest regression recall @ 2k",
-    "knowledge-quality.json:Latest sweep metrics by profile",
 }
+NOTE = b"Synthetic gutter note.\n\nThe gutters were cleaned in spring 2024 by Example Gutters.\n"
+BROKEN_PDF = b"%PDF-1.7\n" + b"\x00 not a real pdf body \x00" * 40
 
 
 def _free_port() -> int:
@@ -130,6 +122,19 @@ def stack(tmp_path_factory):
             assert client.post("/api/session", json={"passcode": PASSCODE}).is_success
             for question in QUESTIONS:
                 assert client.post("/api/chat", json={"message": question}).is_success
+            # an upload (post-ingest regression row) and one that fails to parse
+            files = {"Notes/gutters.txt": NOTE, "Broken/broken.pdf": BROKEN_PDF}
+            parts = [
+                ("files", (Path(k).name, v, "application/octet-stream")) for k, v in files.items()
+            ]
+            uploaded = client.post("/api/uploads", files=parts, data={"relative_path": list(files)})
+            job_ids = {r["job_id"] for r in uploaded.json()["results"]}
+
+            def jobs_finished():
+                jobs = {j["id"]: j["status"] for j in client.get("/api/jobs").json()}
+                return all(jobs.get(i) in ("done", "failed") for i in job_ids)
+
+            _wait(jobs_finished, "the ingest jobs")
 
         def scraped_after_the_questions():
             body = httpx.get(

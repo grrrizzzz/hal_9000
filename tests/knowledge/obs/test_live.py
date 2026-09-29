@@ -498,6 +498,9 @@ def test_regression_recall_and_eval_metric_come_from_the_tables(live: Live):
     evals = {d["metric"]: v for d, v in live.samples("kb_eval_metric") if d["profile"] == PROFILE}
     assert evals["budgeted_recall@2000"] == 0.75 and evals["mrr"] == 0.5
     assert not any("run" in d for d, _ in live.samples("kb_eval_metric"))
+    # kb serve --fake seeds 28 sweep runs over 25 named profiles; plus this session's
+    profiles = {d["profile"] for d, _ in live.samples("kb_eval_metric")}
+    assert len(profiles) == 26 and "pdfium.structure-512.hdr.fake-64" in profiles
 
 
 def test_an_ingestion_runs_the_post_ingest_regression(live: Live):

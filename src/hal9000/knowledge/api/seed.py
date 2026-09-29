@@ -264,6 +264,11 @@ def seed_evaluation(
     conn: sqlite3.Connection, eval_dir: Path, *, pipeline: Any = None, extra_profile: str = ""
 ) -> None:
     """Question-set items, judge labels, sweep runs and (with ``pipeline``) a second profile."""
+    from hal9000.knowledge.chunking.profiles import (
+        FAKE_EMBED_DIMENSIONS,
+        FAKE_EMBED_MODEL,
+        make_profile,
+    )
     from hal9000.knowledge.contracts import EvidenceQuote, GoldItem, RubricLabels
     from hal9000.knowledge.eval.runs import record_run
     from hal9000.knowledge.eval.store import insert_gold, insert_judge_label
@@ -363,18 +368,29 @@ def seed_evaluation(
         ("parent_child", 256, 0.04, "pi", "S6", {"parent_size": 1500}),
     ]
     for number, (chunker, size, lift, host, stage, extra) in enumerate(runs, start=1):
+        overlap = round(size * 0.15) if chunker == "fixed" else 0
+        # each run names its index profile, as a sweep does: kb_eval_metric shows them
+        profile = make_profile(
+            parser="pdfium", chunker=chunker, size=size, overlap=overlap, header=True,
+            embed_model=FAKE_EMBED_MODEL, dimensions=FAKE_EMBED_DIMENSIONS, **extra,
+        )  # fmt: skip
         config = {
+            "profile": profile.name,
+            "parser": profile.parser,
             "chunker": chunker,
             "size": size,
-            "overlap": round(size * 0.15) if chunker == "fixed" else 0,
+            "overlap": overlap,
+            "header": True,
             "retrieval": "hybrid",
-            "embed_model": "fake/embedding-64",
+            "embed_model": profile.embed_model,
+            "dimensions": profile.dimensions,
             **extra,
         }
         record_run(
             conn,
             eval_dir=eval_dir,
             stage=stage,
+            split="dev",
             config=config,
             metrics=_metrics(size, lift, 58, host),
             records=_records(58, 0.78 + lift),
