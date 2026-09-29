@@ -43,8 +43,6 @@ def _run(code: str, env: dict[str, str] | None = None) -> dict:
     environment = dict(os.environ)
     environment["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
     environment.update(env or {})
-    for key in [k for k, v in environment.items() if v is None]:
-        environment.pop(key)
     done = subprocess.run(
         [sys.executable, "-c", code],
         cwd=REPO,
