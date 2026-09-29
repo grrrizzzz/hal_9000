@@ -13,7 +13,8 @@ Plan: `docs/KNOWLEDGE_PLAN.md` §10–11. Handoff: `docs/KNOWLEDGE_BUILD_HANDOFF
 | `npm run build` | Type-checks, then builds to **`web/dist/`** |
 | `npm run gen:api` | Regenerates `src/api/schema.d.ts` from `src/api/openapi.json` (CI fails on drift) |
 | `npm run lint` / `typecheck` / `test` | ESLint, `tsc --noEmit`, Vitest (offline; MSW in Node) |
-| `npm run e2e` | Playwright (see below) |
+| `npm run e2e` | Playwright against the MSW dev server, or `E2E_BASE_URL` (see below) |
+| `npm run e2e:real` | Builds `dist/`, then Playwright starts `uv run hal9000 kb serve --fake` itself and runs the suite against it |
 | `npm run fixtures:pdf` | Rewrites the synthetic PDF used by the mocks |
 
 ## Serving the build from FastAPI
@@ -41,7 +42,7 @@ the Query Inspector.
   summary, upload pool) and page tests that render the app against the same MSW
   handlers the browser mocks use.
 - **Playwright** lives in **`web/e2e/`** (not `tests/e2e/`) so it shares
-  `web/node_modules`. Config: `web/playwright.config.ts`. Two projects:
+  `web/node_modules`. Config: `web/playwright.config.ts`. Three projects:
   - `flows`: sign in, folder picker (`setInputFiles` with a directory), dropped
     loose files, summary with skipped images, jobs reaching "Indexed", streamed
     answer, forced reset, `[S1]` → viewer at the cited page with a highlight
@@ -51,6 +52,10 @@ the Query Inspector.
   - `visual`: every page at 390 px and 1,440 px in light and dark; asserts no
     horizontal scroll and that every visible control is reachable with Tab;
     screenshots go to `web/e2e-screenshots/` (git-ignored).
+  - `session`: Account → "Sign out everywhere" (confirm, then
+    `DELETE /api/session?everywhere=true`); on a real server a second browser
+    loses its session too. It depends on the other two, so it runs last: it
+    revokes every session on the server.
 
   Against the mocks (default, Playwright starts `npm run dev:mock` on port 5174):
 
@@ -58,24 +63,38 @@ the Query Inspector.
   PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers npm run e2e   # in the build container
   ```
 
-  Against a real server (e.g. `hal9000 kb serve --fake`):
+  Against the real API in fake mode, one command (needs `uv` and the synced
+  Python environment; the server gets a fresh temporary library, port
+  `E2E_REAL_PORT`, default 8932, and passcode `KB_PASSCODE` or `pod-bay-doors`).
+  CI runs this in the `web` job:
+
+  ```bash
+  PLAYWRIGHT_BROWSERS_PATH=/opt/pw-browsers npm run e2e:real
+  ```
+
+  Against a server you started yourself (it must serve a current `dist/`):
 
   ```bash
   E2E_BASE_URL=http://127.0.0.1:8910 E2E_PASSCODE=<passcode> npm run e2e
   ```
 
+  The suite passes against a shared server in any order and on a re-run: each
+  run's uploads carry a run id (the server would call repeated bytes
+  "Already in library"), upload fixtures avoid the chat questions' subjects,
+  and gold items are followed by id (`data-gold-id`). Direct API calls from
+  Playwright's `request` context must send `Sec-Fetch-Site: same-origin` (or a
+  matching `Origin`): the server refuses other non-GET `/api` requests.
+
   `@playwright/test` is pinned to 1.56.1, whose Chromium revision (1194)
   matches the pre-installed browsers; never run `playwright install` there.
 
-### Pending contract
+### API types
 
-`src/api/pending-contract.ts` holds the contract additions approved for KWP6 but
-not yet in `openapi.json`: `MessageOut.grounding`/`issues`, optional `rating`
-with `add_to_gold` (feedback is one row per message; a later POST updates it),
-`citations` on judge-label items, `GET /api/eval/runs/{id}/results` (paged),
-`POST /api/jobs/{id}/retry` and `TraceSummary.question`. The UI and the MSW
-mocks use them only through that file; when `openapi.json` is regenerated,
-swap each type for the generated one and delete the file.
+Every request and response type comes from `src/api/schema.d.ts`, generated from
+`src/api/openapi.json` (`npm run gen:api`; CI fails on drift), through the typed
+client in `src/api/client.ts`. The MSW handlers are typed the same way and follow
+the server's behaviour (one feedback row per message, retry re-queues the same
+job, `DELETE /api/session` needs a session and takes `?everywhere=true`).
 
 ### Fake-mode triggers
 

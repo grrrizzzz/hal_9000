@@ -5,7 +5,8 @@ name: Knowledge
 #   offline suite (with the coverage gate from pyproject.toml);
 # - denylist: no house data in any tracked file (secret KB_DENYLIST);
 # - web: the UI's lint, typecheck, tests and generated-types drift, once web/
-#   has a package.json (KWP7).
+#   has a package.json (KWP7), then the Playwright suite against a real
+#   `hal9000 kb serve --fake` that Playwright starts (`npm run e2e:real`).
 #
 # Docling and fastembed (knowledge-docling, knowledge-rerank) are left out:
 # their tests are marked `models` and run on Mike's Mac, and PyTorch alone is
@@ -63,6 +64,9 @@ jobs:
 
   web:
     runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.11"
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
     defaults:
       run:
         working-directory: web
@@ -104,3 +108,32 @@ jobs:
         run: |
           npx openapi-typescript src/api/openapi.json -o src/api/schema.d.ts
           git diff --exit-code -- src/api/schema.d.ts
+
+      # The end-to-end suite against the real API in fake mode (offline fakes,
+      # synthetic library): Python for the server, Chromium for Playwright.
+      - name: Install uv
+        if: hashFiles('web/package.json') != ''
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync Python dependencies (for kb serve --fake)
+        if: hashFiles('web/package.json') != ''
+        working-directory: .
+        run: uv sync --all-groups --no-group knowledge-docling --no-group knowledge-rerank
+
+      - name: Install Chromium for Playwright
+        if: hashFiles('web/package.json') != ''
+        run: npx playwright install --with-deps chromium
+
+      - name: End-to-end against kb serve --fake
+        if: hashFiles('web/package.json') != ''
+        run: npm run e2e:real
+
+      - name: Playwright report
+        if: failure() && hashFiles('web/package.json') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: web/playwright-report
+          retention-days: 7

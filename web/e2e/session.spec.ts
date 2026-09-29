@@ -4,9 +4,7 @@
  * on a real server it would sign the parallel tests out too.
  */
 import { expect, test } from "@playwright/test";
-import { signIn } from "./fixtures";
-
-const REAL_SERVER = !!process.env.E2E_BASE_URL;
+import { REAL_SERVER, signIn } from "./fixtures";
 
 test("sign out everywhere asks first, then revokes every session", async ({ page, browser }) => {
   await signIn(page, "/library");

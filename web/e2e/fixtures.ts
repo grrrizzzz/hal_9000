@@ -10,6 +10,9 @@ import { syntheticPdf } from "./pdf";
 
 export const PASSCODE = process.env.E2E_PASSCODE ?? "pod-bay-doors";
 
+/** A real server (`npm run e2e:real` or E2E_BASE_URL), not the in-browser mocks. */
+export const REAL_SERVER = !!process.env.E2E_BASE_URL || process.env.E2E_REAL === "1";
+
 export const QUESTIONS = {
   plain: "How old is the furnace?",
   reset: "How much was the termite repair? (force a reset)",
