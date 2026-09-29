@@ -112,6 +112,7 @@ class RetrievalConfig:
             rrf_k=r.rrf_k,
             history_turns=r.history_turns,
             rerank=knowledge.reranker or "none",
+            transform=r.transform,
         )
         return cls(**values)
 

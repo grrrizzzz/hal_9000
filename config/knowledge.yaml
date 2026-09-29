@@ -16,9 +16,11 @@ retrieval:                  # plan §7.1 starting values; the evaluation tunes t
   top_k_bm25: 30
   context_budget_tokens: 2000
   history_turns: 6          # turns used to condense a follow-up
+  transform: none           # none | multi | hyde (query transformation, chosen at G-K2)
 
 answer:                     # plan §7.4
   max_output_tokens: null   # null: the chat tier's default (AGENT_MAX_TOKENS)
+  chat_tier: null           # fast | powerful (chosen at G-K2); KB_CHAT_TIER in .env overrides
   wall_clock_seconds: 90
   questions_per_minute: 20  # per session
 

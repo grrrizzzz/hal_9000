@@ -289,11 +289,6 @@ def test_eval_judge_prep(env, tmp_path, fixture_docs, monkeypatch, capsys):
     assert "already exist" in capsys.readouterr().err
 
 
-def test_sweep_and_latency_are_part_b(capsys):
-    assert main(["kb", "eval", "sweep", "--stages", "S1a", "--yes"]) == 2
-    assert "KWP5 part B" in capsys.readouterr().err
-
-
 def test_judge_prep_and_regression_respect_the_eval_cap(
     env, tmp_path, fixture_docs, monkeypatch, capsys
 ):

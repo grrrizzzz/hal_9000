@@ -126,13 +126,33 @@ class KnowledgeSettings:
         return self.passcode
 
 
+def _yaml_chat_tier(config_dir: Path) -> str | None:
+    """``answer.chat_tier`` of ``config/knowledge.yaml`` (set at gate G-K2), if any.
+
+    ``KB_CHAT_TIER`` in the environment overrides it. A missing or unreadable
+    file gives None here; :func:`load_knowledge_file` reports its errors.
+    """
+    path = config_dir / "knowledge.yaml"
+    try:
+        raw = yaml.safe_load(path.read_text()) if path.exists() else None
+    except (OSError, yaml.YAMLError):
+        return None
+    answer = raw.get("answer") if isinstance(raw, dict) else None
+    tier = answer.get("chat_tier") if isinstance(answer, dict) else None
+    return str(tier) if tier else None
+
+
 def settings() -> KnowledgeSettings:
-    """Read :class:`KnowledgeSettings` from the environment now."""
+    """Read :class:`KnowledgeSettings` from the environment now.
+
+    The chat tier is ``KB_CHAT_TIER``, else ``answer.chat_tier`` in
+    ``config/knowledge.yaml``, else ``fast``.
+    """
     hal = hal_config.settings()
     data_dir = Path(_env("KB_DATA_DIR", str(hal.data_dir)))
     return KnowledgeSettings(
         embed_model=_env("KB_EMBED_MODEL", DEFAULT_EMBED_MODEL),
-        chat_tier=_tier("KB_CHAT_TIER", "fast"),
+        chat_tier=_tier("KB_CHAT_TIER", _yaml_chat_tier(hal.config_dir) or "fast"),
         condense_tier=_tier("KB_CONDENSE_TIER", "fast"),
         judge_tier=_tier("KB_JUDGE_TIER", "powerful"),
         monthly_cap_usd=_env_float("KB_MONTHLY_CAP_USD", 10.0),
@@ -166,6 +186,8 @@ class RetrievalConfig(BaseModel):
     top_k_bm25: int = 30
     context_budget_tokens: int = 2000
     history_turns: int = 6
+    #: query transformation (plan §8.3 T10), chosen by the setup evaluation
+    transform: Literal["none", "multi", "hyde"] = "none"
 
 
 class AnswerConfig(BaseModel):
@@ -174,6 +196,8 @@ class AnswerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_output_tokens: int | None = None
+    #: the chat tier chosen at G-K2 (plan §8.3 T11); ``KB_CHAT_TIER`` overrides it
+    chat_tier: Literal["fast", "powerful"] | None = None
     wall_clock_seconds: float = 90.0
     questions_per_minute: int = 20
 

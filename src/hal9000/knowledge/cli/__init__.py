@@ -11,7 +11,8 @@ module                  commands                            owner
 ``cli/ingest.py``       ``ingest``                          KWP3
 ``cli/gold.py``         ``gold generate|export|import``     KWP5
 ``cli/eval.py``         ``eval sweep|judge-prep|latency|    KWP5
-                        export|report|regression``
+                        choose|test|export|report|
+                        regression``
 ``cli/serve.py``        ``serve``                           KWP6
 ``cli/ask.py``          ``ask``                             KWP6
 ``cli/ops.py``          ``profile list|activate``,          KWP10
@@ -126,11 +127,50 @@ def register(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     judge.add_argument("run", metavar="RUN")
     _yes(judge)
     latency = _command(ev_cmds, "latency", "eval", "S6 latency on the Pi", "eval latency")
-    latency.add_argument("--profiles", required=True, help="comma-separated profile names")
-    latency.add_argument("--n", type=int, default=200, help="replayed retrieval questions")
-    latency.add_argument("--end-to-end", type=int, default=30, help="live end-to-end questions")
+    latency.add_argument(
+        "--sweep", metavar="RUN", help="the sweep whose finalists to measure (default: latest)"
+    )
+    latency.add_argument("--configs", help="comma-separated configuration names of the sweep")
+    latency.add_argument(
+        "--profiles", help="comma-separated profiles: the sweep's finalists on them"
+    )
+    latency.add_argument(
+        "--n", type=int, default=None, help="replayed retrieval questions (default: S6.replay)"
+    )
+    latency.add_argument(
+        "--end-to-end",
+        type=int,
+        default=None,
+        help="live end-to-end questions (default: S6.end_to_end)",
+    )
     latency.add_argument("--ingest-test", metavar="SHA", help="timed scratch ingest of this file")
     _yes(latency)
+    choose = _command(
+        ev_cmds,
+        "choose",
+        "eval",
+        "record the chosen configuration (gate G-K2): activate it, write config/knowledge.yaml",
+        "eval choose",
+    )
+    choose.add_argument("run", metavar="RUN", help="the sweep ID")
+    choose.add_argument("--config", required=True, metavar="NAME", help="configuration or run ID")
+    _yes(choose)
+    test = _command(
+        ev_cmds,
+        "test",
+        "eval",
+        "score the chosen configuration once on the test split (answers judged)",
+        "eval test",
+    )
+    test.add_argument("run", metavar="RUN", help="the sweep ID")
+    test.add_argument("--config", required=True, metavar="NAME", help="configuration or run ID")
+    test.add_argument(
+        "--force", action="store_true", help="run it again although it was already run (logged)"
+    )
+    test.add_argument(
+        "--force-judge", action="store_true", help="run without judge agreement >= 85%%"
+    )
+    _yes(test)
     for name, help_text in (
         ("export", "aggregates and per-question scores, no document text"),
         ("report", "write docs/KNOWLEDGE_EVAL_REPORT.md (aggregates only)"),

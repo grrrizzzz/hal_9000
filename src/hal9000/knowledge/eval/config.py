@@ -104,10 +104,23 @@ class GoldConfig(_Model):
         return self
 
 
+def _default_reasoning() -> dict[str, int]:
+    return {"fast": 600, "powerful": 1500}
+
+
 class JudgeEstimate(_Model):
-    answer_prompt_tokens: int = 2500
+    answer_prompt_tokens: int = 3000
     answer_output_tokens: int = 350
     judge_output_tokens: int = 150
+    #: reasoning tokens per call by tier, billed as output (reasoning models)
+    reasoning_tokens: dict[Literal["fast", "powerful"], int] = Field(
+        default_factory=_default_reasoning
+    )
+    #: the metered cost per answer / judgement from judge-prep, when recorded, times this
+    metered_margin: float = Field(default=1.25, ge=1)
+
+    def reasoning(self, tier: str) -> int:
+        return int(self.reasoning_tokens.get(tier, 0))  # type: ignore[call-overload]
 
 
 class JudgeConfig(_Model):

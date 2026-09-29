@@ -121,9 +121,17 @@ def pareto_front(points: Sequence[tuple[str, float, float]]) -> set[str]:
 
 
 def render_report(
-    runs: Sequence[EvalRun], *, source: str, generated: datetime | None = None
+    runs: Sequence[EvalRun],
+    *,
+    source: str,
+    generated: datetime | None = None,
+    recommendation: str | None = None,
 ) -> str:
-    """The report's Markdown for ``runs`` (aggregates only)."""
+    """The report's Markdown for ``runs`` (aggregates only).
+
+    ``recommendation`` is the plan §8.6 section from :mod:`.decide` (part B);
+    without it the "Chosen configuration" section is a placeholder.
+    """
     when = (generated or datetime.now(UTC)).strftime("%Y-%m-%d %H:%M UTC")
     runs = sorted(runs, key=_sort_key)
     dev = [r for r in runs if r.split == "dev"]
@@ -133,7 +141,8 @@ def render_report(
         f"Generated {when} by `hal9000 kb eval report {source}` from {len(runs)} run(s). "
         "Aggregate numbers only: this file contains no document or question text "
         "(docs/KNOWLEDGE_PLAN.md §8.6). Intervals are bootstrap 95% confidence intervals; "
-        "a difference counts only when a paired bootstrap excludes zero.",
+        "a difference counts only when a paired bootstrap excludes zero. "
+        "Correct counts partial answers as 0.5.",
         "",
         "## Summary by stage",
         "",
@@ -222,22 +231,33 @@ def render_report(
             ["run", "stage", "profile", *METRIC_HEADERS],
             [[r.id, r.stage, _cell(r.config.get("profile")), *_metric_row(r)] for r in test],
         )
+        from hal9000.knowledge.eval.decide import render_targets
+
+        targets = render_targets(test)
+        if targets:
+            lines += ["", targets.rstrip()]
     else:
         lines.append("Not run yet.")
-    lines += [
-        "",
-        "## Chosen configuration",
-        "",
-        "_To be completed at gate G-K2 (plan §8.6): the chosen index profile, reranker and "
-        "abstain threshold, the paired-bootstrap comparisons that decided each tie, and the "
-        "test-split result._",
-        "",
-    ]
+    lines += ["", "## Chosen configuration", ""]
+    if recommendation:
+        lines += [recommendation.rstrip(), ""]
+    else:
+        lines += [
+            "_To be completed at gate G-K2 (plan §8.6): the chosen index profile, reranker and "
+            "abstain threshold, the paired-bootstrap comparisons that decided each tie, and the "
+            "test-split result._",
+            "",
+        ]
     return "\n".join(lines)
 
 
 def write_report(
-    conn: sqlite3.Connection, run_id: str, path: Path, *, pages: Sequence[str] | None = None
+    conn: sqlite3.Connection,
+    run_id: str,
+    path: Path,
+    *,
+    pages: Sequence[str] | None = None,
+    recommendation: str | None = None,
 ) -> Path:
     """Render the report for a run (or a sweep's runs) to ``path``. KeyError if unknown.
 
@@ -248,7 +268,7 @@ def write_report(
     runs = runs_for(conn, run_id)
     if not runs:
         raise KeyError(run_id)
-    text = render_report(runs, source=run_id)
+    text = render_report(runs, source=run_id, recommendation=recommendation)
     check_shareable([text], page_texts(conn) if pages is None else pages)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)

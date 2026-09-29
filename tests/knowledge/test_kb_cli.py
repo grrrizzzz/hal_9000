@@ -14,42 +14,16 @@ from hal9000.__main__ import build_parser, main
 
 REPO = Path(__file__).resolve().parents[2]
 
-#: Plan §17 plus handoff KWP0's additions, with the owning work package. A command
-#: leaves this list when its work package implements it (KWP5 part A: gold and
-#: eval judge-prep/export/report/regression, tested in tests/knowledge/eval/; KWP6:
-#: ask and serve, tested in tests/knowledge/answer/test_cli.py; KWP10: profile, backup,
-#: restore and stats, tested in tests/knowledge/ops/test_ops_cli.py).
-COMMANDS = [
-    (["eval", "sweep", "--stages", "S1a,S1b,S2,S3,S4", "--max-cost", "10", "--yes"], "KWP5 part B"),
-    (
-        ["eval", "sweep", "--stages", "S5", "--resume", "RUN1", "--yes", "--force-judge"],
-        "KWP5 part B",
-    ),
-    (
-        [
-            "eval",
-            "latency",
-            "--profiles",
-            "A,B,C",
-            "--n",
-            "200",
-            "--end-to-end",
-            "30",
-            "--ingest-test",
-            "ab" * 32,
-        ],
-        "KWP5 part B",
-    ),
-]
 
-
-@pytest.mark.parametrize(
-    ("argv", "kwp"), COMMANDS, ids=lambda v: " ".join(v) if isinstance(v, list) else v
-)
-def test_every_command_is_a_stub_that_exits_2(argv, kwp, capsys):
-    assert main(["kb", *argv]) == 2
-    err = capsys.readouterr().err
-    assert "not implemented yet" in err and f"({kwp})" in err
+def test_no_command_is_still_a_stub():
+    """Every plan §17 command is implemented: no command module falls back to the stub."""
+    cli_dir = REPO / "src" / "hal9000" / "knowledge" / "cli"
+    stubs = [
+        path.name
+        for path in cli_dir.glob("*.py")
+        if path.name != "__init__.py" and "not_implemented(" in path.read_text(encoding="utf-8")
+    ]
+    assert stubs == []
 
 
 def test_flags_parse_as_documented():
@@ -64,7 +38,8 @@ def test_flags_parse_as_documented():
     args = parser.parse_args(["kb", "ingest", "x", "y"])
     assert args.paths == ["x", "y"] and args.collection is None and not args.no_llm
     args = parser.parse_args(["kb", "eval", "latency", "--profiles", "A"])
-    assert (args.n, args.end_to_end, args.ingest_test) == (200, 30, None)
+    # None: the S6 grid's replay and end_to_end (knowledge_eval.yaml) apply
+    assert (args.n, args.end_to_end, args.ingest_test, args.sweep) == (None, None, None, None)
 
 
 @pytest.mark.parametrize(
@@ -72,7 +47,7 @@ def test_flags_parse_as_documented():
     [
         ["kb", "ingest"],
         ["kb", "eval", "sweep"],
-        ["kb", "eval", "latency"],
+        ["kb", "eval", "test", "RUN"],
         ["kb", "gold", "export"],
     ],
 )
