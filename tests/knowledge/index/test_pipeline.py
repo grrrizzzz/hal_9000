@@ -559,3 +559,24 @@ def test_the_pipeline_reads_its_limits_from_knowledge_yaml(tmp_path, monkeypatch
     monkeypatch.setenv("HAL_CONFIG_DIR", str(config))
     pipeline = IngestPipeline(tmp_path / "files")
     assert pipeline.max_bytes == 10
+
+
+def test_uploading_again_recovers_a_job_left_running_by_a_dead_process(conn, make_pipeline):
+    import subprocess
+    import sys
+
+    from hal9000.knowledge.ingest.jobs import worker_id
+
+    dead = subprocess.run([sys.executable, "-c", "import os; print(os.getpid())"],
+                          capture_output=True, text=True, check=True).stdout.strip()  # fmt: skip
+    pipeline = make_pipeline()
+    first = pipeline.submit(conn, corpus.TEXT.path, "pool_log.txt")
+    owner = f"{worker_id().rpartition(':')[0]}:{dead}"
+    conn.execute(
+        "UPDATE jobs SET status = 'running', params = json_set(params, '$._worker', ?) WHERE id = ?",
+        (owner, first.job_id),
+    )
+    conn.commit()
+    again = pipeline.submit(conn, corpus.TEXT.path, "pool_log.txt")
+    assert again.status == "added" and again.job_id == first.job_id and "retrying" in again.reason
+    assert pipeline.worker(":unused:").run_job(conn, again.job_id).status == "done"
