@@ -158,6 +158,21 @@ mark.hl {
 mark.hl {
   color: inherit;
 }
+/* Merged per line (mergeBoxes): one box per run instead of one per pdf.js span. */
+.pdf-page .hl-merged .textLayer mark {
+  background: transparent;
+  box-shadow: none;
+}
+.pdf-page .hl-box {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  border-radius: 2px;
+  background: var(--mark);
+  box-shadow: 0 0 0 1px var(--mark-strong);
+  /* The page canvas is always white: multiply tints it and keeps the text black. */
+  mix-blend-mode: multiply;
+}
 .pdf-page .textLayer ::selection {
   background: oklch(0.6 0.12 240 / 0.35);
 }
