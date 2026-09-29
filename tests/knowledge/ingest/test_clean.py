@@ -183,13 +183,16 @@ def test_items_that_match_only_after_digit_folding_are_kept():
         ]
 
 
-def test_varying_lines_that_are_page_numbers_or_counters_are_running():
+def test_varying_lines_are_running_only_when_they_are_page_numbers():
     pages = [
         ParsedPage(page=n, text=f"- {n} -\nBatch {n + 60} scan\nBody {w}.\nSheet {n + 2}/9")
         for n, w in enumerate("abcd", start=1)
     ]
     result = clean_pages(pages, file_sha=SHA, parser="pdfium")
-    assert [page.text for page in result.pages] == [f"Body {w}." for w in "abcd"]
+    # a number that merely rises with the page (an item or batch number) is content
+    assert [page.text for page in result.pages] == [
+        f"Batch {n + 60} scan\nBody {w}." for n, w in enumerate("abcd", 1)
+    ]
 
 
 def test_clean_pages_reads_the_repeat_fraction_from_config(tmp_path, monkeypatch):
@@ -471,3 +474,102 @@ def test_offset_map_property(bodies, header, data):
         for index, char in enumerate(page.text):
             if not char.isspace():
                 assert raw.text[source_offset(page.offset_map, index)] == char
+
+
+# ------------------------------------------- page-number lines and sub-documents
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Page 3 of 12",
+        "2 of 7",
+        "Page 4",
+        "Invoice #40010001 Page 1 of 3",
+        "Estimate No. 77 Page 2 of 2",
+        "- Page 2 of 2 -",
+    ],
+)
+def test_page_number_lines_at_an_edge_are_always_removed(line):
+    page = ParsedPage(page=1, text=f"Only page.\nA second line.\n{line}")
+    assert (
+        clean_pages([page], file_sha=SHA, parser="pdfium").pages[0].text
+        == "Only page.\nA second line."
+    )
+
+
+def test_page_number_like_text_in_the_body_or_mid_sentence_stays():
+    middle = "\n".join(f"Body line {n}." for n in range(12))
+    page = ParsedPage(
+        page=1,
+        text=f"Top.\n{middle}\n2 of 7\n{middle}\nWe replaced 2 of 7 valves.\n(FORM RR PAGE 1 OF 2)",
+    )
+    text = clean_pages([page], file_sha=SHA, parser="pdfium").pages[0].text
+    assert (
+        "\n2 of 7\n" in text
+        and "We replaced 2 of 7 valves." in text
+        and "(FORM RR PAGE 1 OF 2)" in text
+    )
+
+
+def _long_file_with_a_short_letterhead_document():
+    # 12 pages; pages 5-7 are a vendor's document with its own letterhead and footer
+    pages = [
+        ParsedPage(page=n, text=f"Report body {w} one.\nReport body {w} two.")
+        for n, w in enumerate("abcdefghijkl", 1)
+    ]
+    for k, n in enumerate((5, 6, 7), start=1):
+        text = f"Osprey Plumbing & Drain\nLicense #000321\nItem {k}: pipe work {'xyz'[k - 1]}\nStamp: CUSTOMER COPY"
+        pages[n - 1] = ParsedPage(page=n, text=text)
+    return pages
+
+
+def test_running_lines_are_found_within_each_document():
+    pages = _long_file_with_a_short_letterhead_document()
+    whole = clean_pages(pages, file_sha=SHA, parser="pdfium")
+    assert "Osprey Plumbing" in whole.pages[4].text  # 3 of 12 pages: below 30% of the file
+    documents = [(1, 4), (5, 7), (8, 12)]
+    split = clean_pages(pages, file_sha=SHA, parser="pdfium", documents=documents)
+    for n in (5, 6, 7):
+        assert split.pages[n - 1].text.splitlines() == [f"Item {n - 4}: pipe work {'xyz'[n - 5]}"]
+    assert "customer copy" in " ".join(split.removed)
+    assert split.pages[0].text == whole.pages[0].text
+
+
+def test_documents_may_be_document_meta():
+    from hal9000.knowledge.contracts import DocumentMeta
+
+    pages = _long_file_with_a_short_letterhead_document()
+    meta = [
+        DocumentMeta(file_sha=SHA, page_start=a, page_end=b, title="t")
+        for a, b in [(1, 4), (5, 7), (8, 12)]
+    ]
+    assert (
+        "Osprey"
+        not in clean_pages(pages, file_sha=SHA, parser="pdfium", documents=meta).pages[4].text
+    )
+
+
+def test_a_short_document_inside_a_file_keeps_twice_repeated_lines():
+    pages = _long_file_with_a_short_letterhead_document()[:6]  # the vendor document is 2 pages here
+    split = clean_pages(pages, file_sha=SHA, parser="pdfium", documents=[(1, 4), (5, 6)])
+    assert "Osprey Plumbing & Drain" in split.pages[4].text
+
+
+def test_labels_that_also_appear_in_the_body_are_content_not_furniture():
+    # "Moderate" and "Recommendation" sit at a fixed bottom position on every page,
+    # but they are also ordinary body lines: they must stay
+    pages = []
+    for n in range(1, 6):
+        lines = []
+        for part in ("Roof", "Attic", "Gutter"):
+            lines += [
+                f"{n} {part} finding",
+                "Moderate",
+                f"{part} detail.",
+                "Recommendation",
+                "Repair it.",
+            ]
+        pages.append(ParsedPage(page=n, text="\n".join([*lines, f"Page {n} of 5"])))
+    result = clean_pages(pages, file_sha=SHA, parser="pdfium")
+    for page in result.pages:
+        assert page.text.count("Moderate") == 3 and page.text.count("Recommendation") == 3
+        assert "Page" not in page.text
