@@ -234,6 +234,18 @@ class RetrievedChunk(_Model):
     bm25_rank: int | None = None
     document: DocumentMeta | None = None
     parent_id: int | None = None
+    # additive (KWP4): the document's metadata flattened for citations, and budget accounting
+    file_sha: str = ""
+    title: str = ""
+    doc_type: DocType = "other"
+    vendor: str | None = None
+    doc_date: date | None = None
+    collection: str = ""
+    #: what this chunk costs in the context budget: header + text tokens when headers are
+    #: sent, else ``tokens``
+    prompt_tokens: int = Field(default=0, ge=0)
+    #: the fusion score before any reranking (RRF or weighted); never the abstain score
+    fused_score: float | None = None
 
 
 class RetrievalResult(_Model):
@@ -250,6 +262,9 @@ class RetrievalResult(_Model):
     abstain_score: float | None = None
     threshold: float | None = None
     abstained: bool = False
+    #: set when retrieval ran in a degraded mode (plan §7.4): the query embedding failed,
+    #: so the result is BM25-only and there was no retrieval abstain check
+    degraded: Literal["embedding_unavailable"] | None = None
 
 
 # ------------------------------------------------------------------ answering

@@ -1270,6 +1270,8 @@ export interface components {
              * @default false
              */
             abstained: boolean;
+            /** Degraded */
+            degraded?: "embedding_unavailable" | null;
         };
         /**
          * RetrievedChunk
@@ -1310,6 +1312,38 @@ export interface components {
             document?: components["schemas"]["DocumentMeta"] | null;
             /** Parent Id */
             parent_id?: number | null;
+            /**
+             * File Sha
+             * @default
+             */
+            file_sha: string;
+            /**
+             * Title
+             * @default
+             */
+            title: string;
+            /**
+             * Doc Type
+             * @default other
+             * @enum {string}
+             */
+            doc_type: "inspection_report" | "estimate" | "invoice" | "pest_report" | "completion_notice" | "disclosure_form" | "manual" | "warranty" | "permit" | "other";
+            /** Vendor */
+            vendor?: string | null;
+            /** Doc Date */
+            doc_date?: string | null;
+            /**
+             * Collection
+             * @default
+             */
+            collection: string;
+            /**
+             * Prompt Tokens
+             * @default 0
+             */
+            prompt_tokens: number;
+            /** Fused Score */
+            fused_score?: number | null;
         };
         /**
          * RubricLabels
