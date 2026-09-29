@@ -6,7 +6,7 @@ import re
 
 import pytest
 
-from hal9000.knowledge.chunking import ChunkInput, Unit, chunk, detect_units
+from hal9000.knowledge.chunking import ChunkInput, Unit, chunk, detect_units, overlap_tokens
 from hal9000.knowledge.tokens import count_tokens
 
 from .synthetic import inspection_doc
@@ -185,3 +185,23 @@ def test_detector_is_deterministic_and_fast() -> None:
     text = DOC.input.text * 20
     assert detect_units(text) == detect_units(text)
     assert re.search(r"\n\n", text)
+
+
+@pytest.mark.parametrize("size", [256, 512, 1024])
+def test_split_pieces_of_an_oversized_unit_overlap_by_whole_sentences(size: int) -> None:
+    text = DOC.input.text
+    overlap = overlap_tokens(size, 15)
+    drafts = chunk(DOC.input, "structure", size=size, overlap=overlap)
+    f = DOC.oversized
+    parts = _covering(drafts, f.start, f.end)
+    assert len(parts) >= 2
+    for a, b in zip(parts, parts[1:]):
+        assert b.char_start < a.char_end  # every split carries an overlap
+        shared = count_tokens(text[b.char_start : a.char_end])
+        assert overlap - 40 <= shared <= overlap  # 40 ≥ the fixture's longest sentence
+        assert text[: b.char_start].rstrip().endswith((".", ":"))  # a whole sentence
+        assert b.tokens <= size
+    # Units that fit are never overlapped into: no chunk starts inside a small finding.
+    for small in DOC.findings:
+        if small is not f:
+            assert not any(small.start < d.char_start < small.end for d in drafts)

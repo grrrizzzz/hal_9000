@@ -81,8 +81,6 @@ class TextIndex:
         self.sentence_ends = sorted(set(sent_ends) | set(para_ends))
         #: Where a sentence or a paragraph starts (``recursive`` splits here).
         self.sentence_starts = sorted(set(sent_starts) | set(para_starts))
-        #: Where an overlap may begin: any sentence or line start.
-        self.overlap_starts = sorted(set(self.sentence_starts) | set(line_starts))
 
     # ------------------------------------------------------------ tokens
     def approx(self, start: int, end: int) -> int:

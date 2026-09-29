@@ -104,9 +104,10 @@ def test_no_chunk_exceeds_n_tokens_header_excluded(name: str, case) -> None:
             assert d.index_text.endswith(d.text) and count_tokens(d.index_text) > d.tokens
 
 
-def _longest_sentence_tokens(text: str) -> int:
-    pieces = re.split(r"(?<=[.!?:])\s+|\n", text)
-    return max((count_tokens(p) for p in pieces), default=0)
+def _longest_sentence_tokens(text: str, *, lines: bool = True) -> int:
+    """Tokens in the longest sentence; with ``lines``, every line break also ends one."""
+    pattern = r"(?<=[.!?:])\s+|\n" if lines else r"(?<=[.!?:])\s+|\n\s*\n"
+    return max((count_tokens(p) for p in re.split(pattern, text)), default=0)
 
 
 @PROPERTY
@@ -162,3 +163,25 @@ def test_fixed_windows_end_at_sentence_or_line_ends(size: int) -> None:
         assert d.text.endswith((".", "!", "?", ":")) or doc.text[d.char_end] == "\n", d.text[-60:]
     sentence_ends = sum(d.text.endswith(".") for d in drafts[:-1])
     assert sentence_ends >= len(drafts[:-1]) / 2
+
+
+@pytest.mark.parametrize("name", ["recursive", "parent_child"])
+@pytest.mark.parametrize("size", [128, 256, 512, 1024])
+def test_recursive_neighbours_overlap_by_whole_sentences(name: str, size: int) -> None:
+    doc = inspection_doc().input
+    overlap = overlap_tokens(size, 15)
+    kw = dict(parent_size=1500) if name == "parent_child" else {}
+    drafts = chunk(doc, name, size=size, overlap=overlap, **kw)
+    tolerance = _longest_sentence_tokens(doc.text, lines=False)
+    by_key = {d.key: d for d in drafts}
+    children = [d for d in drafts if d.role != "parent"]
+    pairs = [(a, b) for a, b in zip(children, children[1:]) if a.parent_key == b.parent_key]
+    assert pairs
+    for a, b in pairs:
+        assert b.char_start < a.char_end, (a.text[-80:], b.text[:80])
+        shared = count_tokens(doc.text[b.char_start : a.char_end])
+        assert overlap - tolerance <= shared <= overlap
+        before = doc.text[: b.char_start].rstrip()  # whole sentences, or whole lines
+        assert before.endswith((".", ":")) or "\n" in doc.text[len(before) : b.char_start]
+        if b.parent_key is not None:
+            assert by_key[b.parent_key].char_start <= b.char_start

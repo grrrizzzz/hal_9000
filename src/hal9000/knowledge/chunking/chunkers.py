@@ -17,9 +17,10 @@ against *N*. Every emitted chunk is verified with the real tokenizer.
 * ``parent_child``: parents are structure units packed up to ``parent_size``;
   children of *N* tokens are cut recursively inside each parent.
 
-Overlap *O* in the non-``fixed`` chunkers carries whole trailing sentences of
-the previous chunk (within the same unit or parent), up to *O* tokens, when
-the chunk still fits.
+Overlap *O* in the non-``fixed`` chunkers carries whole trailing sentences
+(lines, for text without sentence punctuation) of the previous chunk, within
+the same unit or parent, up to *O* tokens. Pieces are split to *N − O* so the
+carried sentences fit; a unit that fits in *N* is still kept whole.
 """
 
 from __future__ import annotations
@@ -44,6 +45,11 @@ MIN_SIZE = 8
 Span = tuple[int, int]
 Item = tuple[int, int, int]  # a span and the unit it came from
 _HEADING, _PARAGRAPH, _SENTENCE, _LINE, _WORD = range(5)
+
+
+def _room(size: int, overlap: int) -> int:
+    """The size to split to so that a carried-over overlap still fits in ``size``."""
+    return max(size - overlap, MIN_SIZE // 2)
 
 
 def chunk_document(inp: ChunkInput, profile: IndexProfile) -> list[ChunkDraft]:
@@ -106,7 +112,8 @@ class _Chunker:
         if chunker == "fixed":
             return self._drafts(self._fixed(*whole, size, overlap))
         if chunker == "recursive":
-            spans = self._with_overlap(self._split(*whole, _HEADING, size), size, overlap)
+            pieces = self._split(*whole, _HEADING, _room(size, overlap))
+            spans = self._with_overlap(pieces, size, overlap)
             return self._drafts(self._merge_tiny(spans, size))
         if chunker == "structure":
             items = self._units(self.tree, size, overlap, group=0)
@@ -130,7 +137,7 @@ class _Chunker:
             if e2 <= s2:
                 return e
             count = ix.exact(s2, e2)
-            if count <= limit:
+            if count <= limit or e2 == s2 + 1:  # one code point is at most 4 tokens
                 return e2
             t = ix.tokens_before(e2) - (count - limit)
             new_end = snap(s2, ix.token_start(max(t, 0)))
@@ -250,29 +257,40 @@ class _Chunker:
         return spans
 
     def _with_overlap(self, spans: list[Span], limit: int, overlap: int) -> list[Span]:
-        """Start each chunk up to ``overlap`` tokens early, at a sentence or line start."""
+        """Start each chunk up to ``overlap`` tokens early, at a sentence (else line) start."""
         if overlap == 0 or len(spans) < 2:
             return spans
         ix = self.ix
-        starts = ix.overlap_starts
         out = [spans[0]]
         for cs, ce in spans[1:]:
             ps, pe = out[-1]
-            cands = ix.inside(starts, ps, min(cs, pe))
-            lo, hi = 0, len(cands)
-            while lo < hi:  # earliest candidate whose tail of the previous chunk fits in O
-                mid = (lo + hi) // 2
-                if ix.approx(cands[mid], pe) <= overlap:
-                    hi = mid
-                else:
-                    lo = mid + 1
             start = cs
-            for q in cands[lo : lo + 4]:
-                if ix.exact(q, pe) <= overlap and ix.exact(q, ce) <= limit:
-                    start = q
+            for points in (ix.sentence_starts, ix.line_starts):
+                found = self._overlap_start(points, ps, pe, ce, limit, overlap)
+                if found is not None:
+                    start = found
                     break
             out.append((start, ce))
         return out
+
+    def _overlap_start(
+        self, points: list[int], ps: int, pe: int, ce: int, limit: int, overlap: int
+    ) -> int | None:
+        """The earliest point inside the previous chunk ``[ps, pe)`` whose tail fits in
+        ``overlap`` tokens while the extended chunk ``[point, ce)`` fits in ``limit``."""
+        ix = self.ix
+        cands = ix.inside(points, ps, pe)
+        lo, hi = 0, len(cands)
+        while lo < hi:  # the tail's token count falls as the candidate moves right
+            mid = (lo + hi) // 2
+            if ix.approx(cands[mid], pe) <= overlap:
+                hi = mid
+            else:
+                lo = mid + 1
+        for q in cands[lo : lo + 4]:
+            if ix.exact(q, pe) <= overlap and ix.exact(q, ce) <= limit:
+                return q
+        return None
 
     # ------------------------------------------------------------ structure
     def _units(self, node: Node, limit: int, overlap: int, group: int) -> list[Item]:
@@ -286,7 +304,7 @@ class _Chunker:
         me = id(node)
 
         def gap(start: int, end: int) -> None:
-            spans = self._split(start, end, _PARAGRAPH, limit)
+            spans = self._split(start, end, _PARAGRAPH, _room(limit, overlap))
             items.extend((s, e, me) for s, e in self._with_overlap(spans, limit, overlap))
 
         pos = node.start
@@ -340,7 +358,8 @@ class _Chunker:
         for pa, pb in parents:
             parent_key = len(drafts)
             drafts.append(self._draft(parent_key, pa, pb, "parent", None))
-            children = self._with_overlap(self._split(pa, pb, _HEADING, size), size, overlap)
+            pieces = self._split(pa, pb, _HEADING, _room(size, overlap))
+            children = self._with_overlap(pieces, size, overlap)
             for ca, cb in children:
                 drafts.append(self._draft(len(drafts), ca, cb, "child", parent_key))
         return drafts

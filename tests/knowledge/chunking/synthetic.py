@@ -120,7 +120,7 @@ def inspection_doc(seed: int = 7, oversized_paragraphs: int = 24) -> SyntheticDo
                 add(f"\n\n{sub} {title.split(' – ')[1].split(':')[0]}")
             add("\n\n")
             body = " ".join(_sentence(rng) for _ in range(rng.randint(2, 5)))
-            text = f"{title}\n{_wrap(body)}\nRecommendation: {_sentence(rng, 5, 12)}"
+            text = f"{title}\n{_wrap(body)}\n\nRecommendation: {_sentence(rng, 5, 12)}"
             start, end = add(text)
             findings.append(Finding(title, start, end))
     add("\n\n")
