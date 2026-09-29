@@ -182,11 +182,14 @@ def test_a_handled_failure_reported_again_is_counted_once(kb_db):
         except ConnectionError as error:
             metrics.record_error("embed_query", error)  # already in the trace: not again
             metrics.record_error("vector", error)  # a stage that didn't fail: counted
+            metrics.record_error("embed_query", ConnectionError())  # another failure: counted
+            metrics.record_error("embed_query", "ConnectionError")  # by name: counted
+            caught = error
         trace.outcome = "answered"
-    assert _get("kb_errors_total", labels) == before + 1
-    # outside an observed request every report counts
-    metrics.record_error("embed_query", ConnectionError())
-    assert _get("kb_errors_total", labels) == before + 2
+    assert _get("kb_errors_total", labels) == before + 3  # the trace's one, and the two others
+    # outside that request even the same object counts
+    metrics.record_error("embed_query", caught)
+    assert _get("kb_errors_total", labels) == before + 4
 
 
 def test_ingest_traces_do_not_count_as_questions(kb_db):
@@ -332,6 +335,28 @@ def test_the_service_points_retention_at_its_own_knowledge_yaml(tmp_path, monkey
     traces.configure_retention(tmp_path / "knowledge.yaml")
     (tmp_path / "knowledge.yaml").write_text("trace_retention_days: 90\n")
     assert traces._retention.days == 90
+
+
+def test_question_stages_inside_an_ingestion_stay_out_of_the_live_latencies(kb_db):
+    """kb_stage_seconds for question stages is questions' own; the trace keeps every stage."""
+
+    def count(name):
+        return _get("kb_stage_seconds_count", {"stage": name})
+
+    vector, regression = count("vector"), count("regression")
+    with observe(None, kind="ingest") as trace:
+        with stage("regression"):
+            with stage("vector"):
+                pass
+    assert count("vector") == vector  # a regression's search: not a question's latency
+    assert count("regression") == regression + 1  # ingestion stages still count
+    assert [t.stage.value for t in trace.stages] == ["vector", "regression"]
+    with observe(None, question=QUESTION):
+        with stage("vector"):
+            pass
+    with stage("vector"):  # no trace at all (a CLI): observed as before
+        pass
+    assert count("vector") == vector + 2
 
 
 # ------------------------------------------------------------ cancellation

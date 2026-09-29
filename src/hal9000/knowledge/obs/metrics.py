@@ -37,7 +37,13 @@ from prometheus_client.platform_collector import PlatformCollector
 from prometheus_client.process_collector import ProcessCollector
 
 from hal9000.knowledge.contracts import Outcome
-from hal9000.knowledge.obs.timing import REGISTRY, STAGE_SECONDS, Stage, current_trace
+from hal9000.knowledge.obs.timing import (
+    REGISTRY,
+    STAGE_SECONDS,
+    Stage,
+    current_trace,
+    recorded_by_trace,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - fastapi is imported only when the router is built
     from fastapi import APIRouter
@@ -381,21 +387,18 @@ def count_trace_error(stage: str | Stage, kind: str | BaseException | type[BaseE
 def record_error(stage: str | Stage, kind: str | BaseException | type[BaseException]) -> None:
     """Count an error. ``stage`` is a stage name or ``request``; ``kind`` is a type name.
 
-    Inside an observed request, an error that already left a ``stage()`` block
-    of that name (the bound trace holds the failed timing) is not counted here:
-    the trace counts it when it finishes, so a caller that catches the
-    exception outside the stage and also reports it (the retriever's
-    BM25-only fallback) doesn't count it twice.
+    Inside an observed request, the very exception object that already left a
+    ``stage()`` block of that name is not counted here: the trace counts it
+    when it finishes, so a caller that catches it outside the stage and also
+    reports it (the retriever's BM25-only fallback) doesn't count it twice.
+    Any other report (another exception of the same type, a type or a name)
+    is counted.
     """
     stage_value = stage.value if isinstance(stage, Stage) else str(stage)
     _closed(stage_value, ERROR_STAGES, "stage")
-    kind_value = _kind(kind)
-    trace = current_trace()
-    if trace is not None and any(
-        t.stage.value == stage_value and t.error == kind_value for t in trace.stages
-    ):
+    if isinstance(kind, BaseException) and recorded_by_trace(kind, stage_value):
         return
-    ERRORS_TOTAL.labels(stage=stage_value, kind=kind_value).inc()
+    ERRORS_TOTAL.labels(stage=stage_value, kind=_kind(kind)).inc()
 
 
 def record_grounding_failure(kind: str) -> None:
