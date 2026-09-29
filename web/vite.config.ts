@@ -41,11 +41,8 @@ export default defineConfig(({ mode }) => {
       chunkSizeWarningLimit: 900,
       rollupOptions: {
         output: {
-          manualChunks: {
-            react: ["react", "react-dom", "react-router"],
-            charts: ["recharts"],
-            pdf: ["react-pdf"],
-          },
+          // Recharts and react-pdf stay in their lazy chunks (Evaluation page, PDF viewer).
+          manualChunks: { react: ["react", "react-dom", "react-router"] },
         },
       },
     },

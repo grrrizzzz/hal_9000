@@ -2,7 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { History } from "lucide-react";
 import { Dialog as D } from "radix-ui";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate, useParams } from "react-router";
+import { useLocation, useMatch, useNavigate } from "react-router";
 import { api } from "@/api/client";
 import type { Citation, MessageOut, SearchFilters } from "@/api/types";
 import { Composer } from "@/components/chat/Composer";
@@ -30,8 +30,8 @@ interface LocalTurn {
 }
 
 export function ChatPage() {
-  const params = useParams();
-  const conversationId = params.conversationId ? Number(params.conversationId) : null;
+  const match = useMatch("/c/:conversationId");
+  const conversationId = match?.params.conversationId ? Number(match.params.conversationId) : null;
   const navigate = useNavigate();
   const location = useLocation();
   const qc = useQueryClient();
@@ -68,8 +68,13 @@ export function ChatPage() {
 
   const busy = turns.some((t) => t.state.phase === "streaming");
   const serverMessages: MessageOut[] = conversationId !== null ? (convo.data?.messages ?? []) : [];
-  const serverIds = new Set(serverMessages.map((m) => m.id));
-  const visibleTurns = turns.filter((t) => !(t.state.answer?.message_id && serverIds.has(t.state.answer.message_id)));
+  // Turns streamed on this page stay mounted (they carry the grounding result and
+  // feedback state); the same messages coming back from the server are skipped.
+  const localIds = new Set(turns.map((t) => t.state.answer?.message_id).filter((id): id is number => typeof id === "number"));
+  const shownMessages = serverMessages.filter(
+    (m, i) => !localIds.has(m.id) && !(m.role === "user" && serverMessages[i + 1] && localIds.has(serverMessages[i + 1].id)),
+  );
+  const visibleTurns = turns;
 
   const lastLength = turns.at(-1)?.state.text.length ?? 0;
   useEffect(() => {
@@ -145,12 +150,12 @@ export function ChatPage() {
 
         <div className="min-h-0 flex-1 px-4 sm:px-6">
           <div className="mx-auto w-full max-w-3xl py-6">
-            {conversationId !== null && convo.isLoading ? (
+            {conversationId !== null && convo.isLoading && !turns.length ? (
               <div className="space-y-6">
                 <Skeleton className="ml-auto h-10 w-2/3" />
                 <Skeleton className="h-28" />
               </div>
-            ) : conversationId !== null && convo.isError ? (
+            ) : conversationId !== null && convo.isError && !turns.length ? (
               <ErrorState error={convo.error} onRetry={() => convo.refetch()} />
             ) : empty ? (
               <div className="flex flex-col items-center pt-[8vh] text-center">
@@ -174,7 +179,7 @@ export function ChatPage() {
               </div>
             ) : (
               <div className="space-y-7">
-                {serverMessages.map((m) =>
+                {shownMessages.map((m) =>
                   m.role === "user" ? (
                     <UserBubble key={m.id} text={m.content} />
                   ) : (

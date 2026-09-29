@@ -20,9 +20,11 @@ export interface PdfPageProps {
   needles: string[];
   onPageCount?: (n: number) => void;
   onHighlights?: (count: number) => void;
+  /** 1 = fit the width (up to 900 px). */
+  zoom?: number;
 }
 
-export default function PdfPage({ sha, page, needles, onPageCount, onHighlights }: PdfPageProps) {
+export default function PdfPage({ sha, page, needles, onPageCount, onHighlights, zoom = 1 }: PdfPageProps) {
   const box = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
   const [items, setItems] = useState<string[] | null>(null);
@@ -59,7 +61,7 @@ export default function PdfPage({ sha, page, needles, onPageCount, onHighlights 
           <Page
             key={`${sha}:${page}`}
             pageNumber={page}
-            width={Math.min(width, 900)}
+            width={Math.round(Math.min(width, 900) * zoom)}
             renderAnnotationLayer={false}
             className="mx-auto overflow-hidden rounded-md shadow-card ring-1 ring-border"
             loading={<Skeleton className="aspect-[8.5/11] w-full" />}

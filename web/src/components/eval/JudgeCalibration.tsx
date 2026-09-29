@@ -55,7 +55,7 @@ export function JudgeCalibration() {
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <Card className="px-4 py-3">
           <p className="text-xs text-muted-foreground">Labelled</p>
           <p className="mt-1 text-2xl font-semibold" data-testid="judge-progress">
@@ -74,7 +74,7 @@ export function JudgeCalibration() {
             ) : null}
           </p>
         </Card>
-        <Card className="px-4 py-3">
+        <Card className="col-span-2 px-4 py-3 sm:col-span-1">
           <label htmlFor="judge-run" className="text-xs text-muted-foreground">
             Calibration run
           </label>

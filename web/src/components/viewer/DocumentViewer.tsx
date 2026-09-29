@@ -4,7 +4,7 @@
  * as cleaned text with the span highlighted directly (plan §10).
  */
 import { useQuery } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, Download, TextSelect } from "lucide-react";
+import { ChevronLeft, ChevronRight, Download, TextSelect, ZoomIn, ZoomOut } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { api, fileUrl } from "@/api/client";
 import type { PageView } from "@/api/types";
@@ -63,6 +63,7 @@ export function DocumentViewer({
   const [pageCount, setPageCount] = useState<number | null>(null);
   const [highlights, setHighlights] = useState<number | null>(null);
   const [selection, setSelection] = useState("");
+  const [zoom, setZoom] = useState(1);
   const area = useRef<HTMLDivElement>(null);
   useEffect(() => {
     setPage(target.page);
@@ -120,6 +121,17 @@ export function DocumentViewer({
         ) : null}
         {view.data && !view.data.has_text_layer ? <Badge tone="warning">No text layer</Badge> : null}
         <div className="ml-auto flex items-center gap-2">
+          {isPdf ? (
+            <div className="flex items-center">
+              <Button size="icon-sm" variant="ghost" aria-label="Zoom out" disabled={zoom <= 1} onClick={() => setZoom((z) => Math.max(1, z - 0.5))}>
+                <ZoomOut />
+              </Button>
+              <span className="tabular w-10 text-center text-xs text-muted-foreground">{Math.round(zoom * 100)}%</span>
+              <Button size="icon-sm" variant="ghost" aria-label="Zoom in" disabled={zoom >= 3} onClick={() => setZoom((z) => Math.min(3, z + 0.5))}>
+                <ZoomIn />
+              </Button>
+            </div>
+          ) : null}
           {onUseSelection ? (
             <Button size="sm" variant="primary" disabled={!selection} onClick={() => onUseSelection(selection, page)} title="Select text on the page first">
               <TextSelect /> Use selection as evidence
@@ -139,7 +151,7 @@ export function DocumentViewer({
           <Skeleton className="mx-auto aspect-[8.5/11] w-full max-w-3xl" />
         ) : isPdf ? (
           <Suspense fallback={<Skeleton className="mx-auto aspect-[8.5/11] w-full max-w-3xl" />}>
-            <PdfPage sha={target.fileSha} page={page} needles={needles} onPageCount={setPageCount} onHighlights={setHighlights} />
+            <PdfPage sha={target.fileSha} page={page} needles={needles} zoom={zoom} onPageCount={setPageCount} onHighlights={setHighlights} />
           </Suspense>
         ) : view.isLoading ? (
           <Skeleton className="mx-auto h-96 w-full max-w-3xl" />

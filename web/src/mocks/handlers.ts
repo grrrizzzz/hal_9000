@@ -77,6 +77,44 @@ function startJob(job: Job, onDone?: () => void) {
   db.timers.push(timer);
 }
 
+
+/** What the server does with one uploaded file (screen, dedupe, start the ingest job). */
+export function ingestUpload(name: string, size: number, relativePath: string): UploadResult {
+  const ext = relativePath.split(".").pop()?.toLowerCase() ?? "";
+  const collection = relativePath.split("/").slice(0, -1).join("/");
+  if (!["pdf", "docx", "txt", "md", "html"].includes(ext)) {
+    return { relative_path: relativePath, status: "skipped", sha256: null, collection, job_id: null, reason: `.${ext} is not a supported type` };
+  }
+  const sha = fakeSha(relativePath, size);
+  if (db.uploads.has(sha)) {
+    return { relative_path: relativePath, status: "duplicate", sha256: sha, collection, job_id: null, reason: "already in library" };
+  }
+  db.uploads.set(sha, { name, relativePath, collection, bytes: size });
+  const now = new Date().toISOString();
+  const job: Job = { id: nextId(), kind: "ingest", status: "queued", progress: 0, detail: "queued", error: null, file_sha: sha, created_at: now, updated_at: now };
+  if (name.toLowerCase().includes("corrupt")) {
+    db.jobs.unshift(job);
+    setTimeout(() => {
+      Object.assign(job, { status: "failed", detail: "parse", error: "The PDF could not be opened (damaged file)." });
+      emitJob({ ...job });
+    }, db.jobTickMs * 2);
+  } else {
+    startJob(job, () => {
+      db.documents.push({
+        document: { id: nextId(), file_sha: sha, page_start: 1, page_end: 1, title: name.replace(/\.[^.]+$/, ""), doc_type: "other", vendor: null, doc_date: null, meta_source: "auto" },
+        original_name: name,
+        relative_path: relativePath,
+        collection,
+        pages: 1,
+        pages_without_text: 0,
+        chunks: 1,
+        status: "indexed",
+      });
+    });
+  }
+  return { relative_path: relativePath, status: "added", sha256: sha, collection, job_id: job.id ?? null, reason: null };
+}
+
 // ------------------------------------------------------------ chat
 function citationFor(marker: string, chunkId: number, documentId: number): Citation {
   const c = chunkText(chunkId)!;
@@ -284,47 +322,7 @@ export const handlers: HttpHandler[] = [
       const form = await request.formData();
       const files = form.getAll("files") as File[];
       const paths = form.getAll("relative_path") as string[];
-      const results: UploadResult[] = [];
-      files.forEach((file, i) => {
-        const relativePath = paths[i] ?? file.name;
-        const ext = relativePath.split(".").pop()?.toLowerCase() ?? "";
-        const parts = relativePath.split("/");
-        const collection = parts.slice(0, -1).join("/");
-        if (!["pdf", "docx", "txt", "md", "html"].includes(ext)) {
-          results.push({ relative_path: relativePath, status: "skipped", sha256: null, collection, job_id: null, reason: `.${ext} is not a supported type` });
-          return;
-        }
-        const sha = fakeSha(relativePath, file.size);
-        if (db.uploads.has(sha)) {
-          results.push({ relative_path: relativePath, status: "duplicate", sha256: sha, collection, job_id: null, reason: "already in library" });
-          return;
-        }
-        db.uploads.set(sha, { name: file.name, relativePath, collection, bytes: file.size });
-        const now = new Date().toISOString();
-        const job: Job = { id: nextId(), kind: "ingest", status: "queued", progress: 0, detail: "queued", error: null, file_sha: sha, created_at: now, updated_at: now };
-        const failing = file.name.toLowerCase().includes("corrupt");
-        if (failing) {
-          db.jobs.unshift(job);
-          setTimeout(() => {
-            Object.assign(job, { status: "failed", detail: "parse", error: "The PDF could not be opened (damaged file)." });
-            emitJob({ ...job });
-          }, db.jobTickMs * 2);
-        } else {
-          startJob(job, () => {
-            db.documents.push({
-              document: { id: nextId(), file_sha: sha, page_start: 1, page_end: 1, title: file.name.replace(/\.[^.]+$/, ""), doc_type: "other", vendor: null, doc_date: null, meta_source: "auto" },
-              original_name: file.name,
-              relative_path: relativePath,
-              collection,
-              pages: 1,
-              pages_without_text: 0,
-              chunks: 1,
-              status: "indexed",
-            });
-          });
-        }
-        results.push({ relative_path: relativePath, status: "added", sha256: sha, collection, job_id: job.id ?? null, reason: null });
-      });
+      const results = files.map((file, i) => ingestUpload(file.name, file.size, paths[i] ?? file.name));
       await delay(80);
       return json<ResponseOf<"/api/uploads", "post">>({ results });
     }),

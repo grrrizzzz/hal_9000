@@ -42,8 +42,11 @@ export function AppRoutes({ onSignedOut = () => {} }: { onSignedOut?: () => void
       <Routes>
         <Route path="/sign-in" element={<SignInPage />} />
         <Route element={<AppLayout />}>
-          <Route index element={<ChatPage />} />
-          <Route path="c/:conversationId" element={<ChatPage />} />
+          {/* One ChatPage instance for "/" and "/c/:id", so a new conversation's URL change doesn't remount the stream. */}
+          <Route element={<ChatPage />}>
+            <Route index />
+            <Route path="c/:conversationId" />
+          </Route>
           <Route path="library" element={<LibraryPage />} />
           <Route path="library/:id" element={<DocumentPage />} />
           <Route path="upload" element={<UploadPage />} />
