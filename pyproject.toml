@@ -71,8 +71,13 @@ pythonpath = ["."]
 # headroom for honest untestable lines (`if __name__ == "__main__"`), not slack
 # to spend. If this gate ever fails, the fix is a test -- not a lower number.
 addopts = "-q --cov=hal9000 --cov-report=term-missing:skip-covered --cov-fail-under=85"
+# live, models and house are opt-in: tests/conftest.py skips them unless the
+# marker is named in -m (e.g. `pytest -m house`), so a plain run never pays for a
+# call, downloads a model or reads house data.
 markers = [
-    "live: hits a real LLM provider; auto-skipped when no API key is present",
+    "live: calls a real, paid LLM provider; opt-in with -m live, and skips itself when no API key is configured",
+    "models: needs downloaded models (Docling layouts, ONNX rerankers); opt-in with -m models",
+    "house: reads the real house documents (KB_HOUSE_PDF, never in git); opt-in with -m house",
 ]
 
 [tool.ruff]
