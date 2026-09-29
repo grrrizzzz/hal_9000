@@ -2,18 +2,24 @@
 
 Four repairs, in order, on each page:
 
-1. **Running headers and footers** are removed: a line near the top or bottom
-   of a page (the *edge zone*) whose normalised form -- case-folded, spaces
-   collapsed, every digit run replaced by ``#`` -- appears on at least 30% of
-   the file's pages with text (``ingest.header_repeat_fraction``), and on at
-   least two. That catches DocuSign envelope IDs, "Page 12 of 58" and an
-   inspector's name in the header, while a finding line that happens to repeat
-   on two pages stays.
+1. **Running headers and footers** are removed: a line whose normalised form
+   (case-folded, spaces collapsed, UUID and hex IDs replaced by ``<id>``, every
+   digit run by ``#``) sits at the *same position* -- the i-th non-blank line
+   from the top, or the j-th from the bottom, within the first/last
+   :data:`DEFAULT_ZONE` lines -- on at least 30% of the file's pages with text
+   (``ingest.header_repeat_fraction``) and on at least three. That catches
+   DocuSign envelope IDs, "Page 12 of 58" and an inspector's name in the
+   header, while a finding line repeated on two pages, or estimate line items
+   that differ only in their numbers, stay.
 2. **Hyphenation**: PDFium's line-break hyphen marker (U+FFFE), soft hyphens,
    and ``word-⏎word`` at a line end are joined.
 3. **Letter spacing**: headings such as ``D ES C R I PT I O N O F`` are rejoined
-   (``DESCRIPTION OF``). A run is only rewritten when a small vocabulary can
-   segment it, so ordinary text such as ``A B testing`` is untouched.
+   (``DESCRIPTION OF``). A run of short capital groups is segmented against a
+   ~60k-word English list with frequency classes (SCOWL, vendored in
+   ``wordlists/``) plus house-document words; stretches of single letters that
+   no word covers (a vendor's name) are joined whole. A run is only rewritten
+   when the result compresses it into clearly fewer words, so ordinary text
+   such as ``A B testing`` or ``SEE A OR B`` is untouched.
 4. **Whitespace**: tabs, no-break spaces and runs of spaces collapse to one
    space, lines are trimmed, and three or more newlines become two.
 
@@ -27,11 +33,14 @@ into one document text and maps any offset in it back to its page.
 from __future__ import annotations
 
 import bisect
+import gzip
 import math
 import re
 from collections import Counter
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from functools import lru_cache
+from pathlib import Path
 
 from hal9000.knowledge.contracts import Page
 from hal9000.knowledge.ingest.parsers.base import ParsedPage
@@ -40,8 +49,8 @@ from hal9000.knowledge.obs.timing import Stage, stage
 __all__ = [
     "DEFAULT_REPEAT_FRACTION",
     "DEFAULT_ZONE",
+    "DOMAIN_WORDS",
     "PAGE_SEPARATOR",
-    "VOCABULARY",
     "CleanResult",
     "PagedText",
     "clean_page_text",
@@ -50,6 +59,7 @@ __all__ = [
     "repair_letter_spacing",
     "running_lines",
     "source_offset",
+    "word_costs",
 ]
 
 #: Lines on at least this share of pages are running headers or footers (plan §5.1).
@@ -59,10 +69,9 @@ DEFAULT_ZONE = 5
 #: Placed between pages when they are joined into one document text.
 PAGE_SEPARATOR = "\n\n"
 
-# Words the letter-spacing repair may assemble. Headings on estimates,
-# invoices, inspection and pest reports, disclosures and manuals, plus common
-# short words. Extend with ``vocabulary=`` rather than by guessing.
-VOCABULARY = frozenset(
+#: House-document words added to the SCOWL list for letter-spacing repair
+#: (headings on estimates, invoices, inspection and pest reports, manuals).
+DOMAIN_WORDS = frozenset(
     """
     a about above access account additional address after age agreement air all amount and any
     appliance appliances approval approved are area as at attic authorization balance basement
@@ -85,15 +94,31 @@ VOCABULARY = frozenset(
     """.split()
 )
 
-_SINGLE_LETTER_WORDS = frozenset({"a", "i"})
-_KEEP_TOKEN_COST = 3.0
-_SINGLE_LETTER_COST = 2.0
-_WORD_COST = 1.0
+#: SCOWL words, size levels 10-50, as "word level" lines (see SCOWL-COPYRIGHT.txt).
+WORDLIST_PATH = Path(__file__).resolve().parent / "wordlists" / "scowl-words-50.txt.gz"
+_LEVEL_COST = {10: 1.0, 20: 1.2, 35: 1.6, 40: 1.8, 50: 2.2}
+_DOMAIN_COST = 1.2
+_SINGLE_LETTER_COSTS = {"a": 2.0, "i": 2.0}
+_MAX_WORD = 24
+# A stretch of >= 4 single-letter tokens that no word covers is joined whole.
+_UNKNOWN_MIN_LETTERS = 4
+_UNKNOWN_BASE = 2.5
+_UNKNOWN_PER_LETTER = 0.25
+# Rewrite only when there are fewer than 2 words per 3 tokens: a real letter-spaced
+# heading compresses far more, ordinary short capital words ("SEE A OR B") don't.
+_WORDS, _PER_TOKENS = 2, 3
 
 _DIGITS = re.compile(r"\d+")
 _SPACES = re.compile(r"\s+")
-# 4+ tokens of 1-3 capitals separated by single spaces, on one line
-_SPACED_RUN = re.compile(r"(?<![A-Za-z0-9])(?:[A-Z]{1,3} ){3,}[A-Z]{1,3}(?![A-Za-z0-9])")
+# UUIDs and dashed or long hex IDs (DocuSign envelopes); they must contain a digit and a-f
+_HEX_ID = re.compile(
+    r"(?<![0-9a-z])(?=[0-9a-f-]*[0-9])(?=[0-9a-f-]*[a-f])"
+    r"(?:[0-9a-f]{4,}(?:-[0-9a-f]{2,}){2,}|[0-9a-f]{12,})(?![0-9a-z])"
+)
+# folded lines that are page numbers: "page # of #", "pg. #", "#/#", "- # -", "#"
+_PAGE_NUMBER = re.compile(r"\bp(?:age|g)?\.? ?#|# ?(?:of|/) ?#|^[^a-z#]*#[^a-z#]*$")
+# 3+ groups of 1-3 capitals separated by single spaces, on one line
+_SPACED_RUN = re.compile(r"(?<![A-Za-z0-9])(?:[A-Z]{1,3} ){2,}[A-Z]{1,3}(?![A-Za-z0-9])")
 
 
 # ------------------------------------------------------------ tracked text
@@ -167,8 +192,9 @@ def source_offset(offset_map: Sequence[Sequence[int]], clean_offset: int) -> int
 
 # ------------------------------------------------------ headers and footers
 def normalize_line(line: str) -> str:
-    """The comparison key for header/footer detection: case, spacing and digits folded."""
-    return _DIGITS.sub("#", _SPACES.sub(" ", line).strip().casefold())
+    """The comparison key for header/footer detection: case, spacing, IDs and digits folded."""
+    folded = _SPACES.sub(" ", line).strip().casefold()
+    return _DIGITS.sub("#", _HEX_ID.sub("<id>", folded))
 
 
 def _line_spans(text: str) -> list[tuple[int, int]]:
@@ -180,79 +206,162 @@ def _line_spans(text: str) -> list[tuple[int, int]]:
     return spans
 
 
-def _edge_lines(text: str, zone: int) -> list[tuple[int, int, str]]:
-    """``(start, stop, key)`` for the first and last ``zone`` non-blank lines."""
+#: A running line: which edge, its position from that edge, and its normalised text.
+RunningLine = tuple[str, int, str]
+
+
+def _edge_lines(text: str, zone: int) -> list[tuple[int, int, RunningLine]]:
+    """``(start, stop, (edge, position, key))`` for the first and last ``zone`` non-blank lines.
+
+    A line near both edges of a short page is listed once per edge.
+    """
     lines = [(a, b, normalize_line(text[a:b])) for a, b in _line_spans(text)]
     lines = [line for line in lines if line[2]]
-    picked = lines[:zone] + lines[max(zone, len(lines) - zone) :]
+    picked = [(a, b, ("top", index, key)) for index, (a, b, key) in enumerate(lines[:zone])]
+    bottom = list(reversed(lines))[:zone]
+    picked += [(a, b, ("bottom", index, key)) for index, (a, b, key) in enumerate(bottom)]
     return picked
 
 
-def running_lines(texts: Sequence[str], fraction: float, zone: int = DEFAULT_ZONE) -> set[str]:
-    """Normalised lines that repeat in the edge zone of ≥ ``fraction`` of the pages with text."""
-    with_text = [text.replace("\r\n", "\n").replace("\r", "\n") for text in texts if text.strip()]
-    if len(with_text) < 2:
+def _exact(line: str) -> str:
+    """A line with case, spacing and IDs folded but digits kept."""
+    return _HEX_ID.sub("<id>", _SPACES.sub(" ", line).strip().casefold())
+
+
+def _counts_with_pages(entries: list[tuple[int, str]], minimum: int) -> bool:
+    """Whether one number in the line moves in step with the page number on ≥ ``minimum`` pages."""
+    numbers = [(page, [int(n) for n in _DIGITS.findall(text)]) for page, text in entries]
+    width = min(len(values) for _, values in numbers)
+    for index in range(width):
+        offsets = Counter(values[index] - page for page, values in numbers)
+        if offsets.most_common(1)[0][1] >= minimum:
+            return True
+    return False
+
+
+def running_lines(
+    texts: Sequence[str], fraction: float, zone: int = DEFAULT_ZONE
+) -> set[RunningLine]:
+    """Lines at the same edge position on ≥ ``fraction`` of the pages with text, and ≥ 3.
+
+    ``texts`` are the file's pages in order (page *n* is ``texts[n - 1]``). A line
+    that is identical on those pages is running. One whose numbers vary (the
+    digit folding made them match) is running only if it is a page number
+    ("Page # of #", "#", "#/#") or one of its numbers counts up with the page;
+    estimate items and totals that happen to share a position are not.
+    """
+    pages = [
+        (number, text.replace("\r\n", "\n").replace("\r", "\n"))
+        for number, text in enumerate(texts, start=1)
+        if text.strip()
+    ]
+    minimum = max(3, math.ceil(fraction * len(pages) - 1e-9))
+    if len(pages) < minimum:
         return set()
-    minimum = max(2, math.ceil(fraction * len(with_text) - 1e-9))
-    counts: Counter[str] = Counter()
-    for text in with_text:
-        counts.update({key for _, _, key in _edge_lines(text, zone)})
-    return {key for key, count in counts.items() if count >= minimum}
+    seen: dict[RunningLine, list[tuple[int, str]]] = {}
+    for number, text in pages:
+        for start, stop, slot in _edge_lines(text, zone):
+            seen.setdefault(slot, []).append((number, _exact(text[start:stop])))
+    running: set[RunningLine] = set()
+    for slot, entries in seen.items():
+        if len(entries) < minimum:
+            continue
+        if (
+            len({text for _, text in entries}) == 1
+            or _PAGE_NUMBER.search(slot[2])
+            or _counts_with_pages(entries, minimum)
+        ):
+            running.add(slot)
+    return running
 
 
-# ------------------------------------------------------------ letter spacing
-def _segment(tokens: list[str], vocabulary: frozenset[str]) -> list[str] | None:
-    """Best split of the joined tokens into vocabulary words or kept tokens (DP, least cost)."""
+@lru_cache(maxsize=1)
+def _base_costs() -> dict[str, float]:
+    costs: dict[str, float] = dict(_SINGLE_LETTER_COSTS)
+    with gzip.open(WORDLIST_PATH, "rt", encoding="ascii") as handle:
+        for line in handle:
+            word, level = line.split()
+            cost = _LEVEL_COST[int(level)]
+            if len(word) == 1 or (len(word) == 2 and cost > _LEVEL_COST[35]):
+                continue  # stray letters and rare two-letter words only mislead the split
+            costs[word] = cost
+    for word in DOMAIN_WORDS:
+        costs[word] = min(costs.get(word, _DOMAIN_COST), _DOMAIN_COST)
+    return costs
+
+
+def word_costs(vocabulary: Iterable[str] | None = None) -> Mapping[str, float]:
+    """Word → cost (lower is more common) for letter-spacing repair, plus extra ``vocabulary``."""
+    base = _base_costs()
+    if vocabulary is None:
+        return base
+    extra = {word.casefold(): _DOMAIN_COST for word in vocabulary}
+    return {**base, **{w: min(base.get(w, c), c) for w, c in extra.items()}}
+
+
+def _segment(tokens: list[str], costs: Mapping[str, float]) -> list[str] | None:
+    """Least-cost split of the joined tokens into words (DP), or ``None``.
+
+    Pieces are known words, or a stretch of ≥ 4 consecutive single-letter tokens
+    joined whole (a name the list doesn't know). Multi-letter fragments such as
+    ``ES`` or ``PT`` must be absorbed into words, or there is no split.
+    """
     joined = "".join(tokens)
-    boundaries = {0}
-    position = 0
-    token_at: dict[int, str] = {}
-    for token in tokens:
-        token_at[position] = token
-        position += len(token)
-        boundaries.add(position)
     n = len(joined)
+    unknown: dict[int, list[int]] = {}
+    position, index = 0, 0
+    while index < len(tokens):
+        if len(tokens[index]) != 1:
+            position += len(tokens[index])
+            index += 1
+            continue
+        starts = []
+        while index < len(tokens) and len(tokens[index]) == 1:
+            starts.append(position)
+            position += 1
+            index += 1
+        ends = [*starts[1:], position]
+        for i, start in enumerate(starts):
+            for end in ends[i + _UNKNOWN_MIN_LETTERS - 1 :]:
+                unknown.setdefault(start, []).append(end)
     best: list[tuple[float, list[str]] | None] = [None] * (n + 1)
     best[0] = (0.0, [])
-    longest = max((len(word) for word in vocabulary), default=1)
     for i in range(n):
         if best[i] is None:
             continue
         cost, words = best[i]
-        candidates: list[tuple[int, float, str]] = []
-        for j in range(i + 1, min(n, i + longest) + 1):
-            piece = joined[i:j].casefold()
-            if piece in vocabulary and (len(piece) > 1 or piece in _SINGLE_LETTER_WORDS):
-                weight = _SINGLE_LETTER_COST if len(piece) == 1 else _WORD_COST
-                candidates.append((j, weight, joined[i:j]))
-        if i in token_at:
-            token = token_at[i]
-            candidates.append((i + len(token), _KEEP_TOKEN_COST, token))
-        for j, weight, word in candidates:
+        options = [
+            (j, costs[joined[i:j].casefold()])
+            for j in range(i + 1, min(n, i + _MAX_WORD) + 1)
+            if joined[i:j].casefold() in costs
+        ]
+        options += [(j, _UNKNOWN_BASE + _UNKNOWN_PER_LETTER * (j - i)) for j in unknown.get(i, [])]
+        for j, weight in options:
             if best[j] is None or cost + weight < best[j][0]:
-                best[j] = (cost + weight, [*words, word])
+                best[j] = (cost + weight, [*words, joined[i:j]])
     return best[n][1] if best[n] is not None else None
+
+
+def _is_alphabet_run(tokens: list[str]) -> bool:
+    """``A B C D`` or ``W X Y Z``: an option list, not a spaced-out word."""
+    return all(len(t) == 1 for t in tokens) and all(
+        ord(b) - ord(a) == 1 for a, b in zip(tokens, tokens[1:])
+    )
 
 
 def repair_letter_spacing(text: str, vocabulary: Iterable[str] | None = None) -> str:
     """Rejoin letter-spaced capitals (``D ES C R I PT I O N`` → ``DESCRIPTION``)."""
-    return _repair_tracked(_Tracked.of(text), _vocab(vocabulary)).text
+    return _repair_tracked(_Tracked.of(text), word_costs(vocabulary)).text
 
 
-def _vocab(vocabulary: Iterable[str] | None) -> frozenset[str]:
-    if vocabulary is None:
-        return VOCABULARY
-    return VOCABULARY | frozenset(word.casefold() for word in vocabulary)
-
-
-def _repair_tracked(tracked: _Tracked, vocabulary: frozenset[str]) -> _Tracked:
+def _repair_tracked(tracked: _Tracked, costs: Mapping[str, float]) -> _Tracked:
     def fix(match: re.Match[str]) -> str:
         original = match.group(0)
         tokens = original.split(" ")
-        if sum(1 for token in tokens if len(token) == 1) < 2:
+        if _is_alphabet_run(tokens):
             return original
-        words = _segment(tokens, vocabulary)
-        if words is None or len(words) >= len(tokens):
+        words = _segment(tokens, costs)
+        if words is None or _PER_TOKENS * len(words) >= _WORDS * len(tokens):
             return original
         return " ".join(words)
 
@@ -273,19 +382,19 @@ _EDGES = re.compile(r"^\s+|\s+$")
 
 def _clean_tracked(
     tracked: _Tracked,
-    running: set[str],
+    running: set[RunningLine],
     zone: int,
-    vocabulary: frozenset[str],
+    costs: Mapping[str, float],
 ) -> _Tracked:
     tracked = tracked.sub(_CRLF, "\n")
     if running:
-        drop = {(a, b) for a, b, key in _edge_lines(tracked.text, zone) if key in running}
+        drop = {(a, b) for a, b, slot in _edge_lines(tracked.text, zone) if slot in running}
         tracked = tracked.keep(span for span in _line_spans(tracked.text) if span not in drop)
     tracked = tracked.sub(_BREAK_HYPHEN, "")
     tracked = tracked.sub(_LINE_END_HYPHEN, "")
     tracked = tracked.sub(_ODD_SPACE, " ")
     tracked = tracked.sub(_CONTROL, "")
-    tracked = _repair_tracked(tracked, vocabulary)
+    tracked = _repair_tracked(tracked, costs)
     tracked = tracked.sub(_MULTI_SPACE, " ")
     tracked = tracked.sub(_SPACE_AROUND_NEWLINE, "\n")
     tracked = tracked.sub(_MANY_NEWLINES, "\n\n")
@@ -294,13 +403,13 @@ def _clean_tracked(
 
 def clean_page_text(
     raw: str,
-    running: set[str] | None = None,
+    running: set[RunningLine] | None = None,
     *,
     zone: int = DEFAULT_ZONE,
     vocabulary: Iterable[str] | None = None,
 ) -> tuple[str, list[tuple[int, int]]]:
     """Clean one page's raw text; returns the text and its offset map."""
-    tracked = _clean_tracked(_Tracked.of(raw), running or set(), zone, _vocab(vocabulary))
+    tracked = _clean_tracked(_Tracked.of(raw), running or set(), zone, word_costs(vocabulary))
     return tracked.text, tracked.offset_map()
 
 
@@ -360,7 +469,7 @@ class PagedText:
 
 @dataclass(frozen=True)
 class CleanResult:
-    """Cleaned pages of one file, and the header/footer keys that were removed."""
+    """Cleaned pages of one file, and the normalised header/footer lines that were removed."""
 
     pages: list[Page]
     removed: frozenset[str] = field(default_factory=frozenset)
@@ -377,7 +486,7 @@ def clean_pages(
     *,
     file_sha: str,
     parser: str,
-    repeat_fraction: float = DEFAULT_REPEAT_FRACTION,
+    repeat_fraction: float | None = None,
     zone: int = DEFAULT_ZONE,
     vocabulary: Iterable[str] | None = None,
     pseudo_pages: bool = False,
@@ -387,18 +496,23 @@ def clean_pages(
     Header and footer frequency is counted across the whole file, before it is
     segmented, as plan §5.1 orders the steps. Pseudo-pages (DOCX, HTML,
     Markdown, TXT; ``ParsedFile.pseudo_pages``) have no running headers, so
-    nothing is removed from them for repeating.
+    nothing is removed from them for repeating. ``repeat_fraction`` defaults to
+    ``ingest.header_repeat_fraction`` in ``config/knowledge.yaml``.
     """
     with stage(Stage.CLEAN):
-        words = _vocab(vocabulary)
+        if repeat_fraction is None and not pseudo_pages:
+            from hal9000.knowledge.config import load_knowledge_file
+
+            repeat_fraction = load_knowledge_file().ingest.header_repeat_fraction
+        costs = word_costs(vocabulary)
         running = (
             set()
             if pseudo_pages
-            else running_lines([page.text for page in pages], repeat_fraction, zone)
+            else running_lines([page.text for page in pages], float(repeat_fraction), zone)
         )
         cleaned: list[Page] = []
         for page in pages:
-            tracked = _clean_tracked(_Tracked.of(page.text), running, zone, words)
+            tracked = _clean_tracked(_Tracked.of(page.text), running, zone, costs)
             cleaned.append(
                 Page(
                     file_sha=file_sha,
@@ -409,4 +523,4 @@ def clean_pages(
                     offset_map=tracked.offset_map(),
                 )
             )
-        return CleanResult(pages=cleaned, removed=frozenset(running))
+        return CleanResult(pages=cleaned, removed=frozenset(key for _, _, key in running))

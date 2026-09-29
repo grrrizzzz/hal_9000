@@ -15,11 +15,13 @@ from hal9000.knowledge.contracts import Trace
 from hal9000.knowledge.ingest.clean import (
     PAGE_SEPARATOR,
     PagedText,
+    _segment,
     clean_pages,
     normalize_line,
     repair_letter_spacing,
     running_lines,
     source_offset,
+    word_costs,
 )
 from hal9000.knowledge.ingest.parsers import ParsedPage
 from hal9000.knowledge.obs.timing import start_trace
@@ -41,6 +43,32 @@ def _pages(bodies: list[str]) -> list[ParsedPage]:
 def test_normalize_line_folds_digits_case_and_spaces():
     assert normalize_line("  Page 12   of 58 ") == normalize_line("page 3 of 7")
     assert normalize_line("Page 12 of 58") == "page # of #"
+
+
+def test_normalize_line_folds_uuid_and_hex_ids():
+    one = normalize_line("Docusign Envelope ID: 5E7C1A90-3B2D-4C6E-9F10-A1B2C3D4E5F6")
+    two = normalize_line("Docusign Envelope ID: 0B99F2DE-71AA-4E0C-8D3B-FF10E2A7C901")
+    assert one == two == "docusign envelope id: <id>"
+    assert normalize_line("Ref 9F3A2B7C11D0E4") == "ref <id>"
+    # ordinary words made of a-f letters are not IDs
+    assert normalize_line("Faced a bad decade") == "faced a bad decade"
+
+
+def test_headers_from_different_envelopes_count_as_one_running_line():
+    envelopes = [
+        "5E7C1A90-3B2D-4C6E-9F10-A1B2C3D4E5F6",
+        "0B99F2DE-71AA-4E0C-8D3B-FF10E2A7C901",
+        "C41D0E55-9A0B-4B1C-A2D3-0E1F2A3B4C5D",
+    ]
+    # each envelope heads only two pages (< 3), together six of seven
+    pages = [
+        ParsedPage(page=n, text=f"Docusign Envelope ID: {envelopes[(n - 1) // 2]}\nBody {w}.")
+        for n, w in enumerate("abcdef", start=1)
+    ]
+    pages.append(ParsedPage(page=7, text="Body g."))
+    result = clean_pages(pages, file_sha=SHA, parser="pdfium")
+    assert all("Envelope" not in page.text for page in result.pages)
+    assert "docusign envelope id: <id>" in result.removed
 
 
 def test_running_header_and_footer_are_removed_from_every_page():
@@ -86,7 +114,99 @@ def test_threshold_is_thirty_percent_of_pages_with_text():
     result = clean_pages(_pages(bodies), file_sha=SHA, parser="pdfium")
     assert all("RECEIVED" not in page.text for page in result.pages)
     assert "Only twice" in result.pages[1].text
-    assert running_lines([page.text for page in _pages(bodies)], 0.5) >= {"page # of #"}
+    keys = {key for _, _, key in running_lines([page.text for page in _pages(bodies)], 0.5)}
+    assert "page # of #" in keys and "stamp: received" not in keys  # 3 < 50% of 10
+
+
+def test_a_five_page_file_keeps_a_line_repeated_on_two_pages():
+    repeated = "Recommendation: Recommend a qualified contractor evaluate and repair."
+    bodies = [f"Finding {word} noted." for word in "abcde"]
+    bodies[1] += "\n" + repeated
+    bodies[3] += "\n" + repeated
+    result = clean_pages(_pages(bodies), file_sha=SHA, parser="pdfium")
+    assert [p.page for p in result.pages if repeated in p.text] == [2, 4]
+    assert all("Envelope" not in p.text for p in result.pages)  # 5 of 5 still goes
+
+
+def test_running_lines_need_at_least_three_pages():
+    two = [_page(1, "Body one.", 2), _page(2, "Body two.", 2)]
+    result = clean_pages(two, file_sha=SHA, parser="pdfium")
+    assert all(HEADER in page.text for page in result.pages)
+    assert result.removed == frozenset()
+
+
+ESTIMATE_PAGE_1 = """Kestrel Plumbing, Inc.
+ESTIMATE
+1 Replace angle stop valve 85.00
+2 Replace supply line 45.00
+3 Replace angle stop valve 255.00
+Total 385.00
+Page 1 of 2"""
+ESTIMATE_PAGE_2 = """Kestrel Plumbing, Inc.
+4 Replace angle stop valve 170.00
+5 Replace wax ring 60.00
+Total 230.00
+Page 2 of 2"""
+
+
+def test_a_two_page_estimate_keeps_its_line_items_and_totals():
+    pages = [ParsedPage(page=1, text=ESTIMATE_PAGE_1), ParsedPage(page=2, text=ESTIMATE_PAGE_2)]
+    result = clean_pages(pages, file_sha=SHA, parser="pdfium")
+    text = "\n".join(page.text for page in result.pages)
+    for line in (
+        "1 Replace angle stop valve 85.00",
+        "3 Replace angle stop valve 255.00",
+        "4 Replace angle stop valve 170.00",
+        "Total 385.00",
+        "Total 230.00",
+    ):
+        assert line in text
+
+
+def test_items_that_match_only_after_digit_folding_are_kept():
+    # a four-page estimate: letterhead and footer repeat in place; each page's first
+    # item and its page total sit at the same position but differ in their numbers
+    pages = []
+    for n in range(1, 5):
+        items = "\n".join(
+            f"{3 * n + k} Replace angle stop valve {85 * (n + k)}.00" for k in range(3)
+        )
+        text = f"Kestrel Plumbing, Inc.\n{items}\nPage total {n * 95 + 40}.00\nPage {n} of 4"
+        pages.append(ParsedPage(page=n, text=text))
+    result = clean_pages(pages, file_sha=SHA, parser="pdfium")
+    for page in result.pages:
+        n = page.page
+        assert "Kestrel" not in page.text and f"Page {n} of 4" not in page.text
+        assert page.text.splitlines() == [
+            *(f"{3 * n + k} Replace angle stop valve {85 * (n + k)}.00" for k in range(3)),
+            f"Page total {n * 95 + 40}.00",
+        ]
+
+
+def test_varying_lines_that_are_page_numbers_or_counters_are_running():
+    pages = [
+        ParsedPage(page=n, text=f"- {n} -\nBatch {n + 60} scan\nBody {w}.\nSheet {n + 2}/9")
+        for n, w in enumerate("abcd", start=1)
+    ]
+    result = clean_pages(pages, file_sha=SHA, parser="pdfium")
+    assert [page.text for page in result.pages] == [f"Body {w}." for w in "abcd"]
+
+
+def test_clean_pages_reads_the_repeat_fraction_from_config(tmp_path, monkeypatch):
+    (tmp_path / "knowledge.yaml").write_text("ingest:\n  header_repeat_fraction: 0.9\n")
+    monkeypatch.setenv("HAL_CONFIG_DIR", str(tmp_path))
+    bodies = [f"Body {word}." for word in "abcdefghij"]
+    for index in range(8):  # 8 of 10 pages: removed at 30%, kept at 90%
+        bodies[index] = "Stamp: RECEIVED\n" + bodies[index]
+    result = clean_pages(_pages(bodies), file_sha=SHA, parser="pdfium")
+    assert "RECEIVED" in result.pages[0].text
+    assert "Envelope" not in result.pages[0].text
+    assert (
+        "RECEIVED"
+        not in clean_pages(_pages(bodies), file_sha=SHA, parser="pdfium", repeat_fraction=0.3)
+        .pages[0]
+        .text
+    )
 
 
 def test_body_lines_outside_the_edge_zone_are_not_header_candidates():
@@ -129,6 +249,12 @@ def test_page_without_text_layer_stays_empty_and_flagged():
 
 
 # ------------------------------------------------------------ letter spacing
+BUNDLE_HEADING = (
+    "D ES C R I PT I O N O F T H E P ROJ EC T & D ES C R I PT I O N O F T H E S I G N I F I C A N T "
+    "M AT E R I A L S TO B E U S E D & EQ U I P M E N T TO B E I N STA L L E D"
+)
+
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     [
@@ -138,6 +264,20 @@ def test_page_without_text_layer_stays_empty_and_flagged():
         ("E S T I M A T E", "ESTIMATE"),
         ("D ES C R I PT I O N O F W O R K:", "DESCRIPTION OF WORK:"),
         ("Item D ES C R I PT I O N here", "Item DESCRIPTION here"),
+        (
+            BUNDLE_HEADING,
+            "DESCRIPTION OF THE PROJECT & DESCRIPTION OF THE SIGNIFICANT MATERIALS "
+            "TO BE USED & EQUIPMENT TO BE INSTALLED",
+        ),
+        ("S I G N IF I C A N T", "SIGNIFICANT"),
+        ("U S E D", "USED"),
+        ("P E S T C O N T R O L", "PEST CONTROL"),
+        ("TO TA L $1,234.00", "TOTAL $1,234.00"),
+        (
+            "W O O D D E S T R O Y I N G P E S T S A N D O R G A N I S M S",
+            "WOOD DESTROYING PESTS AND ORGANISMS",
+        ),
+        ("I N V O I C E", "INVOICE"),
     ],
 )
 def test_letter_spaced_headings_are_rejoined(raw, expected):
@@ -154,15 +294,46 @@ def test_letter_spaced_headings_are_rejoined(raw, expected):
         "U S A",
         "Circuit breakers 1 2 3 4 are labelled.",
         "I O U",
+        "IT IS OK TO GO",
+        "PART A OF THE FORM",
+        "NO. OF UNITS",
+        "W X Y Z",
     ],
 )
 def test_normal_text_is_untouched(text):
     assert repair_letter_spacing(text) == text
 
 
-def test_unknown_letter_spaced_words_are_left_as_they_are():
-    # a vendor name missing from the vocabulary is kept; known words around it are fixed
-    assert repair_letter_spacing("D ES C R I PT I O N O F Q X Z V K") == "DESCRIPTION OF Q X Z V K"
+@pytest.mark.parametrize(("text", "tokens"), [("SEE A OR B IN THE", 6), ("U S A", 3)])
+def test_weak_compression_is_not_a_rewrite(text, tokens):
+    # the DP does find words ("SEE A ORB IN THE", "US A"); only the ratio guard keeps the text
+    words = _segment(text.split(" "), word_costs())
+    assert words is not None and " ".join(words) != text
+    assert 3 * len(words) >= 2 * tokens
+    assert repair_letter_spacing(text) == text
+
+
+def test_an_alphabet_run_is_an_option_list():
+    assert _segment(["A", "B", "C", "D", "E"], word_costs()) == ["ABCDE"]
+    assert repair_letter_spacing("A B C D E") == "A B C D E"
+
+
+def test_single_letters_no_word_covers_are_joined_whole():
+    # a name the word list lacks: joined, never split around short words inside it
+    assert repair_letter_spacing("Z O R V E L") == "ZORVEL"
+    assert repair_letter_spacing("EQ U I P M E N T Z O R V E L") == "EQUIPMENT ZORVEL"
+
+
+def test_fragments_no_word_can_absorb_leave_the_run_alone():
+    assert repair_letter_spacing("QX Z V K") == "QX Z V K"
+
+
+def test_extra_vocabulary_is_used():
+    # "OF" can't be split off an unknown name without a word for the rest ...
+    assert repair_letter_spacing("O F Z O R V E L") == "OFZORVEL"
+    # ... but with the name as a word, it can
+    assert repair_letter_spacing("O F Z O R V E L", vocabulary=["Zorvel"]) == "OF ZORVEL"
+    assert word_costs(["Zorvel"])["zorvel"] == word_costs()["the"] + 0.2
 
 
 def test_letter_spacing_is_repaired_inside_clean_pages():
