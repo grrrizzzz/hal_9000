@@ -165,3 +165,63 @@ def test_the_haystack_writes_the_date_every_way():
     text = haystack(src(text="body", title="T", vendor="V", doc_date=date(2023, 6, 22)))
     for piece in ("2023-06-22", "June 2023", "6/22/23", "2023", "T", "V", "body"):
         assert piece in text
+
+
+# ------------------------------------------------ review follow-ups (approved)
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Two issues were noted [S1].",
+        "It has three bedrooms on the 2nd floor [S1].",
+        "The 1st and 3rd items were repaired [S1].",
+        "The third floor was not inspected [S1].",
+    ],
+)
+def test_small_spelled_counts_and_ordinals_are_not_figures(answer):
+    assert verify_answer(answer, [src(text="Items were noted on the upper floor.")]).ok
+
+
+def test_spelled_numbers_with_a_unit_or_above_ten_still_count():
+    source = [src(text="Warranted for 10 years.")]
+    assert not verify_answer("It is warranted for twelve years [S1].", source).ok
+    assert not verify_answer("It cost five dollars [S1].", source).ok
+
+
+def test_the_cited_pages_back_a_page_number():
+    source = src(text="The valve drips.", pages=(41, 42))
+    assert verify_answer("See page 41 of the report [S1].", [source]).ok
+    assert not verify_answer("See page 43 of the report [S1].", [source]).ok
+
+
+@pytest.mark.parametrize("marker", ["[S1-S3]", "[S1–S3]", "[S1 - S3]", "[S1-3]"])
+def test_citation_ranges_are_expanded(marker):
+    sources = [src("S1", "a"), src("S2", "b"), src("S3", "Total due: $880.00")]
+    answer = f"It cost $880.00 {marker}."
+    assert cited_markers(answer) == ["S1", "S2", "S3"]
+    assert verify_answer(answer, sources).ok
+    assert "3" not in strip_markers(answer) and "1" not in strip_markers(answer)
+
+
+def test_a_range_past_the_sources_is_flagged():
+    result = verify_answer("It is old [S4-S6].", five())
+    assert result.kinds == {"citation"} and "[S6]" in result.messages[0]
+
+
+@pytest.mark.parametrize("answer", ["It cost $2,023 [S1].", "It cost $22 [S1].", "$6 [S1]."])
+def test_money_is_never_backed_by_a_date_or_a_bare_number(answer):
+    source = src(text="Inspected June 22, 2023. Unit 22 of 6.", doc_date=date(2023, 6, 22))
+    assert not verify_answer(answer, [source]).ok
+
+
+def test_money_is_backed_by_money():
+    source = src(text="Total due: $1,234.00 for unit 7.")
+    assert verify_answer("It cost 1,234 dollars [S1].", [source]).ok
+    assert verify_answer("Unit 7 cost $1,234 [S1].", [source]).ok
+    assert not verify_answer("It cost $7 [S1].", [source]).ok
+
+
+def test_an_answer_without_citations_is_not_verified():
+    result = verify_answer("The house has a garage.", [src(text="A garage.")])
+    assert result.ok and result.grounding == "skipped"
+    cited = verify_answer("The house has a garage [S1].", [src(text="A garage.")])
+    assert cited.grounding == "verified"
