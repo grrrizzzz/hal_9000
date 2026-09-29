@@ -370,7 +370,7 @@
     {
       "type": "timeseries",
       "title": "Error rate",
-      "description": "Alert: over 10% for 15 minutes.",
+      "description": "Errors over questions that finished (a client that went away, outcome cancelled, is neither). Alert: over 10% for 15 minutes.",
       "datasource": {
         "type": "prometheus",
         "uid": "kb-prometheus"
@@ -382,7 +382,7 @@
             "type": "prometheus",
             "uid": "kb-prometheus"
           },
-          "expr": "sum(rate(kb_questions_total{outcome=\"error\"}[$__rate_interval])) / sum(rate(kb_questions_total[$__rate_interval]))",
+          "expr": "sum(rate(kb_questions_total{outcome=\"error\"}[$__rate_interval])) / sum(rate(kb_questions_total{outcome!=\"cancelled\"}[$__rate_interval]))",
           "legendFormat": "questions ending in error",
           "instant": false,
           "range": true
@@ -482,7 +482,7 @@
     {
       "type": "timeseries",
       "title": "Abstain rate",
-      "description": "",
+      "description": "Abstentions over questions that finished (cancelled ones excluded).",
       "datasource": {
         "type": "prometheus",
         "uid": "kb-prometheus"
@@ -494,7 +494,7 @@
             "type": "prometheus",
             "uid": "kb-prometheus"
           },
-          "expr": "sum(rate(kb_questions_total{outcome=\"abstained\"}[$__rate_interval])) / sum(rate(kb_questions_total[$__rate_interval]))",
+          "expr": "sum(rate(kb_questions_total{outcome=\"abstained\"}[$__rate_interval])) / sum(rate(kb_questions_total{outcome!=\"cancelled\"}[$__rate_interval]))",
           "legendFormat": "abstained",
           "instant": false,
           "range": true

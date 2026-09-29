@@ -1,6 +1,8 @@
 # Alert rules for the house knowledge base (plan §9.3). Contact point: Grafana's
 # default unless deploy/grafana/optional/telegram.yaml is provisioned too.
 # Recall is stored as a fraction, so '5 points' is a drop of 0.05 (x100 below).
+# Rates are over questions that finished: a cancelled one (the client went
+# away) is neither an error nor a question with a result.
 apiVersion: 1
 groups:
 - orgId: 1
@@ -19,7 +21,7 @@ groups:
       datasourceUid: kb-prometheus
       model:
         refId: A
-        expr: sum(rate(kb_questions_total{outcome="error"}[5m])) / sum(rate(kb_questions_total[5m]))
+        expr: sum(rate(kb_questions_total{outcome="error"}[5m])) / sum(rate(kb_questions_total{outcome!="cancelled"}[5m]))
         instant: true
         range: false
         intervalMs: 1000

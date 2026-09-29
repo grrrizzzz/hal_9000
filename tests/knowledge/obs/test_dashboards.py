@@ -203,6 +203,15 @@ def test_every_prometheus_query_uses_exposed_metrics_and_labels(where, expr):
     check_promql(expr)
 
 
+def test_rates_over_questions_leave_out_cancelled_ones():
+    """A cancelled question (the client went away) is neither an error nor an abstention."""
+    ratios = [(w, e.split("/", 1)[1]) for w, e in PROM_QUERIES if "/" in e]
+    over_questions = [(w, d) for w, d in ratios if "kb_questions_total" in d]
+    assert len(over_questions) == 3  # error rate, abstain rate, the error-rate alert
+    for where, denominator in over_questions:
+        assert 'kb_questions_total{outcome!="cancelled"}' in denominator, where
+
+
 def test_every_plan_metric_is_on_a_dashboard_or_alert():
     text = " ".join(expr for _, expr in PROM_QUERIES)
     for name in metrics.METRICS:
