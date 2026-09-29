@@ -1,0 +1,176 @@
+# hal-kb: the house knowledge base service (plan §15; handoff KWP11).
+#
+#   docker compose -f deploy/docker/compose.knowledge.yaml build hal-kb      # on the Pi
+#   docker build -f deploy/docker/Dockerfile.kb -t hal-kb .                  # same, by hand
+#
+# Three stages:
+#   web      node:22-slim runs `npm ci && npm run build` in web/ (build time only;
+#            no Node in the final image)
+#   build    python:3.12-slim + uv (from PyPI): `uv sync --frozen --no-dev
+#            --group knowledge` into /app/.venv, plus the optional groups below,
+#            and the reranker model when one is chosen
+#   runtime  python:3.12-slim with /app (code, venv, vendored tiktoken
+#            encodings, web/dist), a non-root user, /app/data as the volume
+#
+# Build arguments:
+#   WITH_DOCLING=0|1               add the knowledge-docling group (PyTorch: large)
+#   WITH_RERANK=none|minilm|bge-base
+#                                  add knowledge-rerank and download that ONNX
+#                                  cross-encoder from Hugging Face at build time
+#                                  (the Pi must reach huggingface.co while building;
+#                                  at run time nothing is downloaded)
+#   APP_UID / APP_GID=1000         the user the service runs as; match the owner of
+#                                  ./data on the Pi (`id -u`, `id -g`)
+#   BASE_IMAGE=python:3.12-slim    the Python base (a stand-in for offline tests:
+#                                  deploy/docker/make-standin-base.sh)
+#   NODE_IMAGE=node:22-slim        the Node base for the web build
+#   SKIP_WEB_BUILD=0|1             1 = take a prebuilt web/dist from the named build
+#                                  context `webdist` instead of running Node
+#                                  (local testing only:
+#                                  --build-context webdist=web/dist)
+#
+# The runtime needs no network except OpenAI: tiktoken's encodings are baked in
+# (vendor/tiktoken), LiteLLM uses its bundled price map, and Hugging Face is
+# switched to offline mode.
+
+ARG BASE_IMAGE=python:3.12-slim
+ARG NODE_IMAGE=node:22-slim
+ARG SKIP_WEB_BUILD=0
+
+# ----------------------------------------------------------------------- web
+# The UI's static build is platform-independent, so it runs on the build
+# host's own platform (no emulation when cross-building for arm64).
+FROM --platform=$BUILDPLATFORM ${NODE_IMAGE} AS web-0
+WORKDIR /web
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
+    npm_config_fund=false \
+    npm_config_audit=false \
+    npm_config_update_notifier=false
+COPY web/package.json web/package-lock.json ./
+RUN npm ci
+COPY web/ ./
+RUN npm run build
+
+# A prebuilt web/dist (SKIP_WEB_BUILD=1, local tests without a Node image)
+FROM scratch AS web-1
+# hadolint ignore=DL3022
+COPY --from=webdist . /web/dist
+
+# hadolint ignore=DL3006
+FROM web-${SKIP_WEB_BUILD} AS web
+
+# --------------------------------------------------------------------- build
+FROM ${BASE_IMAGE} AS build
+ARG WITH_DOCLING=0
+ARG WITH_RERANK=none
+ARG UV_VERSION=0.8.17
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    UV_NO_CACHE=1 \
+    UV_PYTHON_DOWNLOADS=never \
+    UV_PROJECT_ENVIRONMENT=/app/.venv \
+    FASTEMBED_CACHE_PATH=/app/models/fastembed \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_ROOT_USER_ACTION=ignore
+RUN case "$WITH_DOCLING" in 0|1) ;; *) echo "WITH_DOCLING must be 0 or 1" >&2; exit 1;; esac \
+ && case "$WITH_RERANK" in none|minilm|bge-base) ;; \
+      *) echo "WITH_RERANK must be none, minilm or bge-base" >&2; exit 1;; esac \
+ && python -m pip install "uv==${UV_VERSION}"
+WORKDIR /app
+
+# Dependencies first (cached until pyproject.toml or uv.lock change)
+COPY pyproject.toml uv.lock README.md ./
+# $groups is split into separate arguments on purpose
+# hadolint ignore=SC2086
+RUN groups="--group knowledge" \
+ && if [ "$WITH_DOCLING" = 1 ]; then groups="$groups --group knowledge-docling"; fi \
+ && if [ "$WITH_RERANK" != none ]; then groups="$groups --group knowledge-rerank"; fi \
+ && echo "$groups" > /tmp/uv-groups \
+ && uv sync --frozen --no-dev $groups --no-install-project
+
+# Then the project itself (editable, so the package finds vendor/ and web/dist
+# relative to /app, exactly as in a checkout)
+COPY src/ src/
+COPY vendor/tiktoken/ vendor/tiktoken/
+COPY config/ config/
+COPY scripts/kb_sqlite_vec_check.py scripts/
+# hadolint ignore=SC2046
+RUN uv sync --frozen --no-dev $(cat /tmp/uv-groups)
+
+# Trim the third-party test suites (pandas, scipy, numpy: about 90 MB, never
+# imported), then fail the build here, not on first start, if the interpreter
+# can't load sqlite-vec (gate G-K0b) or the service's modules don't import.
+# The vendored tiktoken encodings must be present too (no runtime download).
+RUN find /app/.venv/lib -type d -name tests -prune -exec rm -rf {} + \
+ && test -s vendor/tiktoken/9b5ad71b2ce5302211f9c61530b329a4922fc6a4 \
+ && test -s vendor/tiktoken/fb374d419588a4632f3f557e76b4b70aebbca790 \
+ && /app/.venv/bin/python scripts/kb_sqlite_vec_check.py \
+ && TIKTOKEN_CACHE_DIR=/app/vendor/tiktoken /app/.venv/bin/python -c \
+      "import hal9000.knowledge.api.app, hal9000.knowledge.cli.serve, hal9000.knowledge.cli.ask; from hal9000.knowledge.tokens import encoding; encoding('cl100k_base'); encoding('o200k_base')"
+
+# The chosen reranker, downloaded now and exercised once, through the same code
+# path the service uses (OnnxCrossEncoder -> fastembed -> FASTEMBED_CACHE_PATH).
+RUN mkdir -p "$FASTEMBED_CACHE_PATH" \
+ && if [ "$WITH_RERANK" != none ]; then \
+      /app/.venv/bin/python -c "import sys; from hal9000.knowledge.retrieve.rerank import OnnxCrossEncoder; print(OnnxCrossEncoder(sys.argv[1]).score('warm-up', ['a passage']))" "$WITH_RERANK"; \
+    fi
+
+# ------------------------------------------------------------------- runtime
+FROM ${BASE_IMAGE} AS runtime
+ARG WITH_DOCLING=0
+ARG WITH_RERANK=none
+ARG APP_UID=1000
+ARG APP_GID=1000
+LABEL org.opencontainers.image.title="hal-kb" \
+      org.opencontainers.image.description="HAL 9000 house knowledge base" \
+      org.opencontainers.image.source="https://github.com/grrrizzzz/hal_9000" \
+      hal9000.with_docling="${WITH_DOCLING}" \
+      hal9000.with_rerank="${WITH_RERANK}"
+
+# Docling's layout models need two system libraries; nothing else is installed.
+# (Unpinned: Debian package versions change with the base image.)
+# hadolint ignore=DL3008
+RUN if [ "$WITH_DOCLING" = 1 ]; then \
+      apt-get update \
+      && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 \
+      && rm -rf /var/lib/apt/lists/*; \
+    fi \
+ && groupadd --system --gid "$APP_GID" hal \
+ && useradd --system --uid "$APP_UID" --gid "$APP_GID" --home-dir /app \
+      --no-create-home --shell /usr/sbin/nologin hal
+
+WORKDIR /app
+COPY --from=build /app /app
+COPY --from=web /web/dist /app/web/dist
+# /app/data is the only writable place: the bind mount on the Pi (./data), or
+# an anonymous volume when run without one.
+RUN mkdir -p /app/data && chown "$APP_UID:$APP_GID" /app/data
+
+# (TIKTOKEN_CACHE_DIR is a path, not a secret)
+# hadolint ignore=DL3064
+ENV PATH=/app/.venv/bin:$PATH \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    HOME=/tmp \
+    HAL_DATA_DIR=/app/data \
+    HAL_CONFIG_DIR=/app/config \
+    KB_DATA_DIR=/app/data \
+    TIKTOKEN_CACHE_DIR=/app/vendor/tiktoken \
+    LITELLM_LOCAL_MODEL_COST_MAP=True \
+    FASTEMBED_CACHE_PATH=/app/models/fastembed \
+    HF_HUB_OFFLINE=1 \
+    HF_HUB_DISABLE_TELEMETRY=1
+
+USER ${APP_UID}:${APP_GID}
+VOLUME ["/app/data"]
+EXPOSE 8910
+
+# `/health` answers 200 whether the service is "ok" or "degraded" (no active
+# profile yet, or over the monthly cap); anything else is unhealthy. There is
+# no curl in the slim image, so Python makes the request.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
+  CMD ["python", "-c", "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8910/health', timeout=4).status == 200 else 1)"]
+
+CMD ["hal9000", "kb", "serve", "--host", "0.0.0.0", "--port", "8910"]
