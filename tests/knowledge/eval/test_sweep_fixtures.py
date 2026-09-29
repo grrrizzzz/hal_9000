@@ -147,11 +147,15 @@ class FakeProvider:
     so the meter's caps bite. ``log`` receives "FIRST LLM CALL" once.
     """
 
-    def __init__(self, log: io.StringIO | None = None, usage=(3000, 500), judge=None) -> None:
+    def __init__(
+        self, log: io.StringIO | None = None, usage=(3000, 500), judge=None, models=None
+    ) -> None:
         self.log = log
         self.usage = usage
         self.calls = 0
         self.judge = judge or {}
+        #: tier -> the model its usage is priced as (default: gpt-5-mini for every tier)
+        self.models = models or {}
 
     def __call__(self, prompt, tier="powerful", *, on_usage=None) -> str:
         if self.calls == 0 and self.log is not None:
@@ -159,8 +163,8 @@ class FakeProvider:
         self.calls += 1
         if on_usage is not None:
             on_usage(
-                Usage(model="openai/gpt-5-mini", prompt=self.usage[0], cached=0,
-                      completion=self.usage[1], reasoning=0)
+                Usage(model=self.models.get(tier, "openai/gpt-5-mini"), prompt=self.usage[0],
+                      cached=0, completion=self.usage[1], reasoning=0)
             )  # fmt: skip
         system = str(prompt.messages[0].get("content", ""))
         purpose = (prompt.metadata or {}).get("purpose")
@@ -194,8 +198,9 @@ class FakeReranker:
         return [len(wanted & set(concepts(p))) / len(wanted) for p in passages]
 
 
-def fake_chat():
-    """KWP6's extractive fake chat, reporting priced usage so answers cost something."""
+def fake_chat(prompt_tokens: int = 2000, completion: int = 100, reasoning: int = 0):
+    """KWP6's extractive fake chat, reporting priced gpt-5-mini usage so answers cost something
+    (``completion`` includes the ``reasoning`` tokens, as the provider bills them)."""
     from hal9000.knowledge.answer.fake import FakeChat
 
     class PricedChat(FakeChat):
@@ -203,8 +208,8 @@ def fake_chat():
             for item in super()._stream(prompt, text, None):
                 if isinstance(item, str):
                     yield item
-            usage = Usage(model="openai/gpt-5-mini", prompt=2000, cached=0, completion=100,
-                          reasoning=0)  # fmt: skip
+            usage = Usage(model="openai/gpt-5-mini", prompt=prompt_tokens, cached=0,
+                          completion=completion, reasoning=reasoning)  # fmt: skip
             if on_usage is not None:
                 on_usage(usage)
             yield usage

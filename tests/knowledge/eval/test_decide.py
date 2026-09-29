@@ -108,7 +108,11 @@ def test_a_tie_goes_to_the_simpler_option(tmp_path):
     assert fancy.metrics.budgeted_recall[2000].value > simple.metrics.budgeted_recall[2000].value
     rec = recommend([fancy, simple], scoring=SCORING)
     assert rec.chosen.run_id == "simple"
-    assert any("ties (paired bootstrap)" in r and "fancy" in r for r in rec.reasons)
+    reason = next(r for r in rec.reasons if "ties by paired bootstrap" in r)
+    assert (
+        reason.startswith("simple ") and "the highest budgeted recall @ 2k on dev, fancy" in reason
+    )
+    assert not any(r.startswith("highest") for r in rec.reasons)
     assert rec.alternatives[0].versus.verdict == "tie"
 
 
@@ -349,3 +353,21 @@ def test_the_plan_s1_pass_rule_on_test_split_scores(tmp_path):
     forced = _test_run(tmp_path, recall=(0.9, 0.8, 1.0), mrr=(0.8, 0.7, 0.9), correct=None,
                        faithful=(1, 1, 1), declined=(1, 1, 1), forced=True)  # fmt: skip
     assert "a forced re-run" in render_targets([forced])
+
+
+def test_s6_rows_match_finalists_by_configuration(tmp_path):
+    """A transform finalist and two finalists on one profile each find their own Pi row."""
+    multi = make_run(tmp_path, "multi", SPREAD, stage="S4", query_transform="multi")
+    rrf = make_run(tmp_path, "rrf", SPREAD, stage="S4")
+    dense = make_run(tmp_path, "dense", SPREAD, stage="S4", retrieval="dense")
+    pi = [
+        make_run(tmp_path, f"s6-{run.id}", SPREAD, stage="S6", host="pi", p95=p95,
+                 **{k: v for k, v in run.config.items() if k != "name"})
+        for run, p95 in ((multi, 90.0), (rrf, 80.0), (dense, 350.0))
+    ]  # fmt: skip
+    rec = recommend([multi, rrf, dense, *pi], scoring=SCORING)
+    assert rec.pi_measured
+    measured = {rec.chosen.run_id: rec.chosen.p95_ms}
+    measured.update({a.run_id: a.p95_ms for a in rec.alternatives})
+    assert measured == {"rrf": 80.0, "multi": 90.0}  # each its own row, both eligible
+    assert [(e.run_id, e.p95_ms) for e in rec.excluded] == [("dense", 350.0)]  # over 300 ms

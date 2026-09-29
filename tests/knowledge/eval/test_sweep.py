@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from hal9000.knowledge.eval.runs import list_runs, results_page
@@ -286,6 +288,16 @@ def test_local_latency_excludes_the_embedding_call():
 
 
 # ------------------------------------------------------------------ the test split
+def record_choice(env, sweep_id, run, tier="fast"):
+    """What `kb eval choose` records in the sweep's manifest."""
+    from hal9000.knowledge.eval.sweep import write_manifest
+
+    manifest = read_manifest(env.settings.eval_dir, sweep_id)
+    manifest["choice"] = {"config": run.config["name"], "run_id": run.id, "chat_tier": tier,
+                          "at": "now"}  # fmt: skip
+    write_manifest(env.settings.eval_dir, sweep_id, manifest)
+
+
 def test_the_test_split_runs_once_judged_and_scored_against_the_targets(swept_env, caplog):
     from hal9000.knowledge.eval.decide import render_targets
     from hal9000.knowledge.eval.report import render_report
@@ -295,6 +307,7 @@ def test_the_test_split_runs_once_judged_and_scored_against_the_targets(swept_en
     runner.sweep_id = sweep_id
     leader = runner.finalists()
     name = leader[0].config["name"]
+    record_choice(env, sweep_id, leader[0])
     refused = env.runner().run_test(sweep_id, name)
     assert refused.status == "refused" and "no judge calibration labels" in refused.message
 
@@ -314,21 +327,45 @@ def test_the_test_split_runs_once_judged_and_scored_against_the_targets(swept_en
     assert run.config["declined"]["low"] <= run.config["declined"]["value"]
     record = results(run)[0]
     assert "recall" in record and record["correctness"] and "answer_latency_ms" in record
+    assert "answer_output" not in record and "judged" not in record
     assert run.cost_usd > 0 and {a for a, _ in env.ledger()} == {"knowledge-eval"}
     assert "Evidence recall within a 2,000-token budget:" in out
+    assert not list((env.settings.eval_dir / "runs" / run.id).glob("partial-*"))
 
     again = env.runner().run_test(sweep_id, name)
-    assert again.status == "refused" and "--force" in again.message
+    assert again.status == "refused" and "already has a test-split run" in again.message
     forced = env.runner().run_test(sweep_id, name, force=True)
     assert forced.status == "done"
     tests = [r for r in list_runs(env.conn) if r.stage == "test"]
     assert len(tests) == 2 and any(r.config.get("forced_rerun") for r in tests)
-    assert "test split re-run" in caplog.text
-    assert any(
-        "--force" in n for n in read_manifest(env.settings.eval_dir, sweep_id)["notes"]["test"]
-    )
+    assert "test split forced" in caplog.text
+    notes = read_manifest(env.settings.eval_dir, sweep_id)["notes"]["test"]
+    assert any("--force" in n for n in notes)
     report = render_report([*sweep_runs(env.conn, sweep_id), *tests], source=sweep_id)
     assert "Plan §1 targets" in report and render_targets(tests).split("\n")[0] in report
+    assert "Correct counts partial answers as 0.5" in report
+
+
+def test_the_test_split_is_only_for_the_recorded_choice(swept_env):
+    env, sweep_id = swept_env
+    runner = env.runner()
+    runner.sweep_id = sweep_id
+    first, second = runner.finalists()[:2]
+    label_calibration(env.conn, first.id)
+    none_yet = env.runner().run_test(sweep_id, first.config["name"])
+    assert none_yet.status == "refused" and "no configuration has been chosen" in none_yet.message
+    record_choice(env, sweep_id, first)
+    other = env.runner().run_test(sweep_id, second.config["name"])
+    assert other.status == "refused" and "is not the recorded choice" in other.message
+    record_choice(env, sweep_id, first, tier="powerful")  # chosen with the other chat tier
+    tier = env.runner().run_test(sweep_id, first.config["name"])
+    assert tier.status == "refused" and "chat tier powerful" in tier.message
+    record_choice(env, sweep_id, first)
+    assert not [r for r in list_runs(env.conn) if r.stage == "test"]
+    forced = env.runner().run_test(sweep_id, second.config["name"], force=True)
+    assert forced.status == "done", forced.message
+    (run,) = [r for r in list_runs(env.conn) if r.stage == "test"]
+    assert "is not the recorded choice" in run.config["forced_because"]
 
 
 def test_the_test_split_refuses_what_it_cannot_run(swept_env):
@@ -341,6 +378,8 @@ def test_the_test_split_refuses_what_it_cannot_run(swept_env):
     with pytest.raises(ValueError, match="no sweep"):
         env.runner().run_test("sweep-missing", "nope")
     name = k_variant.config["name"].rsplit("+k", 1)[0]
+    baseline = next(r for r in sweep_runs(env.conn, sweep_id, "S4") if r.config["name"] == name)
+    record_choice(env, sweep_id, baseline)
     over = env.runner(cap=1e-9).run_test(sweep_id, name, force_judge=True)
     assert over.status == "refused" and "exceeds what is left" in over.message
     declined = env.runner(confirm=lambda q: False).run_test(sweep_id, name, force_judge=True)
@@ -349,3 +388,125 @@ def test_the_test_split_refuses_what_it_cannot_run(swept_env):
         env.conn.execute("UPDATE gold_items SET split = 'dev'")
     assert "no approved test-split" in env.runner().run_test(sweep_id, name).message
     assert not [r for r in list_runs(env.conn) if r.stage == "test"]
+
+
+# ------------------------------------------------------------------ resume never re-charges
+S5_ONE = ("    top: 2\n    chat_tiers: [fast, powerful]\n    repeat_top: 1",
+          "    top: 1\n    chat_tiers: [fast]\n    repeat_top: 0")  # fmt: skip
+
+
+def test_a_stopped_s5_resumes_paying_only_for_the_remaining_answers(swept_env):
+    from tests.knowledge.eval.test_sweep_fixtures import FakeProvider, fake_chat
+
+    env, sweep_id = swept_env
+    grid = (env.settings.config_dir / "knowledge_eval.yaml").read_text().replace(*S5_ONE)
+    runner = env.runner(grid=grid)
+    runner.sweep_id = sweep_id
+    label_calibration(env.conn, runner.finalists()[0].id)
+    per_answer = 360_000 * 0.25e-6  # $0.09 of gpt-5-mini input per answer; judging is free
+    base = sum(usd for _, usd in env.ledger())  # the sweep's earlier (T10) spend
+    first_chat = fake_chat(prompt_tokens=360_000, completion=0)
+    stopped = env.runner(
+        cap=0.40,  # above the estimate; the 5th answer crosses it, the 6th never starts
+        stream_response=first_chat,
+        generate_response=FakeProvider(usage=(0, 0)),
+    ).run(["S5"], sweep_id=sweep_id)
+    assert stopped.status == "stopped", env.out.getvalue()
+    assert len(first_chat.calls) == 5
+    paid_before = sum(usd for _, usd in env.ledger())
+    assert paid_before - base == pytest.approx(5 * per_answer)
+    assert not sweep_runs(env.conn, sweep_id, "S5")
+
+    second_chat = fake_chat(prompt_tokens=360_000, completion=0)
+    resumed = env.runner(
+        cap=5.0, stream_response=second_chat, generate_response=FakeProvider(usage=(0, 0))
+    ).run(["S5"], sweep_id=sweep_id)
+    assert resumed.status == "done", env.out.getvalue()
+    assert len(second_chat.calls) == 10  # the 5 answered questions were not asked again
+    assert sum(usd for _, usd in env.ledger()) - paid_before == pytest.approx(10 * per_answer)
+    (run,) = sweep_runs(env.conn, sweep_id, "S5")
+    assert run.metrics.n_questions == 15 and all(r["correctness"] for r in results(run))
+    assert run.cost_usd == pytest.approx(15 * per_answer)  # both sessions' spend
+    assert not list((env.settings.eval_dir / "runs" / run.id).glob("partial-*"))
+    assert "answered 10/15" in env.out.getvalue()
+
+
+def test_a_stopped_t10_run_resumes_without_rewriting_again(env):
+    grid = TINY_GRID
+    stopped = env.runner(cap=0.01, grid=grid).run(["S1a", "S1b", "S2", "S3"])
+    assert stopped.status == "stopped"
+    rows_first = env.ledger()
+    partial = list((env.settings.eval_dir / "runs").glob("*.s3.*/partial-retrieval.jsonl"))
+    assert len(partial) == 1
+    saved = len(partial[0].read_text().splitlines())
+    assert 0 < saved < 15
+    runner = env.runner(cap=1.0, grid=grid)
+    resumed = runner.run(["S3"], sweep_id=stopped.sweep_id)
+    assert resumed.status == "done"
+    assert runner.deps.generate_response.calls == 15 - saved  # only the questions not yet done
+    assert len(env.ledger()) == len(rows_first) + 15 - saved
+
+
+# ------------------------------------------------------------------ estimates >= metered
+def test_the_s5_estimate_covers_realistic_metered_answers_and_judgements(swept_env):
+    from tests.knowledge.eval.test_sweep_fixtures import FakeProvider, fake_chat
+
+    env, sweep_id = swept_env
+    grid = (env.settings.config_dir / "knowledge_eval.yaml").read_text().replace(*S5_ONE)
+    probe = env.runner(grid=grid)
+    probe.sweep_id = sweep_id
+    label_calibration(env.conn, probe.finalists()[0].id)
+    config = SweepConfig.from_run_config(probe.finalists()[0].config)
+    estimate = probe._estimate("S5", [replace(config, chat_tier="fast")])
+    # realistic: a 2k-token context answered with reasoning; a judge reading it with reasoning
+    base = sum(usd for _, usd in env.ledger())
+    runner = env.runner(
+        grid=grid,
+        stream_response=fake_chat(prompt_tokens=2800, completion=850, reasoning=600),
+        generate_response=FakeProvider(
+            usage=(3600, 1300), models={"powerful": "openai/gpt-5", "fast": "openai/gpt-5-mini"}
+        ),
+    )
+    assert runner.run(["S5"], sweep_id=sweep_id).status == "done"
+    metered = sum(usd for _, usd in env.ledger()) - base
+    assert 0 < metered <= estimate.usd
+
+    # with judge-prep's metered cost recorded, the estimate is that cost times the margin
+    from hal9000.knowledge.eval.sweep import metered_answer_cost, record_metered_costs
+
+    record_metered_costs(env.settings.eval_dir, answer_tier="fast", judge_tier="powerful",
+                         answers=3, answer_usd=0.03, judgements=3, judge_usd=0.06)  # fmt: skip
+    assert metered_answer_cost(env.settings.eval_dir, "fast", "powerful") == pytest.approx(0.03)
+    again = probe._estimate("S5", [replace(config, chat_tier="fast")])
+    assert again.usd == pytest.approx(15 * 0.03 * 1.25)
+    assert "metered" in again.lines[-1]
+    assert metered_answer_cost(env.settings.eval_dir, "powerful", "powerful") is None
+
+
+def test_the_embedding_estimate_covers_a_real_model_metered(env):
+    from hal9000.knowledge.index.fake import FakeEmbedder
+    from hal9000.knowledge.tokens import count_tokens
+
+    class TokenCounting(FakeEmbedder):  # bills real cl100k token counts, like the provider
+        def __call__(self, texts, model=None, dimensions=None, **kw):
+            kw["count_tokens"] = count_tokens
+            return super().__call__(texts, model, dimensions, **kw)
+
+    grid = TINY_GRID.replace(
+        "embedding: {model: fake/embed-64, dimensions: 64}",
+        "embedding: {model: openai/text-embedding-3-small, dimensions: 256}",
+    ).replace("retrieval: [dense, rrf]", "retrieval: [dense]")
+    runner = env.runner(grid=grid, embed_fn=TokenCounting())
+    runner.sweep_id = "sweep-estimate"
+    configs = [SweepConfig(size=512, embed_model="openai/text-embedding-3-small", dimensions=256,
+                           retrieval="dense")]  # fmt: skip
+    estimate = runner._estimate("S1a", configs)
+    assert (
+        estimate.usd > 0
+        and "uncached tokens with openai/text-embedding-3-small" in (estimate.lines[0])
+    )
+    outcome = env.runner(grid=grid, embed_fn=TokenCounting()).run(["S1a"])
+    assert outcome.status == "done", env.out.getvalue()
+    metered = sum(usd for _, usd in env.ledger())
+    assert 0 < metered <= estimate.usd + 1e-12
+    assert env.active() == ACTIVE

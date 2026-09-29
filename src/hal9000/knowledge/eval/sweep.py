@@ -93,11 +93,16 @@ __all__ = [
     "SweepSettings",
     "calibrate_threshold",
     "config_answerer",
+    "finalist_runs",
+    "latest_sweep",
     "load_sweep_settings",
     "local_latency_ms",
     "manifest_path",
+    "metered_answer_cost",
+    "record_metered_costs",
     "profile_texts",
     "read_manifest",
+    "sweep_runs",
 ]
 
 log = logging.getLogger(__name__)
@@ -372,6 +377,29 @@ def local_latency_ms(trace: Any) -> float:
     )
 
 
+def _score_from_record(record: Mapping[str, Any]) -> QuestionScore:
+    """The :class:`QuestionScore` a ``results.jsonl`` record was written from."""
+
+    def keyed(name: str) -> dict[int, Any]:
+        return {int(k): v for k, v in (record.get(name) or {}).items()}
+
+    return QuestionScore(
+        gold_item_id=int(record["gold_item_id"]),
+        category=record["category"],
+        answerable=bool(record["answerable"]),
+        recall=keyed("recall"),
+        evidence_recall=record.get("evidence_recall"),
+        full_support=keyed("full_support"),
+        first_hit_rank=record.get("first_hit_rank"),
+        reciprocal_rank=record.get("reciprocal_rank"),
+        context_precision=keyed("context_precision"),
+        context_tokens=keyed("context_tokens"),
+        abstain_score=record.get("abstain_score"),
+        abstained=bool(record.get("abstained")),
+        latency_ms=record.get("latency_ms"),
+    )
+
+
 @dataclass(frozen=True)
 class Calibration:
     """An abstain threshold chosen on dev (plan §8.5), or why there is none."""
@@ -431,6 +459,37 @@ def calibrate_threshold(
     return Calibration(round(t, 6), auc, decline, refuse, met, reason)
 
 
+METERED_FILE = "metered_costs.json"
+
+
+def record_metered_costs(
+    eval_dir: Path, *, answer_tier: str, judge_tier: str, answers: int, answer_usd: float,
+    judgements: int, judge_usd: float,
+) -> None:  # fmt: skip
+    """Add judge-prep's metered spend per answer and per judgement to ``metered_costs.json``."""
+    path = eval_dir / METERED_FILE
+    data = json.loads(path.read_text()) if path.exists() else {}
+    key = f"{answer_tier}|{judge_tier}"
+    row = data.setdefault(key, {"answers": 0, "answer_usd": 0.0, "judgements": 0, "judge_usd": 0.0})
+    row["answers"] += answers
+    row["answer_usd"] += answer_usd
+    row["judgements"] += judgements
+    row["judge_usd"] += judge_usd
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, sort_keys=True))
+
+
+def metered_answer_cost(eval_dir: Path, answer_tier: str, judge_tier: str) -> float | None:
+    """Metered USD per answer plus its judgement, from judge-prep (None when not recorded)."""
+    path = eval_dir / METERED_FILE
+    if not path.exists():
+        return None
+    row = json.loads(path.read_text()).get(f"{answer_tier}|{judge_tier}")
+    if not row or not row.get("answers") or not row.get("judgements"):
+        return None
+    return row["answer_usd"] / row["answers"] + row["judge_usd"] / row["judgements"]
+
+
 def manifest_path(eval_dir: Path, sweep_id: str) -> Path:
     from hal9000.knowledge.eval.runs import run_dir
 
@@ -451,6 +510,30 @@ def write_manifest(eval_dir: Path, sweep_id: str, manifest: Mapping[str, Any]) -
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(manifest, indent=2, sort_keys=True))
     tmp.replace(path)
+
+
+def sweep_runs(conn: sqlite3.Connection, sweep_id: str, *stages: str) -> list[EvalRun]:
+    """The finished runs of one sweep (of ``stages``, when given)."""
+    return [
+        r
+        for r in list_runs(conn)
+        if r.config.get("sweep_id") == sweep_id
+        and r.finished_at is not None
+        and (not stages or r.stage in stages)
+    ]
+
+
+def finalist_runs(conn: sqlite3.Connection, sweep_id: str, ranker: Ranker, n: int) -> list[EvalRun]:
+    """The sweep's top ``n`` S4 baselines (no *k*): what S5 answers with and S6 measures."""
+    baselines = [r for r in sweep_runs(conn, sweep_id, "S4") if r.config.get("k") is None]
+    return ranker.top(baselines, n)
+
+
+def latest_sweep(conn: sqlite3.Connection) -> str | None:
+    """The most recently started sweep that has finished S4 runs."""
+    runs = [r for r in list_runs(conn) if r.stage == "S4" and r.config.get("sweep_id")]
+    runs = [r for r in runs if r.finished_at is not None]
+    return max(runs, key=lambda r: (r.started_at, r.id)).config["sweep_id"] if runs else None
 
 
 def profile_texts(conn: sqlite3.Connection, profile: IndexProfile) -> list[str]:
@@ -947,15 +1030,19 @@ class SweepRunner:
         if stage in ("S5", TEST_STAGE):
             from hal9000.knowledge.eval.judge import estimate_judge_prep
 
+            judge = self.eval_config.judge
             for config in todo:
-                cost = estimate_judge_prep(
-                    n,
-                    self.eval_config.judge,
-                    config.chat_tier or self.settings.chat_tier,
-                    self.settings.judge_tier,
-                )
-                estimate.add(cost.usd, f"{config.name}: {n} answers + judgements, "
-                             f"{cost.describe()}")  # fmt: skip
+                tier = config.chat_tier or self.settings.chat_tier
+                cost = estimate_judge_prep(n, judge, tier, self.settings.judge_tier)
+                metered = metered_answer_cost(self.eval_dir, tier, self.settings.judge_tier)
+                if metered is not None:
+                    usd = n * metered * judge.estimate.metered_margin
+                    estimate.add(usd, f"{config.name}: {n} answers + judgements at judge-prep's "
+                                 f"metered ${metered:.5f} each (x{judge.estimate.metered_margin:g}"
+                                 f"; the token estimate was ${cost.usd:.4f})")  # fmt: skip
+                else:
+                    estimate.add(cost.usd, f"{config.name}: {n} answers + judgements, "
+                                 f"{cost.describe()}")  # fmt: skip
         return estimate
 
     # ------------------------------------------------------------ retrieval runs
@@ -983,34 +1070,43 @@ class SweepRunner:
         return replace(output, selected=tuple(selected), latency_ms=local_latency_ms(trace))
 
     def _score_retrieval(
-        self, config: SweepConfig, items: Sequence[GoldItem]
+        self, config: SweepConfig, items: Sequence[GoldItem], run_id: str
     ) -> tuple[list[QuestionScore], list[dict[str, Any]], float]:
-        """Retrieve and score ``items`` with ``config``: (scores, records, metered spend)."""
-        bound = self._binding(config)
-        spent = self.meter.spent
-        if config.query_transform == "none":  # warm caches and imports (untimed, free)
-            bound.retrieve(items[0].question)
-        scores: list[QuestionScore] = []
-        records: list[dict[str, Any]] = []
-        for item in items:
+        """Retrieve and score ``items`` with ``config``: (scores, records, metered spend).
+
+        Each question's record (with the spend it caused) is saved as soon as it is
+        scored, so a run stopped at a cap resumes where it stopped and never pays for a
+        question twice (a query transform's rewrites are paid calls).
+        """
+        done = self._partial(run_id, "retrieval")
+        todo = [item for item in items if item.id not in done]
+        bound = self._binding(config) if todo else None
+        if todo and config.query_transform == "none":  # warm caches and imports (untimed, free)
+            bound.retrieve(todo[0].question)
+        for item in todo:
+            spent = self.meter.spent
             output = self.retrieve_timed(bound.retrieve, item.question, config.k)
             score = score_question(
                 ScoringItem.from_gold(item), output, chunk_size=bound.chunk_size,
                 config=self.scoring,
             )  # fmt: skip
-            scores.append(score)
-            records.append(
-                question_record(
-                    score, question=item.question, selected=[s.chunk_id for s in output.selected]
-                )
+            record = question_record(
+                score,
+                question=item.question,
+                selected=[s.chunk_id for s in output.selected],
+                extra={"cost_usd": self.meter.spent - spent},
             )
-        return scores, records, self.meter.spent - spent
+            self._save_partial(run_id, "retrieval", record)
+            done[item.id] = record
+        records = [done[item.id] for item in items]
+        scores = [_score_from_record(record) for record in records]
+        return scores, records, sum(float(r.get("cost_usd") or 0.0) for r in records)
 
     def _retrieval_run(
         self, stage: str, config: SweepConfig, run_id: str, profile: IndexProfile
     ) -> EvalRun:
         items = self.dev_items()
-        scores, records, cost = self._score_retrieval(config, items)
+        scores, records, cost = self._score_retrieval(config, items, run_id)
         metrics = aggregate(scores, config=self.scoring)
         metrics = metrics.model_copy(
             update={"cost_per_question_usd": self._query_cost(config, items, cost)}
@@ -1028,7 +1124,7 @@ class SweepRunner:
                 }
             )
             run_config = {k: v for k, v in run_config.items() if v is not None}
-        return record_run(
+        run = record_run(
             self.conn,
             eval_dir=self.eval_dir,
             stage=stage,
@@ -1038,6 +1134,8 @@ class SweepRunner:
             cost_usd=cost,
             run_id=run_id,
         )
+        self._clear_partial(run_id)
+        return run
 
     def _query_cost(self, config: SweepConfig, items: Sequence[GoldItem], spent: float) -> float:
         """Production cost per question: one query embedding (+ the transform call, measured)."""
@@ -1205,8 +1303,7 @@ class SweepRunner:
 
     def finalists(self) -> list[EvalRun]:
         """The top S4 baselines (no *k*): what S5 answers with."""
-        baselines = [r for r in self.stage_runs("S4") if r.config.get("k") is None]
-        return self.ranker.top(baselines, self.grid.S5.top)
+        return finalist_runs(self.conn, self.sweep_id, self.ranker, self.grid.S5.top)
 
     def _store_thresholds(self) -> None:
         from hal9000.knowledge.index.profiles import get_profile
@@ -1284,72 +1381,151 @@ class SweepRunner:
         self._batch("S5", configs)
 
     def _answer_items(
-        self, config: SweepConfig, items: Sequence[GoldItem]
-    ) -> tuple[list[dict[str, Any]], float]:
-        """Answer ``items`` with every setting of ``config`` and judge each: (records, cost)."""
+        self, config: SweepConfig, items: Sequence[GoldItem], run_id: str
+    ) -> tuple[list[dict[str, Any]], float, float]:
+        """Answer ``items`` with every setting of ``config`` and judge each.
+
+        Returns (records, answer cost, metered spend). Every answer is saved as soon as
+        it arrives and again with its judgement, so a run stopped at a cap resumes
+        without paying twice: judged items are reused, an answered but unjudged item
+        is only judged.
+        """
         from hal9000.knowledge.eval.judge import JudgeError, judge_answer
 
-        answer = config_answerer(
-            self.conn,
-            self.settings,
-            config,
-            meter=self.meter,
-            deps=self.deps,
-            budget=self.grid.decision_budget,
-        )
+        done = self._partial(run_id, "answers")
+        answer = None
         generate = self.generate()
-        records: list[dict[str, Any]] = []
-        answer_cost = 0.0
-        for item in items:
-            self.meter.precheck(EVAL_AGENT)
-            started = time.perf_counter()
-            output, result = answer(item.question)
-            total_ms = (time.perf_counter() - started) * 1000
-            if result.outcome in ("retrieval_only", "error"):
-                self.meter.precheck(EVAL_AGENT)  # a cap turns answers retrieval-only: stop
-            answer_cost += output.cost_usd
-            try:
-                labels = judge_answer(generate, self.settings.judge_tier, item, output)
-            except JudgeError as error:
-                log.warning("the judge failed on item %s: %s", item.id, error)
-                labels = None
-            records.append(
-                {
+        total = len(items)
+        for number, item in enumerate(items, start=1):
+            record = done.get(item.id)
+            if record is not None and record.get("judged"):
+                continue
+            if record is None:
+                if answer is None:
+                    answer = config_answerer(
+                        self.conn,
+                        self.settings,
+                        config,
+                        meter=self.meter,
+                        deps=self.deps,
+                        budget=self.grid.decision_budget,
+                    )
+                self.meter.precheck(EVAL_AGENT)
+                spent = self.meter.spent
+                started = time.perf_counter()
+                output, result = answer(item.question)
+                total_ms = (time.perf_counter() - started) * 1000
+                if result.outcome in ("retrieval_only", "error"):
+                    self.meter.precheck(EVAL_AGENT)  # a cap turns answers retrieval-only: stop
+                record = {
                     "gold_item_id": item.id,
                     "question": item.question,
                     "category": item.category,
                     "answerable": item.category != "unanswerable",
                     "outcome": result.outcome,
                     "abstained": output.abstained,
+                    "cost_usd": output.cost_usd,
+                    "spent_usd": self.meter.spent - spent,
+                    "latency_ms": total_ms,
+                    "recall": {},
+                    "full_support": {},
+                    "judged": False,
+                    # kept only until judged (the partial file is deleted with the run)
+                    "answer_output": {
+                        "text": output.text,
+                        "abstained": output.abstained,
+                        "cost_usd": output.cost_usd,
+                        "sources": [
+                            {"marker": x.marker, "text": x.text, "title": x.title}
+                            for x in output.sources
+                        ],
+                    },
+                }
+                self._save_partial(run_id, "answers", record)
+            stored = record["answer_output"]
+            output = AnswerOutput(
+                text=stored["text"],
+                sources=tuple(Source(**x) for x in stored["sources"]),
+                abstained=stored["abstained"],
+                cost_usd=stored["cost_usd"],
+            )
+            spent = self.meter.spent
+            try:
+                labels = judge_answer(generate, self.settings.judge_tier, item, output)
+            except JudgeError as error:
+                log.warning("the judge failed on item %s: %s", item.id, error)
+                labels = None
+            record = {k: v for k, v in record.items() if k != "answer_output"}
+            record.update(
+                {
+                    "judged": True,
+                    "spent_usd": record["spent_usd"] + self.meter.spent - spent,
                     "correctness": labels.correctness if labels else None,
                     "correct": _CORRECT[labels.correctness] if labels else None,
                     "faithful": labels.faithful if labels else None,
                     "citations_correct": labels.citations_correct if labels else None,
                     "abstention_correct": labels.abstention_correct if labels else None,
-                    "cost_usd": output.cost_usd,
-                    "latency_ms": total_ms,
-                    "recall": {},
-                    "full_support": {},
                 }
             )
-        return records, answer_cost
+            self._save_partial(run_id, "answers", record)
+            done[item.id] = record
+            if number % 10 == 0 or number == total:
+                self.say(f"    answered {number}/{total}")
+        records = []
+        for item in items:
+            record = dict(done[item.id])
+            record.pop("judged", None)
+            records.append(record)
+        answer_cost = sum(float(r.get("cost_usd") or 0.0) for r in records)
+        return records, answer_cost, sum(float(r.get("spent_usd") or 0.0) for r in records)
+
+    # ------------------------------------------------------------ partial results
+    def _partial_path(self, run_id: str, kind: str) -> Path:
+        from hal9000.knowledge.eval.runs import run_dir
+
+        return run_dir(self.eval_dir, run_id) / f"partial-{kind}.jsonl"
+
+    def _partial(self, run_id: str, kind: str) -> dict[int, dict[str, Any]]:
+        """Per-question records saved by an interrupted run (the last line per item wins)."""
+        path = self._partial_path(run_id, kind)
+        if not path.exists():
+            return {}
+        out: dict[int, dict[str, Any]] = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:  # a line cut off by a crash
+                continue
+            out[int(record["gold_item_id"])] = record
+        return out
+
+    def _save_partial(self, run_id: str, kind: str, record: Mapping[str, Any]) -> None:
+        path = self._partial_path(run_id, kind)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, sort_keys=True) + "\n")
+
+    def _clear_partial(self, run_id: str) -> None:
+        for kind in ("retrieval", "answers"):
+            self._partial_path(run_id, kind).unlink(missing_ok=True)
 
     def _answer_run(self, stage: str, config: SweepConfig, run_id: str) -> EvalRun:
-        spent = self.meter.spent
-        records, answer_cost = self._answer_items(config, self.dev_items())
+        records, answer_cost, spent = self._answer_items(config, self.dev_items(), run_id)
         metrics = self._answer_metrics(records, answer_cost)
         run_config = config.run_config(stage=stage, sweep_id=self.sweep_id)
         run_config.update(self._gate)
-        return record_run(
+        run = record_run(
             self.conn,
             eval_dir=self.eval_dir,
             stage=stage,
             config=run_config,
             metrics=metrics,
             records=records,
-            cost_usd=self.meter.spent - spent,
+            cost_usd=spent,
             run_id=run_id,
         )
+        self._clear_partial(run_id)
+        return run
 
     def _answer_metrics(self, records: Sequence[Mapping], answer_cost: float) -> EvalMetrics:
         cfg = self.scoring
@@ -1382,13 +1558,16 @@ class SweepRunner:
     def run_test(
         self, sweep_id: str, name: str, *, force: bool = False, force_judge: bool = False
     ) -> SweepOutcome:
-        """``kb eval test``: the chosen configuration, once, on the test split (plan §8.6).
+        """``kb eval test``: the chosen configuration, once per sweep, on the test split (§8.6).
 
         Retrieval is scored and answers are generated and judged, as in S1-S5,
-        on the approved **test** items; one ``split="test"`` run is stored. A
-        second run of the same configuration is refused unless ``force`` (logged).
+        on the approved **test** items; one ``split="test"`` run is stored. Without
+        ``force`` it is refused when the configuration is not the recorded choice
+        (``kb eval choose``) or when the sweep already has a test run; ``force`` is
+        logged and noted. Answers are saved as they finish, so a run stopped at a
+        cap resumes without paying twice.
         """
-        from hal9000.knowledge.eval.decide import find_run, target_scores
+        from hal9000.knowledge.eval.decide import find_run, identity, target_scores
 
         runs = [r for r in list_runs(self.conn) if r.config.get("sweep_id") == sweep_id]
         if not runs:
@@ -1407,23 +1586,34 @@ class SweepRunner:
         items = list_gold(self.conn, status="approved", split="test")
         if not items:
             return self._outcome("refused", "no approved test-split questions")
-        earlier = [r for r in runs if r.stage == TEST_STAGE and r.config.get("name") == config.name]
-        if earlier and not force:
-            return self._outcome(
-                "refused",
-                f"{config.name} was already run on the test split ({earlier[0].id}); the test "
-                "split is reported once (plan §8.6). Pass --force to run it again (logged).",
-            )
+        problems = []
+        choice = self.manifest.get("choice")
+        chosen = find_run(runs, choice["run_id"]) if choice else None
+        if chosen is None:
+            problems.append("no configuration has been chosen yet (kb eval choose)")
+        elif identity(chosen.config) != identity(source.config) or (
+            choice.get("chat_tier") and choice["chat_tier"] != config.chat_tier
+        ):
+            problems.append(f"{config.name} is not the recorded choice ({choice['config']}, "
+                            f"chat tier {choice.get('chat_tier')})")  # fmt: skip
+        earlier = [r for r in runs if r.stage == TEST_STAGE]
         if earlier:
-            log.warning("test split re-run for %s (--force); earlier: %s", config.name,
-                        ", ".join(r.id for r in earlier))  # fmt: skip
+            problems.append(
+                f"sweep {sweep_id} already has a test-split run ({earlier[0].id}); the test "
+                "split is reported once (plan §8.6)"
+            )
+        if problems and not force:
+            return self._outcome("refused", "; ".join(problems) + ". Pass --force to run it "
+                                 "anyway (logged).")  # fmt: skip
+        if problems:
+            log.warning("test split forced for %s (--force): %s", config.name, "; ".join(problems))
         try:
             gate = self._judge_gate(force_judge)
         except SweepRefused as refused:
             return self._outcome("refused", str(refused).replace("S5 refused", "test refused"))
-        if earlier:
-            self.note(TEST_STAGE, f"--force: {config.name} run on the test split again "
-                      f"(earlier: {', '.join(r.id for r in earlier)})")  # fmt: skip
+        if problems:
+            self.note(TEST_STAGE, f"--force: {config.name} on the test split although "
+                      + "; ".join(problems))  # fmt: skip
         self.say(f"Test split: {config.name} on {len(items)} approved test questions, once.")
         estimate = self._estimate(TEST_STAGE, [config], items)
         self.say(f"Estimate for the test split: ${estimate.usd:.4f}")
@@ -1438,14 +1628,13 @@ class SweepRunner:
         digest = hashlib.sha1(config.name.encode()).hexdigest()[:10]
         run_id = f"{sweep_id}.{TEST_STAGE}.{digest}" + (f".{len(earlier) + 1}" if earlier else "")
         try:
-            profile = self._ensure_profile(config.profile())
-            assert profile is not None
-            spent = self.meter.spent
-            scores, records, _ = self._score_retrieval(config, items)
-            answers, answer_cost = self._answer_items(config, items)
+            self._ensure_profile(config.profile())
+            scores, records, retrieval_spent = self._score_retrieval(config, items, run_id)
+            answers, answer_cost, answer_spent = self._answer_items(config, items, run_id)
         except BudgetExceeded as error:
-            return self._outcome("stopped", f"STOPPED at the cost cap: {error}; nothing was "
-                                 "stored, so the test split can be run again")  # fmt: skip
+            return self._outcome("stopped", f"STOPPED at the cost cap: {error}; the answers so "
+                                 "far are kept, and running it again continues without paying "
+                                 "for them twice")  # fmt: skip
         finally:
             self.close()
         by_item = {a["gold_item_id"]: a for a in answers}
@@ -1475,8 +1664,9 @@ class SweepRunner:
         run_config.update(gate)
         run_config["source_run"] = source.id
         run_config["declined"] = self._declined(answers)
-        if earlier:
+        if problems:
             run_config["forced_rerun"] = True
+            run_config["forced_because"] = "; ".join(problems)
         run = record_run(
             self.conn,
             eval_dir=self.eval_dir,
@@ -1485,9 +1675,10 @@ class SweepRunner:
             config={k: v for k, v in run_config.items() if v is not None},
             metrics=metrics,
             records=records,
-            cost_usd=self.meter.spent - spent,
+            cost_usd=retrieval_spent + answer_spent,
             run_id=run_id,
         )
+        self._clear_partial(run_id)
         for row in target_scores(run):
             self.say(f"  {row.label}: {row.describe()}")
         return SweepOutcome(sweep_id, "done", run.id, runs=1, spent=self.meter.spent)

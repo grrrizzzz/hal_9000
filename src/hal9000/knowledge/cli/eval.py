@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from types import SimpleNamespace
 
 from hal9000 import config as hal_config
 
@@ -159,14 +160,26 @@ def _judge_prep(args, conn, current) -> int:
         except hal_config.ConfigError as error:
             _err(str(error))
             return EXIT_ERROR
-        result = judge_prep(
-            conn,
-            answer,
-            generate,
-            eval_run_id=run.id,
-            config=cfg,
-            judge_tier=current.judge_tier,
-        )
+        answer, generate, metered = _metering(spend.meter, answer, generate)
+        try:
+            result = judge_prep(
+                conn,
+                answer,
+                generate,
+                eval_run_id=run.id,
+                config=cfg,
+                judge_tier=current.judge_tier,
+            )
+        finally:
+            from hal9000.knowledge.eval.sweep import record_metered_costs
+
+            if metered["answers"] and metered["judgements"]:  # S5 estimates prefer these
+                record_metered_costs(
+                    current.eval_dir,
+                    answer_tier=run.config.get("chat_tier") or current.chat_tier,
+                    judge_tier=current.judge_tier,
+                    **metered,
+                )
         print(
             f"Stored {len(result.label_ids)} answers with the judge's labels "
             f"({result.skipped} already done). Label them on the Judge calibration tab. "
@@ -179,6 +192,27 @@ def _judge_prep(args, conn, current) -> int:
         return EXIT_OK
     finally:
         spend.close()
+
+
+def _metering(meter, answer, generate):
+    """Wrap judge-prep's answer and judge calls to measure the metered spend of each."""
+    totals = {"answers": 0, "answer_usd": 0.0, "judgements": 0, "judge_usd": 0.0}
+
+    def measured_answer(question):
+        before = meter.spent
+        output = answer(question)
+        totals["answers"] += 1
+        totals["answer_usd"] += meter.spent - before
+        return output
+
+    def measured_generate(prompt, tier="powerful"):
+        before = meter.spent
+        reply = generate(prompt, tier)
+        totals["judgements"] += 1
+        totals["judge_usd"] += meter.spent - before
+        return reply
+
+    return measured_answer, measured_generate, totals
 
 
 def _run_answerer(conn, current, run, meter):
@@ -241,7 +275,10 @@ def _regression(args, conn, current) -> int:
         if not confirm("Run the regression?", yes=args.yes):
             return EXIT_NOT_RUN
         try:
-            binding = retriever_for(conn, current, meter=spend.meter)
+            # retrieval only: never a query transform's LLM calls, whatever knowledge.yaml says
+            binding = retriever_for(
+                conn, current, meter=spend.meter, run=SimpleNamespace(config={"transform": "none"})
+            )
         except NotWired as error:
             _err(str(error))
             return EXIT_ERROR
@@ -317,7 +354,9 @@ def _latency(args, conn, current) -> int:
     from hal9000.knowledge.eval.latency import LatencyRunner
     from hal9000.knowledge.eval.spend import confirm, open_spend
 
-    profiles = [p.strip() for p in args.profiles.split(",") if p.strip()]
+    def names(value):
+        return [p.strip() for p in (value or "").split(",") if p.strip()]
+
     cfg = load_eval_config(current.config_dir / "knowledge_eval.yaml")
     spend = open_spend(current, max_cost=None, label="latency")
     try:
@@ -330,7 +369,12 @@ def _latency(args, conn, current) -> int:
             confirm=lambda question: confirm(question, yes=args.yes),
         )
         outcome = runner.run(
-            profiles, n=args.n, end_to_end=args.end_to_end, ingest_sha=args.ingest_test
+            sweep_id=args.sweep,
+            profiles=names(args.profiles),
+            configs=names(args.configs),
+            n=args.n,
+            end_to_end=args.end_to_end,
+            ingest_sha=args.ingest_test,
         )
     except (hal_config.ConfigError, ValueError) as error:
         _err(str(error))
@@ -341,7 +385,7 @@ def _latency(args, conn, current) -> int:
         _err(f"not run: {outcome.message}")
         return EXIT_NOT_RUN
     for run in outcome.runs:
-        print(f"Stored {run.id} ({run.config.get('profile')}, host {run.host})")
+        print(f"Stored {run.id} ({run.config.get('name')}, host {run.host})")
     print(f"Spent ${spend.meter.spent:.4f} (agent knowledge-eval).")
     if outcome.status == "stopped":
         print(outcome.message)
@@ -373,6 +417,7 @@ def _choose(args, conn, current) -> int:
     )
     from hal9000.knowledge.index.embedding import EmbeddingService, is_fake_model
     from hal9000.knowledge.index.profiles import ProfileError, activate_profile, profile_status
+    from hal9000.knowledge.retrieve.config import reranker_key
     from hal9000.knowledge.retrieve.thresholds import get_threshold, set_threshold
 
     runs = [r for r in runs_for(conn, args.run) if r.config.get("sweep_id") == args.run]
@@ -440,12 +485,15 @@ def _choose(args, conn, current) -> int:
     finally:
         spend.close()
     threshold = get_threshold(conn, active.id, config.reranker)
-    calibrated = [
+    s4 = [
         r for r in runs
-        if r.stage == "S4" and r.config.get("k") is None
+        if r.stage == "S4" and r.config.get("k") is None and r.finished_at is not None
         and identity(r.config) == identity(run.config)
-        and r.config.get("abstain_threshold") is not None
     ]  # fmt: skip
+    calibrated = [r for r in s4 if r.config.get("abstain_threshold") is not None]
+    auc_min = load_sweep_settings(cfg).S4.abstain_auc_min if cfg.sweep else 0.75
+    weak = [r for r in s4 if r.config.get("abstain_threshold") is None]
+    moved = ""
     if calibrated:
         source = calibrated[0]
         threshold = float(source.config["abstain_threshold"])
@@ -457,11 +505,24 @@ def _choose(args, conn, current) -> int:
             auc=source.config.get("abstain_auc"),
             eval_run_id=source.id,
         )
+    elif weak:  # plan §8.5: the score can't separate the groups; abstention moves to generation
+        auc = weak[0].config.get("abstain_auc")
+        with conn:
+            conn.execute(
+                "DELETE FROM abstain_thresholds WHERE profile_id = ? AND reranker = ?",
+                (active.id, reranker_key(config.reranker)),
+            )
+        threshold = None
+        moved = (
+            f" -- the S4 calibration's AUC {auc:.3f} < {auc_min:.2f}"
+            if isinstance(auc, int | float)
+            else " -- S4 found no usable abstain score"
+        ) + ", so abstention moves to the generation step (plan §8.5)"
     when = datetime.now(UTC).strftime("%Y-%m-%d")
     threshold_text = (
         f"{threshold:.4f} (in abstain_thresholds for this profile and reranker)"
         if threshold is not None
-        else "none (the generation-side NOT_IN_SOURCES reply decides)"
+        else "none: the generation-side NOT_IN_SOURCES reply decides" + moved
     )
     comment = [
         f"chosen by `hal9000 kb eval choose {args.run} --config {config.name}` on {when}",
@@ -498,6 +559,11 @@ def _choose(args, conn, current) -> int:
     override = os.environ.get("KB_CHAT_TIER", "").strip().lower()
     if tier and override and override != tier:
         print(f"Note: KB_CHAT_TIER={override} in the environment overrides answer.chat_tier.")
+    print("Restart hal-kb (the service) so the chat picks up the new profile and settings.")
+    if config.reranker != "none":
+        print(f"The {config.reranker} reranker needs the Pi image built with WITH_RERANK=1.")
+    if config.parser == "docling":
+        print("A Docling profile needs the Pi image built with WITH_DOCLING=1.")
     print(f"Then: hal9000 kb eval test {args.run} --config {config.name} --yes (once).")
     return EXIT_OK
 

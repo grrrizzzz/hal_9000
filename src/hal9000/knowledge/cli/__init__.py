@@ -127,9 +127,22 @@ def register(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     judge.add_argument("run", metavar="RUN")
     _yes(judge)
     latency = _command(ev_cmds, "latency", "eval", "S6 latency on the Pi", "eval latency")
-    latency.add_argument("--profiles", required=True, help="comma-separated profile names")
-    latency.add_argument("--n", type=int, default=200, help="replayed retrieval questions")
-    latency.add_argument("--end-to-end", type=int, default=30, help="live end-to-end questions")
+    latency.add_argument(
+        "--sweep", metavar="RUN", help="the sweep whose finalists to measure (default: latest)"
+    )
+    latency.add_argument("--configs", help="comma-separated configuration names of the sweep")
+    latency.add_argument(
+        "--profiles", help="comma-separated profiles: the sweep's finalists on them"
+    )
+    latency.add_argument(
+        "--n", type=int, default=None, help="replayed retrieval questions (default: S6.replay)"
+    )
+    latency.add_argument(
+        "--end-to-end",
+        type=int,
+        default=None,
+        help="live end-to-end questions (default: S6.end_to_end)",
+    )
     latency.add_argument("--ingest-test", metavar="SHA", help="timed scratch ingest of this file")
     _yes(latency)
     choose = _command(

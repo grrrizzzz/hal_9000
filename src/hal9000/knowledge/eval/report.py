@@ -141,7 +141,8 @@ def render_report(
         f"Generated {when} by `hal9000 kb eval report {source}` from {len(runs)} run(s). "
         "Aggregate numbers only: this file contains no document or question text "
         "(docs/KNOWLEDGE_PLAN.md §8.6). Intervals are bootstrap 95% confidence intervals; "
-        "a difference counts only when a paired bootstrap excludes zero.",
+        "a difference counts only when a paired bootstrap excludes zero. "
+        "Correct counts partial answers as 0.5.",
         "",
         "## Summary by stage",
         "",

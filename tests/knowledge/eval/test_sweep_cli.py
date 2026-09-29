@@ -109,10 +109,29 @@ def test_sweep_judge_prep_s5_report_choose_and_test(cli, capsys, monkeypatch):
 
     s4 = [r for r in runs(settings, "S4") if r.config.get("k") is None]
     chosen = s4[-1].config["name"]
+    # the fake embedder's abstain scores don't separate (AUC < the grid's minimum): a stale
+    # threshold for this profile and reranker is removed and abstention moves to generation
+    assert s4[-1].config.get("abstain_threshold") is None
+    conn = open_db(settings.db_path)
+    try:
+        from hal9000.knowledge.index.profiles import get_profile
+        from hal9000.knowledge.retrieve.thresholds import get_threshold, set_threshold
+
+        profile_id = get_profile(conn, s4[-1].config["profile"]).id
+        set_threshold(conn, profile_id, s4[-1].config["reranker"], 0.5)
+    finally:
+        conn.close()
     capsys.readouterr()
     assert main(["kb", "eval", "choose", sweep, "--config", chosen, "--yes"]) == 0
     out = capsys.readouterr().out
     assert f"Chosen: {chosen}" in out
+    assert "abstention moves to the generation step (plan §8.5)" in out
+    assert "Restart hal-kb" in out
+    conn = open_db(settings.db_path)
+    try:
+        assert get_threshold(conn, profile_id, s4[-1].config["reranker"]) is None
+    finally:
+        conn.close()
     assert active(settings) == s4[-1].config["profile"]
     yaml_text = settings.yaml_path.read_text()
     assert f"active_profile: {s4[-1].config['profile']}" in yaml_text
@@ -131,7 +150,7 @@ def test_sweep_judge_prep_s5_report_choose_and_test(cli, capsys, monkeypatch):
     (test_run,) = runs(settings, "test")
     assert test_run.split == "test" and test_run.config["chat_tier"] == "fast"
     assert main(["kb", "eval", "test", sweep, "--config", chosen, "--yes"]) == 3
-    assert "already run on the test split" in capsys.readouterr().err
+    assert "already has a test-split run" in capsys.readouterr().err
     assert main(["kb", "eval", "test", sweep, "--config", "nope", "--yes"]) == 1
     assert main(["kb", "eval", "report", sweep]) == 0
     report = (settings.config_dir.parent / "docs" / "KNOWLEDGE_EVAL_REPORT.md").read_text()
@@ -177,3 +196,43 @@ def test_latency_command(cli, capsys):
     assert run.config["measured"]["end_to_end"] == 1
     assert main(["kb", "eval", "latency", "--profiles", "missing.x", "--yes"]) == 3
     assert "not built" in capsys.readouterr().err
+
+
+def test_choose_builds_a_profile_that_is_not_built(cli, capsys):
+    assert main(["kb", "eval", "sweep", "--stages", "S1a", "--yes"]) == 0
+    sweep = sweep_id_from(capsys.readouterr().out)
+    run = runs(cli, "S1a")[0]
+    conn = open_db(cli.db_path)
+    try:
+        with conn:
+            conn.execute(
+                "UPDATE profiles SET status = 'failed' WHERE name = ?", (run.config["profile"],)
+            )
+    finally:
+        conn.close()
+    assert main(["kb", "eval", "choose", sweep, "--config", run.config["name"], "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert "is not built: building it costs about $0.0000" in out
+    assert active(cli) == run.config["profile"]
+
+
+def test_regression_never_uses_a_query_transform(cli, monkeypatch, capsys):
+    import hal9000.llm
+    from hal9000.knowledge.retrieve import eval_binding
+    from hal9000.knowledge.retrieve.config import RetrievalConfig
+
+    monkeypatch.setattr(
+        RetrievalConfig, "from_settings", classmethod(lambda cls, s=None: cls(transform="hyde"))
+    )
+    bound = []
+    real = eval_binding.binding
+
+    def spy(*args, **kw):
+        bound.append(real(*args, **kw))
+        return bound[-1]
+
+    monkeypatch.setattr(eval_binding, "binding", spy)
+    assert main(["kb", "eval", "regression", "--yes"]) == 0
+    assert bound[0].retrieve.config.transform == "none"
+    assert hal9000.llm.generate_response.calls == 0  # no rewrite was generated
+    assert "regression (manual)" in capsys.readouterr().out

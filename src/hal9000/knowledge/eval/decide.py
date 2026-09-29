@@ -32,7 +32,7 @@ one is significantly more correct on the same configuration.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
 from hal9000 import config as hal_config
@@ -171,12 +171,15 @@ class Ranker:
     # ------------------------------------------------------------ ranking
     def rank(self, runs: Iterable[EvalRun], metric: str = "recall") -> list[Ranked]:
         """Every run, best first; runs without the metric come last (by ID)."""
+        return list(self._ranked(runs, metric))
+
+    def _ranked(self, runs: Iterable[EvalRun], metric: str = "recall") -> Iterator[Ranked]:
+        """The ranking, lazily: each placement costs one comparison per remaining run."""
         scored: list[tuple[EvalRun, float]] = []
         unscored: list[EvalRun] = []
         for run in runs:
             value = self.point(run, metric)
             (unscored.append(run) if value is None else scored.append((run, value)))
-        order: list[Ranked] = []
         remaining = sorted(scored, key=lambda p: _label(p[0]))
         while remaining:
             leader, _ = min(
@@ -194,10 +197,10 @@ class Ranker:
                 key=lambda p: (self.simplicity_key(p[0].config), -p[1], _label(p[0])),
             )
             tied = tuple(r.id for r, _ in contenders if r is not leader)
-            order.append(Ranked(pick, value, tied, over=leader.id if pick is not leader else None))
+            yield Ranked(pick, value, tied, over=leader.id if pick is not leader else None)
             remaining = [p for p in remaining if p[0] is not pick]
-        order.extend(Ranked(run, None) for run in sorted(unscored, key=lambda r: r.id))
-        return order
+        for run in sorted(unscored, key=lambda r: r.id):
+            yield Ranked(run, None)
 
     def top(
         self,
@@ -210,9 +213,9 @@ class Ranker:
         """The first ``n`` ranked runs (only the best run per ``distinct`` key, if given)."""
         chosen: list[EvalRun] = []
         seen: set = set()
-        for item in self.rank(runs, metric):
+        for item in self._ranked(runs, metric):  # stops as soon as n are chosen
             if item.value is None:
-                continue
+                break
             if distinct is not None:
                 key = distinct(item.run.config)
                 if key in seen:
@@ -358,15 +361,17 @@ def recommend(
     rec.chosen = candidate(winner)
     rec.config = dict(winner.config)
     value = f"{first.value:.3f}" if first.value is not None else "N/A"
-    rec.reasons.append(
-        f"highest budgeted recall @ {budget // 1000}k on dev: {rec.chosen.name} ({value})"
-    )
+    label = f"budgeted recall @ {budget // 1000}k on dev"
     if first.over is not None:
+        leader = next(r for r in eligible if r.id == first.over)
         rec.reasons.append(
-            f"it ties (paired bootstrap) with the point-estimate leader {first.over} and is the "
-            "simpler option (plan §8.6 order)"
+            f"{rec.chosen.name} ({label} {value}) ties by paired bootstrap with the highest "
+            f"{label}, {leader.config.get('name') or leader.id} ({ranker.point(leader):.3f}), "
+            "and is the simpler option (plan §8.6 order)"
         )
-    elif first.tied:
+    else:
+        rec.reasons.append(f"highest {label}: {rec.chosen.name} ({value})")
+    if first.over is None and first.tied:
         rec.reasons.append(
             f"{len(first.tied)} configuration(s) tie with it by paired bootstrap; it is also "
             "the simplest of them"

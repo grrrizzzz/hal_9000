@@ -48,7 +48,8 @@ def test_flags_parse_as_documented():
     args = parser.parse_args(["kb", "ingest", "x", "y"])
     assert args.paths == ["x", "y"] and args.collection is None and not args.no_llm
     args = parser.parse_args(["kb", "eval", "latency", "--profiles", "A"])
-    assert (args.n, args.end_to_end, args.ingest_test) == (200, 30, None)
+    # None: the S6 grid's replay and end_to_end (knowledge_eval.yaml) apply
+    assert (args.n, args.end_to_end, args.ingest_test, args.sweep) == (None, None, None, None)
 
 
 @pytest.mark.parametrize(
@@ -56,7 +57,7 @@ def test_flags_parse_as_documented():
     [
         ["kb", "ingest"],
         ["kb", "eval", "sweep"],
-        ["kb", "eval", "latency"],
+        ["kb", "eval", "test", "RUN"],
         ["kb", "gold", "export"],
     ],
 )

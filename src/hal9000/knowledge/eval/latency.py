@@ -1,31 +1,37 @@
-"""S6: latency on the Pi (plan §8.4, §15): ``hal9000 kb eval latency --profiles A,B,C``.
+"""S6: latency on the Pi (plan §8.4, §15): ``hal9000 kb eval latency``.
 
-For each profile (each must be built):
+**What is measured: configurations, not profiles.** By default the top
+``S6.top`` finalists of the latest sweep (``--sweep`` names another): each
+with every one of its settings (method, reranker, query transform), as S5
+answered with them. ``--configs`` names sweep configurations instead, and
+``--profiles`` means the finalists on those profiles (else the profile's best
+run in the sweep, else ``config/knowledge.yaml``'s retrieval settings). Each
+stored S6 run carries the full configuration, so the decision rule matches it
+to its finalist exactly.
 
-- **Configuration.** The best finished retrieval run (S1a-S4, no *k*) of that
-  profile gives the retrieval method, reranker and so on; without one, the
-  ``retrieval:`` block and ``reranker`` of ``config/knowledge.yaml``. Query
-  transforms are not replayed (they are LLM calls, not local work).
+Only **dev** questions are used, so the test split stays unseen until
+``kb eval test``.
+
 - **Local retrieval** (plan §1: search + fusion + rerank + select, excluding
-  the embedding call): ``--n`` questions replayed from the approved question
-  set (cycled), after every distinct question's embedding is cached, so each
-  timed retrieval hits the query-vector cache. Its time is the sum of the
-  top-level stages except ``condense`` and ``embed_query``, from the stage
-  timer. p50, p95 and p99 are recorded.
-- **End to end** (``--end-to-end M``, paid): M live answers through the chat
-  pipeline, timing the first streamed token (TTFT) and the whole answer.
+  the embedding call): ``--n`` (default ``S6.replay``) dev questions replayed,
+  cycled, after every distinct question's embedding is cached. Its time is the
+  sum of the top-level stages except ``condense`` and ``embed_query``. For a
+  query transform, the rewrite (an LLM call, not local work) is made once per
+  distinct question and reused, so the replay times the transform's real local
+  work (several searches and their fusion) without paying for every replay.
+- **End to end** (``--end-to-end M``, default ``S6.end_to_end``; paid): M live
+  answers through the chat pipeline, timing the first streamed token (TTFT)
+  and the whole answer.
 - **Scratch ingest** (``--ingest-test SHA``, paid): the stored original
-  ``data/knowledge/files/<SHA>`` ingested into a temporary data directory
-  with an empty embedding cache, into the first profile, timed from submit
-  to the finished job.
+  ``data/knowledge/files/<SHA>`` ingested into a temporary data directory with
+  an empty embedding cache, into the first configuration's profile, timed from
+  submit to the finished job.
 
 Everything paid is estimated first and needs ``--yes`` or a "y"; it is
-metered as ``knowledge-eval`` and capped by ``KB_EVAL_CAP_USD``. Each profile's
-result is an ``S6`` eval run with the host class (``pi`` on the Pi): its
-metrics are the source run's dev metrics with the local latency replaced
-(so the Pareto chart and the collector see a complete row), and the
-measurements (p99, TTFT, end to end, ingest time) are under
-``config["measured"]``.
+metered as ``knowledge-eval`` and capped by ``KB_EVAL_CAP_USD``. Each result is
+an ``S6`` eval run with the host class (``pi`` on the Pi): its metrics are its
+source run's dev metrics with the local latency replaced, and the
+measurements (p99, TTFT, end to end, ingest time) are under ``config["measured"]``.
 """
 
 from __future__ import annotations
@@ -47,14 +53,19 @@ from hal9000.knowledge.config import EVAL_AGENT, KnowledgeSettings
 from hal9000.knowledge.contracts import EvalMetrics, EvalRun, GoldItem, IndexProfile
 from hal9000.knowledge.eval.config import EvalConfig
 from hal9000.knowledge.eval.decide import RETRIEVAL_STAGES, Ranker
-from hal9000.knowledge.eval.runs import list_runs, record_run
+from hal9000.knowledge.eval.runs import record_run
 from hal9000.knowledge.eval.store import list_gold
 from hal9000.knowledge.eval.sweep import (
+    STAGES,
     SweepConfig,
     SweepDeps,
+    SweepSettings,
     config_answerer,
+    finalist_runs,
+    latest_sweep,
     load_sweep_settings,
     local_latency_ms,
+    sweep_runs,
 )
 
 __all__ = ["LatencyOutcome", "LatencyRunner", "percentiles", "source_run"]
@@ -66,16 +77,16 @@ def percentiles(values: Sequence[float], qs: Sequence[float] = (50, 95, 99)) -> 
     return [round(float(np.percentile(values, q)), 3) for q in qs]
 
 
-def source_run(conn: sqlite3.Connection, profile: str, ranker: Ranker) -> EvalRun | None:
-    """The best finished dev retrieval run (S1a-S4, no *k*) of ``profile``, if any."""
+def source_run(
+    conn: sqlite3.Connection, sweep_id: str | None, profile: str, ranker: Ranker
+) -> EvalRun | None:
+    """The best finished dev retrieval run (S1a-S4, no *k*) of ``profile`` in this sweep."""
+    if not sweep_id:
+        return None
     runs = [
         r
-        for r in list_runs(conn)
-        if r.finished_at is not None
-        and r.split == "dev"
-        and r.stage in RETRIEVAL_STAGES
-        and r.config.get("profile") == profile
-        and r.config.get("k") is None
+        for r in sweep_runs(conn, sweep_id, *RETRIEVAL_STAGES)
+        if r.split == "dev" and r.config.get("profile") == profile and r.config.get("k") is None
     ]
     best = ranker.top(runs, 1)
     return best[0] if best else None
@@ -97,6 +108,7 @@ class _Target:
     profile: IndexProfile
     config: SweepConfig
     source: EvalRun | None
+    sweep_id: str | None = None
     notes: list[str] = field(default_factory=list)
 
 
@@ -126,51 +138,80 @@ class LatencyRunner:
         self.confirm = confirm
         self.out = out or sys.stdout
         self.segment = segment
-        grid = eval_config.sweep and load_sweep_settings(eval_config)
-        self.budget = grid.decision_budget if grid else 2000
+        self.grid: SweepSettings | None = (
+            load_sweep_settings(eval_config) if eval_config.sweep else None
+        )
+        self.budget = self.grid.decision_budget if self.grid else 2000
 
     def say(self, message: str) -> None:
         print(message, file=self.out, flush=True)
 
     # ------------------------------------------------------------ planning
-    def _targets(self, names: Sequence[str]) -> list[_Target]:
+    def _targets(
+        self, sweep_id: str | None, profiles: Sequence[str], configs: Sequence[str]
+    ) -> list[_Target]:
         from hal9000.knowledge.config import load_knowledge_file
+        from hal9000.knowledge.eval.decide import find_run
         from hal9000.knowledge.index.profiles import get_profile, profile_status
 
         ranker = Ranker(self.scoring, budget=self.budget)
-        knowledge = load_knowledge_file(self.settings.yaml_path)
-        targets = []
-        for name in names:
+        top = self.grid.S6.top if self.grid else 3
+        finalists = finalist_runs(self.conn, sweep_id, ranker, top) if sweep_id else []
+        sources: list[EvalRun] = []
+        targets: list[_Target] = []
+        for name in configs:
+            run = find_run(sweep_runs(self.conn, sweep_id, *STAGES), name) if sweep_id else None
+            if run is None:
+                raise LatencyRefused(f"no configuration {name!r} in sweep {sweep_id}")
+            if run.config.get("k") is not None:
+                raise LatencyRefused(f"{name} is a k variant (T9), not a configuration")
+            sources.append(run)
+        for name in profiles:
+            own = [r for r in finalists if r.config.get("profile") == name]
+            best = own or [r for r in [source_run(self.conn, sweep_id, name, ranker)] if r]
+            if best:
+                sources.extend(best)
+                continue
             profile = get_profile(self.conn, name)
             if profile is None or profile_status(self.conn, name) != "ready":
                 raise LatencyRefused(
                     f"profile {name!r} is not built here; copy the Mac's knowledge.db, or "
                     "build it with `hal9000 kb profile activate`"
                 )
-            source = source_run(self.conn, name, ranker)
-            notes = []
-            if source is not None:
-                config = SweepConfig.from_run_config(source.config)
-            else:
-                r = knowledge.retrieval
-                config = SweepConfig.from_profile(
-                    profile,
-                    retrieval=r.method,
-                    alpha=r.weighted_alpha if r.method == "weighted" else None,
-                    reranker=knowledge.reranker or "none",
+            knowledge = load_knowledge_file(self.settings.yaml_path)
+            r = knowledge.retrieval
+            config = SweepConfig.from_profile(
+                profile,
+                retrieval=r.method,
+                alpha=r.weighted_alpha if r.method == "weighted" else None,
+                reranker=knowledge.reranker or "none",
+                query_transform=r.transform,
+            )
+            note = "not in the sweep: config/knowledge.yaml retrieval"
+            targets.append(_Target(profile, config, None, None, [note]))
+        if not configs and not profiles:
+            if not finalists:
+                raise LatencyRefused(
+                    "no finalists to measure: run the sweep through S4 (or name --configs or "
+                    "--profiles)"
                 )
-                notes.append("no sweep run for this profile: config/knowledge.yaml retrieval")
-            if config.query_transform != "none":
-                notes.append(f"query transform {config.query_transform} not replayed")
-            config = replace(config, query_transform="none", k=None, repeat=0)
-            targets.append(_Target(profile, config, source, notes))
-        return targets
+            sources = finalists
+        for run in sources:
+            config = replace(SweepConfig.from_run_config(run.config), k=None, repeat=0)
+            profile = get_profile(self.conn, config.profile_name)
+            if profile is None or profile_status(self.conn, config.profile_name) != "ready":
+                raise LatencyRefused(f"profile {config.profile_name!r} is not built here")
+            targets.append(_Target(profile, config, run, run.config.get("sweep_id")))
+        unique: dict[str, _Target] = {}
+        for target in targets:
+            unique.setdefault(target.config.name, target)
+        return list(unique.values())
 
     def _questions(self, n: int) -> tuple[list[GoldItem], list[GoldItem]]:
-        """(the n replayed items, cycled; the distinct items)."""
-        items = list_gold(self.conn, status="approved")
+        """(the n replayed dev items, cycled; the distinct dev items). Never the test split."""
+        items = list_gold(self.conn, status="approved", split="dev")
         if not items:
-            raise LatencyRefused("no approved questions to replay: review the question set first")
+            raise LatencyRefused("no approved dev questions to replay: review the question set")
         replay = [items[i % len(items)] for i in range(n)]
         return replay, items
 
@@ -187,18 +228,26 @@ class LatencyRunner:
             tokens, cost = service.estimate(questions, model, dims)
             usd += cost
             lines.append(f"query embeddings: ~{tokens:,} uncached tokens with {model}-{dims}")
-        if end_to_end:
-            e = self.eval_config.judge.estimate
-            for target in targets:
-                tier = target.config.chat_tier or self.settings.chat_tier
+        cfg = self.grid.estimate if self.grid else None
+        for target in targets:
+            transform = target.config.query_transform
+            if transform != "none" and cfg is not None:
+                output = cfg.multi_output_tokens if transform == "multi" else cfg.hyde_output_tokens
+                n = len(distinct)
                 cost = estimate_cost(
-                    end_to_end,
-                    end_to_end * e.answer_prompt_tokens,
-                    end_to_end * e.answer_output_tokens,
-                    tier,
+                    n, n * cfg.transform_prompt_tokens, n * output, self.settings.condense_tier
                 )
                 usd += cost.usd
-                lines.append(f"{target.profile.name}: {end_to_end} live answers, {cost.describe()}")
+                lines.append(f"{target.config.name}: {transform} rewrites once per dev question, "
+                             f"{cost.describe()}")  # fmt: skip
+        if end_to_end:
+            from hal9000.knowledge.eval.judge import estimate_answers
+
+            for target in targets:
+                tier = target.config.chat_tier or self.settings.chat_tier
+                cost = estimate_answers(end_to_end, self.eval_config.judge, tier)
+                usd += cost.usd
+                lines.append(f"{target.config.name}: {end_to_end} live answers, {cost.describe()}")
         if ingest_sha:
             cost, line = self._ingest_estimate(targets[0].profile, ingest_sha)
             usd += cost
@@ -314,6 +363,7 @@ class LatencyRunner:
             self.settings,
             meter=self.meter,
             run=SimpleNamespace(config=config.retrieval_overrides()),
+            generate=self._memo_generate() if config.query_transform != "none" else None,
             embed_fn=self.deps.embed_fn,
             reranker=self.deps.reranker(config.reranker) if config.reranker != "none" else None,
         )
@@ -328,6 +378,27 @@ class LatencyRunner:
             latencies.append(ms)
             per_item.setdefault(item.id, []).append(ms)
         return latencies, per_item
+
+    def _memo_generate(self) -> Callable[..., str]:
+        """The metered generate, called once per distinct prompt (a transform's rewrite)."""
+        import json
+
+        fn = self.deps.generate_response
+        if fn is None:
+            from hal9000 import config as hal_config
+
+            hal_config.require_llm_key()
+            from hal9000.llm import generate_response as fn
+        metered = self.meter.wrap(fn, EVAL_AGENT)
+        cache: dict[str, str] = {}
+
+        def generate(prompt, tier="fast") -> str:
+            key = json.dumps([prompt.messages, tier], sort_keys=True, default=str)
+            if key not in cache:
+                cache[key] = metered(prompt, tier)
+            return cache[key]
+
+        return generate
 
     def _end_to_end(
         self, target: _Target, items: Sequence[GoldItem]
@@ -358,26 +429,30 @@ class LatencyRunner:
     # ------------------------------------------------------------ entry
     def run(
         self,
-        profiles: Sequence[str],
         *,
-        n: int = 200,
-        end_to_end: int = 30,
+        sweep_id: str | None = None,
+        profiles: Sequence[str] = (),
+        configs: Sequence[str] = (),
+        n: int | None = None,
+        end_to_end: int | None = None,
         ingest_sha: str | None = None,
     ) -> LatencyOutcome:
         from hal9000.knowledge.eval.runs import host_class, new_run_id
 
+        s6 = self.grid.S6 if self.grid else None
+        n = n if n is not None else (s6.replay if s6 else 200)
+        end_to_end = end_to_end if end_to_end is not None else (s6.end_to_end if s6 else 30)
         try:
-            if not profiles:
-                raise LatencyRefused("name at least one profile (--profiles A,B,C)")
             if n < 1 or end_to_end < 0:
                 raise LatencyRefused("--n must be >= 1 and --end-to-end >= 0")
-            targets = self._targets(profiles)
+            sweep_id = sweep_id or latest_sweep(self.conn)
+            targets = self._targets(sweep_id, profiles, configs)
             replay, distinct = self._questions(n)
             live = [distinct[i % len(distinct)] for i in range(end_to_end)]
             usd, lines = self._estimate(targets, distinct, end_to_end, ingest_sha)
             host = host_class()
             self.say(
-                f"S6 latency on this host ({host}): {len(targets)} profile(s), {n} replayed "
+                f"S6 latency on this host ({host}): {len(targets)} configuration(s), {n} replayed "
                 f"retrievals each, {end_to_end} live answers each"
                 + (f", scratch ingest of {ingest_sha[:12]}" if ingest_sha else "")
                 + "."
@@ -425,7 +500,7 @@ class LatencyRunner:
                                    self.meter.spent - spent, host)  # fmt: skip
                 outcome.runs.append(run)
                 self.say(
-                    f"  {target.profile.name}: local p50/p95/p99 {p50}/{p95}/{p99} ms"
+                    f"  {target.config.name}: local p50/p95/p99 {p50}/{p95}/{p99} ms"
                     + (
                         f"; TTFT p95 {measured['ttft_p95_ms']} ms, end to end p95 "
                         f"{measured['e2e_p95_ms']} ms"
@@ -442,7 +517,7 @@ class LatencyRunner:
                     self.say(f"    note: {note}")
         except BudgetExceeded as error:
             outcome.status = "stopped"
-            outcome.message = f"STOPPED at the cost cap: {error} (finished profiles are kept)"
+            outcome.message = f"STOPPED at the cost cap: {error} (finished configurations are kept)"
         except LatencyRefused as refused:
             outcome.status = "refused"
             outcome.message = str(refused)
@@ -450,8 +525,7 @@ class LatencyRunner:
 
     def _record(self, target, batch, number, measured, per_item, distinct, e2e_cost, cost, host):
         source = target.source
-        sweep_id = source.config.get("sweep_id") if source else None
-        config = target.config.run_config(stage="S6", sweep_id=sweep_id)
+        config = target.config.run_config(stage="S6", sweep_id=target.sweep_id)
         config.update({"measured": measured, "notes": target.notes})
         if source is not None:
             config["source_run"] = source.id
