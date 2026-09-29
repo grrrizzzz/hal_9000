@@ -388,6 +388,12 @@ def test_library_lists_documents_with_collections_and_details(signed):
     assert signed.get("/api/documents/99999").status_code == 404
 
 
+def test_seeded_documents_keep_their_labels_but_are_not_marked_edited(signed):
+    doc = _document(signed, "Invoice 1001")["document"]
+    assert doc["doc_type"] == "invoice" and doc["meta_source"] == "auto"
+    assert {d["document"]["meta_source"] for d in signed.get("/api/documents").json()} == {"auto"}
+
+
 def test_a_metadata_edit_wins_and_survives_re_ingestion(api: Api, signed):
     doc = _document(signed, "Invoice 1001")["document"]
     patched = signed.patch(
