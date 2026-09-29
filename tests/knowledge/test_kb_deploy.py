@@ -155,7 +155,7 @@ def test_hal_kb_reads_env_file_and_mounts_data_read_write(services):
     source, mode = _mount_for(hal, "/app/data")
     assert _resolve(source) == REPO / "data" and mode == "rw"
     source, mode = _mount_for(hal, "/app/config")
-    assert _resolve(source) == REPO / "config" and mode == "ro"
+    assert _resolve(source) == REPO / "config"  # read-write: `kb eval choose` writes it
     assert hal["environment"]["KB_DATA_DIR"] == hal["environment"]["HAL_DATA_DIR"] == "/app/data"
 
 

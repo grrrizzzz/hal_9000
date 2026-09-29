@@ -48,9 +48,10 @@ services:
       KB_DATA_DIR: /app/data
     volumes:
       - ../../data:/app/data
-      # config/knowledge.yaml (the chosen profile, after G-K2) is read from the
-      # checkout, so a `git pull` and a restart apply it without a rebuild
-      - ../../config:/app/config:ro
+      # config/ is the checkout's: a `git pull` and a restart apply a changed
+      # config/knowledge.yaml without a rebuild, and `kb eval choose` (G-K2)
+      # can write it (then commit it)
+      - ../../config:/app/config
     ports:
       - "${KB_PORT:-8910}:8910"
     mem_limit: 2g
