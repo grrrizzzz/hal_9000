@@ -22,11 +22,11 @@
         "type": "textbox",
         "name": "kb_url",
         "label": "hal-kb URL",
-        "description": "Base URL of the knowledge web app, for the Query Inspector links.",
-        "query": "http://localhost:8910",
+        "description": "Base URL of the knowledge web app, for the Query Inspector links. Override with ?var-kb_url=http://<pi-address>:8910 in the dashboard link.",
+        "query": "http://hal-kb.local:8910",
         "current": {
-          "text": "http://localhost:8910",
-          "value": "http://localhost:8910"
+          "text": "http://hal-kb.local:8910",
+          "value": "http://hal-kb.local:8910"
         },
         "hide": 0
       }
@@ -1072,7 +1072,7 @@
     {
       "type": "table",
       "title": "Latest 50 traces",
-      "description": "No question text. Click an ID for the Query Inspector (set the kb_url variable to where hal-kb is reachable).",
+      "description": "No question text. Click an ID for the Query Inspector. Links go to the kb_url variable (default http://hal-kb.local:8910; override with ?var-kb_url=...).",
       "datasource": {
         "type": "frser-sqlite-datasource",
         "uid": "kb-sqlite"

@@ -272,7 +272,9 @@ def test_the_traces_table_panel_shows_the_plan_columns(kb_db):
         if prop["id"] == "links"
     ]
     assert links == ["${kb_url}/traces/${__value.raw}"]
-    assert any(v["name"] == "kb_url" for v in live["templating"]["list"])
+    kb_url = next(v for v in live["templating"]["list"] if v["name"] == "kb_url")
+    assert kb_url["query"] == kb_url["current"]["value"] == "http://hal-kb.local:8910"
+    assert "?var-kb_url=" in kb_url["description"]
 
 
 # ------------------------------------------------------------------ alert rules
@@ -341,7 +343,8 @@ def test_datasources_open_knowledge_db_read_only_and_match_the_dashboards():
     sqlite = by_uid[SQL_UID]
     assert sqlite["type"] == "frser-sqlite-datasource"
     assert sqlite["jsonData"]["path"] == "/data/knowledge.db"
-    assert "mode=ro" in sqlite["jsonData"]["pathOptions"]
+    assert sqlite["jsonData"]["pathOptions"] == "mode=ro"
+    assert sqlite["jsonData"]["pathPrefix"] == "file:"
     assert by_uid[PROM_UID]["url"] == "http://prometheus:9090"
     used = {uid for _, uid, _ in _targets()}
     assert used <= set(by_uid)
@@ -352,7 +355,10 @@ def test_anonymous_access_is_off():
     ini.read(GRAFANA / "grafana.ini")
     assert ini.getboolean("auth.anonymous", "enabled") is False
     assert ini.getboolean("users", "allow_sign_up") is False
-    assert "frser-sqlite-datasource" in ini.get("plugins", "preinstall")
+    assert re.fullmatch(
+        r"frser-sqlite-datasource@\d+\.\d+\.\d+", ini.get("plugins", "preinstall_sync")
+    )
+    assert not ini.has_option("plugins", "preinstall")
     assert ini.get("server", "http_port") == "3001"
     assert not ini.has_option("security", "admin_password")  # it comes from .env
 
