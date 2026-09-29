@@ -109,7 +109,7 @@ def test_no_index_is_reported_as_not_wired(conn, tmp_path):
         binding(conn, settings(), meter=None, run=run_with(profile="missing"))
     empty = open_db(tmp_path / "empty.db")
     try:
-        with pytest.raises(NotWired, match="retrieval is not available yet"):
+        with pytest.raises(NotWired, match="^no index to search: ingest documents first$"):
             binding(empty, settings(), meter=None)
     finally:
         empty.close()

@@ -9,7 +9,8 @@ reranker score, never RRF) and the decision, and the local latency.
 - **Metering** (rule K9): query embeddings go through an
   :class:`EmbeddingService` with ``agent="knowledge-eval"`` and the command's
   meter; the multi-query and HyDE rewrites through ``meter.wrap(...,
-  "knowledge-eval")`` on the fast tier. A paid call without a meter is refused.
+  "knowledge-eval")`` on the configured condense tier (``KB_CONDENSE_TIER``,
+  fast by default). A paid call without a meter is refused.
 - **Configuration**: ``config/knowledge.yaml``'s retrieval block, overridden by
   the run's ``config`` (an :class:`~hal9000.knowledge.contracts.EvalRun`):
   its ``profile`` names the index profile, and its retrieval keys
@@ -105,7 +106,7 @@ def binding(
     """Retrieval over the run's profile (or the active one), metered as ``knowledge-eval``.
 
     ``generate``, ``embed_fn`` and ``reranker`` are injectable for offline tests;
-    by default they are the metered fast tier, the configured embedding
+    by default they are the metered condense tier, the configured embedding
     provider and the configured cross-encoder.
     """
     overrides = _run_config(run)
@@ -134,14 +135,14 @@ def binding(
         reranker=reranker,
         config=config,
         profile=overrides.get("profile") or None,
+        tier=getattr(settings, "condense_tier", None),
     )
     try:
         profile = retriever.resolve_profile()
     except NoActiveProfile as error:  # no index to retrieve from: the harness says so
-        # the wording extends eval.wiring's own NotWired message, which KWP5's CLI tests match
-        raise NotWired(
-            f"retrieval is not available yet (KWP4 retrieval has no index to search: {error})"
-        ) from error
+        missing = overrides.get("profile")
+        detail = f"no index profile named {missing!r}" if missing else "ingest documents first"
+        raise NotWired(f"no index to search: {detail}") from error
     retriever.profile = profile
     return RetrievalBinding(
         retrieve=EvalRetrieve(retriever, config),

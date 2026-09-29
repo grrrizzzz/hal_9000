@@ -234,8 +234,9 @@ def test_eval_regression_needs_retrieval_then_writes_a_row(env, capsys):
     assert main(["kb", "eval", "regression", "--yes"]) == 1
     assert "no approved answerable questions" in capsys.readouterr().err
     _approve_facts(env)
-    assert main(["kb", "eval", "regression", "--yes"]) == 1
-    assert "retrieval is not available yet (KWP4" in capsys.readouterr().err
+    assert main(["kb", "eval", "regression", "--yes"]) == 1  # NotWired: no retrieval to run
+    err = capsys.readouterr().err
+    assert "retrieval is not available yet" in err or "no index to search" in err
     seen = {}
 
     def factory(conn, settings, *, meter, run):
@@ -311,7 +312,8 @@ def test_judge_prep_and_regression_respect_the_eval_cap(
 def test_gold_generate_needs_the_real_retriever_unless_allowed(env, provider, capsys):
     assert main(["kb", "gold", "generate", "--yes"]) == 1
     err = capsys.readouterr().err
-    assert "retrieval is not available yet" in err and "--allow-keyword-check" in err
+    assert "--allow-keyword-check" in err  # NotWired: KWP4 absent, or no index built yet
+    assert "retrieval is not available yet" in err or "no index to search" in err
     assert provider.calls == 0
     seen = {}
 
