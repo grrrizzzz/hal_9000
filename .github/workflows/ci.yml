@@ -36,8 +36,13 @@ jobs:
         with:
           enable-cache: true
 
+      # The knowledge base's groups are needed too: the suite imports every
+      # hal9000 module and coverage counts them. Docling and fastembed are
+      # left out (their tests are `models`-marked and run on the Mac).
       - name: Sync dependencies
-        run: uv sync --all-extras --dev --python ${{ matrix.python-version }}
+        run: >-
+          uv sync --all-extras --all-groups --no-group knowledge-docling
+          --no-group knowledge-rerank --python ${{ matrix.python-version }}
 
       - name: Show the interpreter under test
         run: uv run python -c "import sys; print(sys.version)"

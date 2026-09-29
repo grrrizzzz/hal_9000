@@ -1,0 +1,31 @@
+# House knowledge base settings (docs/KNOWLEDGE_PLAN.md §6.2, §7).
+# Secrets, caps, the port and the embedding model are in .env (KB_*); model
+# names and prices are in src/hal9000/config.py. Unknown keys are rejected.
+
+# The one index profile that serves the chat. Chosen at gate G-K2 from the
+# setup evaluation; until then, null (the chat refuses with a clear message).
+active_profile: null
+# Cross-encoder reranker, or null for none (chosen at G-K2).
+reranker: null
+
+retrieval:                  # plan §7.1 starting values; the evaluation tunes them
+  method: rrf               # dense | bm25 | rrf | weighted
+  rrf_k: 60
+  weighted_alpha: null      # set only for method: weighted
+  top_k_vector: 30
+  top_k_bm25: 30
+  context_budget_tokens: 2000
+  history_turns: 6          # turns used to condense a follow-up
+
+answer:                     # plan §7.4
+  max_output_tokens: null   # null: the chat tier's default (AGENT_MAX_TOKENS)
+  wall_clock_seconds: 90
+  questions_per_minute: 20  # per session
+
+ingest:                     # plan §5
+  max_upload_bytes: 104857600   # 100 MB
+  parse_timeout_seconds: 300
+  header_repeat_fraction: 0.30  # a line on >= 30% of pages is a running header
+  pseudo_page_chars: 3000       # DOCX/HTML/MD/TXT without headings
+
+trace_retention_days: 180
