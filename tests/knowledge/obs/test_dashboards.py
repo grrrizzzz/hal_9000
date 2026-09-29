@@ -448,4 +448,8 @@ def test_the_pi_verification_steps_match_the_provisioning():
         assert f"`{_load(path)['title']}`" in text
     assert "folderUIDs=kb" in text and "d/kb-live?var-kb_url=" in text
     assert len(_rules()) == 4 and "four rules" in text
-    assert "promtool" in text and "./data:/data:ro" in text
+    assert "promtool" in text and "./data:/data:ro" in text and "uid 472" in text
+    # as KWP11's compose runs it: .env's GRAFANA_ADMIN_PASSWORD becomes GF_SECURITY_...
+    assert 'C="docker compose --env-file .env -f deploy/docker/compose.knowledge.yaml"' in text
+    assert "grep '^GRAFANA_ADMIN_PASSWORD=' .env" in text
+    assert "while `hal-kb` is stopped, the SQLite\npanels" in text

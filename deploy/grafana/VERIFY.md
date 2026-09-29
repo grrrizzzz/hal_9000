@@ -25,22 +25,27 @@ asked for. Never paste question text, answers or document names.
 - `grafana`: `deploy/grafana/grafana.ini` at `/etc/grafana/grafana.ini`,
   `deploy/grafana/provisioning` at `/etc/grafana/provisioning`,
   `deploy/grafana/dashboards` at `/etc/grafana/dashboards`, and `./data` at
-  `/data` **read-only** (`./data:/data:ro`). `GF_SECURITY_ADMIN_PASSWORD` comes
-  from `.env`.
+  `/data` **read-only** (`./data:/data:ro`), running as Grafana's default user
+  (uid 472). `.env` holds `GRAFANA_ADMIN_PASSWORD`, which compose passes to
+  Grafana as `GF_SECURITY_ADMIN_PASSWORD`.
 
 Why read-only: `knowledge.db` is in WAL mode. While `hal-kb` runs, its job
 worker keeps a connection open, so `knowledge.db-wal` and `-shm` exist and a
 read-only reader sees every row. With a read-write mount, a Grafana query made
 while `hal-kb` is stopped would create those two files as Grafana's user (uid
 472), and `hal-kb` could not write to its database when it started again.
+The price of the read-only mount: **while `hal-kb` is stopped, the SQLite
+panels (traces, failed jobs, regression and evaluation runs) show an error**
+("attempt to write a readonly database"), and they recover by themselves once
+it runs again. The Prometheus panels are unaffected.
 
 ## 0. Set up the shell
 
 From the repository root on the Pi:
 
 ```sh
-C="docker compose -f deploy/docker/compose.knowledge.yaml"
-PW=$(grep '^GF_SECURITY_ADMIN_PASSWORD=' .env | cut -d= -f2-)
+C="docker compose --env-file .env -f deploy/docker/compose.knowledge.yaml"
+PW=$(grep '^GRAFANA_ADMIN_PASSWORD=' .env | cut -d= -f2-)
 G="http://localhost:3001"
 ```
 
@@ -179,8 +184,9 @@ message arrives.
 
 ## If a step fails
 
-- Datasource `kb-sqlite` reports `attempt to write a readonly database`:
-  `hal-kb` isn't running (step 2), so there are no `-wal`/`-shm` files.
+- Datasource `kb-sqlite` or a SQLite panel reports `attempt to write a
+  readonly database`: `hal-kb` isn't running (step 2), so there are no
+  `-wal`/`-shm` files. Expected while it is stopped; start it.
 - `unable to open database file`: uid 472 can't read `data/` or
   `data/knowledge.db`. Make both readable by others (`chmod o+rx data`,
   `chmod o+r data/knowledge.db*`).
