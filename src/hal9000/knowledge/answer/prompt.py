@@ -122,6 +122,7 @@ class NumberedSource:
             title=doc.title,
             vendor=doc.vendor,
             doc_date=doc.doc_date,
+            pages=tuple(range(self.page_start, self.page_end + 1)),
         )
 
 

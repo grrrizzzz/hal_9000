@@ -32,7 +32,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Literal
 
-from hal9000.solar.domain.numerals import extract_numerals
+from hal9000.solar.domain.numerals import UNIT_MONEY, extract_numerals
 
 __all__ = [
     "Issue",
@@ -51,9 +51,14 @@ MONTH_NAMES = (
     "January February March April May June July August September October November December"
 ).split()
 
-#: ``[S1]``, ``[S1][S2]`` (two groups) and ``[S1, S3]`` (one group).
-_GROUP = re.compile(r"\[\s*(S\d+(?:\s*[,;]\s*S\d+)*)\s*\]")
-_MARKER = re.compile(r"S(\d+)")
+#: ``[S1]``, ``[S1][S2]`` (two groups), ``[S1, S3]`` and ranges ``[S1-S3]`` / ``[S1–3]``.
+_ITEM = r"S\d+(?:\s*[-–—]\s*S?\d+)?"
+_GROUP = re.compile(rf"\[\s*({_ITEM}(?:\s*[,;]\s*{_ITEM})*)\s*\]")
+_MARKER = re.compile(r"S(\d+)(?:\s*[-–—]\s*S?(\d+))?")
+#: a range wider than this is read as its two ends only
+_MAX_RANGE = 50
+#: "1st", "2nd", "23rd": ordinals are positions, not figures
+_ORDINAL = re.compile(r"\b\d+(?:st|nd|rd|th)\b", re.I)
 
 
 @dataclass(frozen=True)
@@ -66,6 +71,8 @@ class SourceFacts:
     title: str = ""
     vendor: str | None = None
     doc_date: date | None = None
+    #: the pages the source's text comes from ("page 41" is backed by them)
+    pages: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -85,8 +92,11 @@ class Verification:
         return not self.issues
 
     @property
-    def grounding(self) -> Literal["verified", "failed"]:
-        return "verified" if self.ok else "failed"
+    def grounding(self) -> Literal["verified", "failed", "skipped"]:
+        """``skipped`` for an answer that cites nothing and states no figure."""
+        if not self.ok:
+            return "failed"
+        return "verified" if self.cited else "skipped"
 
     @property
     def kinds(self) -> set[str]:
@@ -102,8 +112,15 @@ def cited_markers(text: str) -> list[str]:
     """Every ``S#`` the text cites, in order of first use, without duplicates."""
     seen: dict[str, None] = {}
     for group in _GROUP.finditer(text):
-        for number in _MARKER.finditer(group.group(1)):
-            seen.setdefault(f"S{int(number.group(1))}", None)
+        for item in _MARKER.finditer(group.group(1)):
+            low = int(item.group(1))
+            high = int(item.group(2)) if item.group(2) else low
+            if high < low or high - low > _MAX_RANGE:
+                numbers = [low, high]
+            else:
+                numbers = list(range(low, high + 1))
+            for number in numbers:
+                seen.setdefault(f"S{number}", None)
     return list(seen)
 
 
@@ -180,27 +197,53 @@ def _matches(claim: DateClaim, known: DateClaim) -> bool:
 # ------------------------------------------------------------------ figures
 @dataclass
 class _Facts:
-    """The normalized contents of a text: figure values and dates."""
+    """The normalized contents of a text: figure values, money values and dates."""
 
     values: set[Decimal] = field(default_factory=set)
+    money: set[Decimal] = field(default_factory=set)
     dates: list[DateClaim] = field(default_factory=list)
 
 
-def _figures(text: str) -> tuple[list[tuple[str, Decimal]], list[tuple[str, DateClaim]]]:
+@dataclass(frozen=True)
+class _Figure:
+    text: str
+    value: Decimal
+    money: bool
+    spelled: bool
+
+
+def _figures(text: str) -> tuple[list[_Figure], list[tuple[str, DateClaim]]]:
     masked, dates = _dates(text)
     masked = _DURATION.sub(r"\1  \2", masked)
-    figures = [(numeral.text, numeral.value) for numeral in extract_numerals(masked)]
+    figures = [
+        _Figure(
+            numeral.text,
+            numeral.value,
+            numeral.unit == UNIT_MONEY,
+            not any(ch.isdigit() for ch in numeral.text),
+        )
+        for numeral in extract_numerals(masked)
+    ]
     return figures, dates
 
 
 def _facts(text: str) -> _Facts:
     figures, dates = _figures(text)
-    facts = _Facts(values={value for _, value in figures}, dates=[claim for _, claim in dates])
+    facts = _Facts(
+        values={f.value for f in figures},
+        money={f.value for f in figures if f.money},
+        dates=[claim for _, claim in dates],
+    )
     for year, _month, day in facts.dates:  # "in 2023" is backed by "June 22, 2023"
         for part in (year, day):
             if part is not None:
-                facts.values.add(Decimal(part))
+                facts.values.add(Decimal(part))  # never money: "$2,023" is not a year
     return facts
+
+
+def _exempt(figure: _Figure) -> bool:
+    """A spelled-out count up to ten with no unit ("two issues") isn't a quoted figure."""
+    return figure.spelled and not figure.money and Decimal(1) <= figure.value <= Decimal(10)
 
 
 def _date_strings(when: date) -> list[str]:
@@ -218,6 +261,7 @@ def haystack(source: SourceFacts) -> str:
     parts = [source.text, source.header, source.title, source.vendor or ""]
     if source.doc_date is not None:
         parts.extend(_date_strings(source.doc_date))
+    parts.extend(f"page {page}" for page in source.pages)
     return "\n".join(part for part in parts if part)
 
 
@@ -247,13 +291,18 @@ def verify_answer(answer: str, sources: Sequence[SourceFacts]) -> Verification:
     for marker in valid:
         found = _facts(haystack(by_marker[marker]))
         facts.values |= found.values
+        facts.money |= found.money
         facts.dates.extend(found.dates)
 
-    figures, dates = _figures(strip_markers(answer))
+    stated = _ORDINAL.sub(lambda m: " " * len(m.group(0)), strip_markers(answer))
+    figures, dates = _figures(stated)
     where = _cited_list(valid)
-    for written, value in figures:
-        if value not in facts.values:
-            add("numeral", _unbacked(written, where))
+    for figure in figures:
+        if _exempt(figure):
+            continue
+        backing = facts.money if figure.money else facts.values
+        if figure.value not in backing:
+            add("numeral", _unbacked(figure.text, where))
     for written, claim in dates:
         if not any(_matches(claim, known) for known in facts.dates):
             add("numeral", _unbacked(written, where))
