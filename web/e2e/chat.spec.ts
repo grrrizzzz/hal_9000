@@ -50,16 +50,28 @@ test("answers stream in, and [S1] opens the viewer at the cited page with a high
 
 test("a forced reset shows only the regenerated answer", async ({ page }) => {
   const snapshots = await recordAnswerText(page);
+  const chat = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/chat" && r.request().method() === "POST");
   await ask(page, QUESTIONS.reset);
   const answer = page.getByTestId("assistant-message");
   await expect(answer).toContainText("$1,234.00");
   await expect(answer).not.toContainText("$1,324.00");
+
+  // The server streamed a draft with the wrong figure, then `reset`, then the regenerated answer.
+  const events = (await (await chat).text())
+    .split("\n")
+    .filter((l) => l.startsWith("data:"))
+    .map((l) => JSON.parse(l.slice(5)) as { event: string; text?: string });
+  const reset = events.findIndex((e) => e.event === "reset");
+  expect(reset).toBeGreaterThan(0);
+  expect(events.slice(0, reset).filter((e) => e.event === "token").map((e) => e.text).join("")).toContain("1,324");
+  expect(events.slice(reset).filter((e) => e.event === "token").map((e) => e.text).join("")).toContain("1,234.00");
+
+  // On screen, once the regenerated answer began, none of the draft remained. (What was
+  // painted while streaming depends on timing: events that arrive in one network read
+  // render once, so the draft, or the regenerated stream, may never be painted mid-way.)
   const seen = await snapshots();
-  const firstRegenerated = seen.findIndex((s) => s.includes("Invoice"));
-  // The first draft did stream, and once the regeneration began none of it remained.
-  expect(seen.slice(0, Math.max(firstRegenerated, 0)).some((s) => s.includes("1,324"))).toBe(true);
-  expect(firstRegenerated).toBeGreaterThan(0);
-  expect(seen.slice(firstRegenerated).some((s) => s.includes("1,324"))).toBe(false);
+  const firstRegenerated = seen.findIndex((s) => s.includes("1,234"));
+  if (firstRegenerated >= 0) expect(seen.slice(firstRegenerated).some((s) => s.includes("1,324"))).toBe(false);
 });
 
 test("thumbs down with a comment, then add the answer to the question set", async ({ page }) => {

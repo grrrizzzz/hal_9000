@@ -189,7 +189,7 @@ export function GoldReview() {
           <Card className="max-h-64 overflow-auto lg:max-h-[70dvh]">
             <ol aria-label="Questions" className="divide-y divide-border">
               {items.map((it, i) => (
-                <li key={it.id}>
+                <li key={it.id} data-gold-id={it.id}>
                   <button
                     type="button"
                     onClick={() => setSelectedId(it.id ?? null)}
@@ -282,7 +282,7 @@ function ReviewCard({
   onAddEvidence: () => void;
 }) {
   return (
-    <Card className="min-w-0" data-testid="review-card" data-status={item.status}>
+    <Card className="min-w-0" data-testid="review-card" data-status={item.status} data-gold-id={item.id}>
       <div className="flex items-center justify-between gap-2 border-b border-border px-5 py-2.5 text-xs text-muted-foreground">
         <span className="tabular">{position}</span>
         <div className="flex items-center gap-1">

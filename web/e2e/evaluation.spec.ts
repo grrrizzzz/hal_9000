@@ -9,19 +9,24 @@ test("approve a gold item with the keyboard", async ({ page }) => {
   const question = page.getByTestId("review-question");
   await expect(question).toBeVisible();
   const first = (await question.textContent())!;
+  // Tracked by id: on a real server other tests (or runs) can add a draft with the same question.
+  const id = (await page.getByTestId("review-card").getAttribute("data-gold-id"))!;
+  const inList = page.getByRole("list", { name: "Questions" }).locator(`li[data-gold-id="${id}"]`);
 
   // J/K move through the queue.
   await page.keyboard.press("j");
   await expect(question).not.toHaveText(first);
   await page.keyboard.press("k");
   await expect(question).toHaveText(first);
+  await expect(page.getByTestId("review-card")).toHaveAttribute("data-gold-id", id);
 
   await page.keyboard.press("a");
   await expect(page.getByTestId("review-flash")).toContainText(`Approved: “${first}”`);
-  await expect(page.getByRole("list", { name: "Questions" }).getByText(first)).toHaveCount(0);
+  await expect(inList).toHaveCount(0);
 
   await page.getByRole("radio", { name: "Approved" }).click();
-  await expect(page.getByRole("list", { name: "Questions" }).getByText(first)).toBeVisible();
+  await expect(inList).toBeVisible();
+  await expect(inList).toContainText(first);
 });
 
 test("label an answer on the Judge calibration tab", async ({ page }) => {

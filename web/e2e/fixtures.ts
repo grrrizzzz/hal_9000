@@ -44,13 +44,17 @@ export const RUN = `${Date.now().toString(36)}-${Math.random().toString(36).slic
 const tinyPdf = syntheticPdf(["Synthetic inspection summary", "Property: 12 Example Lane, Testville", "The roof covering is in fair condition.", `Fixture run ${RUN}`]);
 const tinyJpg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 0xff, 0xd9]);
 
-/** A nested folder of 6 indexable fixture files plus 2 images (handoff KWP6/KWP7). */
+/**
+ * A nested folder of 6 indexable fixture files plus 2 images (handoff KWP6/KWP7).
+ * On a real server these stay in the library for the rest of the run, so they
+ * avoid the chat questions' subjects (furnace, termite repair) and figures.
+ */
 export const NESTED_FOLDER: Record<string, string | Buffer> = {
   "House/inspection-summary.pdf": tinyPdf,
-  "House/Appliances/Furnace/manual.md": `# Furnace\n\nReplace the filter every 90 days.\n\nFixture run ${RUN}.\n`,
-  "House/Appliances/Furnace/warranty.txt": `Synthetic warranty, ten years. Fixture run ${RUN}.\n`,
+  "House/Appliances/Dishwasher/manual.md": `# Dishwasher\n\nRinse the spray arms every month.\n\nFixture run ${RUN}.\n`,
+  "House/Appliances/Dishwasher/warranty.txt": `Synthetic warranty, ten years. Fixture run ${RUN}.\n`,
   "House/Appliances/Water heater/notes.html": `<html><body><p>50 gallon gas unit.</p><p>Fixture run ${RUN}.</p></body></html>`,
-  "House/Receipts/2023/roof-invoice.txt": `Invoice 42: $1,234.00\nFixture run ${RUN}.\n`,
+  "House/Receipts/2023/gutter-invoice.txt": `Invoice 42: gutter cleaning, $310.00\nFixture run ${RUN}.\n`,
   "House/Receipts/2023/pest-report.md": `Pest report: no activity.\n\nFixture run ${RUN}.\n`,
   "House/Photos/front.jpg": tinyJpg,
   "House/Photos/back.jpg": tinyJpg,

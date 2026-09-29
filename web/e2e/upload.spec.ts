@@ -15,20 +15,20 @@ test("pick a nested folder: summary skips the images, jobs reach indexed", async
 
   // The expandable list keeps each file's relative path.
   await page.getByText("Show all 8 files").click();
-  await expect(page.getByTestId("upload-summary").getByText("House/Appliances/Furnace/manual.md")).toBeVisible();
+  await expect(page.getByTestId("upload-summary").getByText("House/Appliances/Dishwasher/manual.md")).toBeVisible();
   await expect(page.getByTestId("upload-summary").getByText("House/Photos/front.jpg")).toBeVisible();
 
   await page.getByRole("button", { name: "Upload 6 files" }).click();
   const rows = page.getByTestId("upload-row");
   await expect(rows).toHaveCount(6);
-  await expect(page.getByTestId("upload-row").filter({ hasText: "House/Receipts/2023/roof-invoice.txt" })).toBeVisible();
+  await expect(page.getByTestId("upload-row").filter({ hasText: "House/Receipts/2023/gutter-invoice.txt" })).toBeVisible();
   // Every file goes through parse … index on the job stream and ends "Indexed".
   await expect(page.locator('[data-testid="upload-row"][data-status="Indexed"]')).toHaveCount(6, { timeout: 30_000 });
   await expect(page.getByText("6 of 6 indexed")).toBeVisible();
 
   // The new documents are in the Library, grouped by their folder collection.
   await page.getByRole("link", { name: "See them in the Library" }).click();
-  await expect(page.getByRole("heading", { name: "House/Appliances/Furnace" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "House/Appliances/Dishwasher" })).toBeVisible();
 });
 
 test("drop loose files onto the drop zone", async ({ page }) => {
