@@ -79,6 +79,68 @@ def test_each_fixture_file_segments_to_its_documents(file):
         assert got.title == want.title
 
 
+def test_heuristics_split_the_unnumbered_bundle():
+    pages = parsed(corpus.UNNUMBERED).pages
+    boundaries = propose_boundaries(pages)
+    assert [b.page for b in boundaries] == [1, 2, 3, 5]
+    assert boundaries[1].reason == "form header INVOICE repeats"  # same vendor, no number
+    documents = heuristic_documents(pages, file_sha=SHA)
+    got = [(d.page_start, d.page_end, d.doc_type, d.vendor, d.doc_date, d.title) for d in documents]
+    want = [
+        (d.page_start, d.page_end, d.doc_type, d.vendor, d.doc_date, d.title)
+        for d in corpus.UNNUMBERED.documents
+    ]
+    assert got == want
+
+
+@pytest.mark.parametrize(
+    "heading", ["Electrical Connections", "Plumbing Services Overview", "Roofing Services"]
+)
+def test_a_trade_heading_below_the_letterhead_is_not_a_new_vendor(heading):
+    pages = _pages(
+        "Alpha Roofing Inc.\nESTIMATE\nEstimate No. E-7\nScope",
+        f"Scope continued\nTear-off\n{heading}\nMore scope",
+    )
+    assert page_signals(pages[1]).vendor is None
+    assert [b.page for b in propose_boundaries(pages)] == [1]
+
+
+def test_a_legal_suffix_names_a_vendor_below_the_top_lines():
+    page = ParsedPage(page=1, text="RECEIPT\nDate: May 1, 2025\nIssued by\nOsprey Glass LLC")
+    assert page_signals(page).vendor == "Osprey Glass LLC"
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("Invoice # BE-10442", (("invoice", "BE-10442"),)),
+        ("Estimate No. TPR-1", (("estimate", "TPR-1"),)),
+        ("INVOICE\nno number here", ()),
+        ("Invoice number: pending", ()),
+        ("Report number: CHI-2025-0314", (("report", "CHI-2025-0314"),)),
+    ],
+)
+def test_reference_numbers(text, expected):
+    assert page_signals(ParsedPage(page=1, text=text)).references == expected
+
+
+def test_an_amount_line_is_not_a_form_header():
+    signals = page_signals(
+        ParsedPage(page=1, text="Scope\nProposal total: $1,480.00\nInvoice total: 5")
+    )
+    assert signals.form is None
+
+
+def test_a_repeated_form_header_with_the_same_reference_continues():
+    pages = _pages(
+        "Osprey Glass LLC\nINVOICE\nInvoice # OG-1\nitems",
+        "Osprey Glass LLC\nINVOICE\nInvoice # OG-1\nmore items",
+        "Osprey Glass LLC\nINVOICE\nno number here",
+    )
+    reasons = [(b.page, b.reason) for b in propose_boundaries(pages)]
+    assert reasons == [(1, "start of file"), (3, "form header INVOICE repeats")]
+
+
 def test_pseudo_page_sections_are_not_documents():
     # the DOCX's "Warranty Registration" section would otherwise look like a warranty form
     pages = parsed(corpus.DOCX).pages
@@ -118,9 +180,9 @@ def test_unnumbered_documents_split_on_vendor_and_form_headers():
 
 def test_same_vendor_same_type_split_on_a_new_reference_number():
     pages = _pages(
-        "Thompson Plumbing Inc.\nESTIMATE\nEstimate No. E-1001\nRe-pipe",
-        "Thompson Plumbing Inc.\nESTIMATE\nEstimate No. E-1001\ncontinued",
-        "Thompson Plumbing Inc.\nESTIMATE\nEstimate No. E-1002\nRepairs",
+        "Kestrel Plumbing Inc.\nESTIMATE\nEstimate No. E-1001\nRe-pipe",
+        "Kestrel Plumbing Inc.\nESTIMATE\nEstimate No. E-1001\ncontinued",
+        "Kestrel Plumbing Inc.\nESTIMATE\nEstimate No. E-1002\nRepairs",
     )
     boundaries = propose_boundaries(pages)
     assert [b.page for b in boundaries] == [1, 3]
@@ -132,8 +194,8 @@ def test_same_vendor_same_type_split_on_a_new_reference_number():
 
 
 def test_vendor_change_without_a_form_header():
-    pages = _pages("Alpha Roofing Inc.\nnotes", "Sterling Mechanical, Inc.\nnotes")
-    assert propose_boundaries(pages)[1].reason == "vendor changes to Sterling Mechanical, Inc."
+    pages = _pages("Alpha Roofing Inc.\nnotes", "Larkspur Mechanical, Inc.\nnotes")
+    assert propose_boundaries(pages)[1].reason == "vendor changes to Larkspur Mechanical, Inc."
 
 
 def test_a_new_letterhead_after_a_finished_numbered_document():

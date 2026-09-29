@@ -306,6 +306,20 @@ def test_split_text_is_lossless_and_bounded(size):
     assert all(0 < len(piece) <= 1000 for piece in pieces)
 
 
+@pytest.mark.parametrize(
+    ("size", "limit", "pieces"),
+    [(7000, 3000, 3), (6100, 3000, 3), (3001, 3000, 2), (10000, 1000, 12)],
+)
+def test_split_text_balances_its_pieces(size, limit, pieces):
+    text = ("A sentence of house notes. " * 1000)[:size]
+    parts = split_text(text, limit)
+    assert len(parts) == pieces
+    lengths = [len(part) for part in parts]
+    # balanced: every piece is near an even share, not limit-limit-remainder
+    share = size / pieces
+    assert all(abs(length - share) <= limit // 5 + 30 for length in lengths), lengths
+
+
 def test_split_text_prefers_paragraph_breaks():
     text = "a" * 900 + "\n\n" + "b" * 900 + " c" * 200
     pieces = split_text(text, 1000)

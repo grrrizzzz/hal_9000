@@ -132,7 +132,9 @@ def split_text(text: str, max_chars: int = DEFAULT_PSEUDO_PAGE_CHARS) -> list[st
     start = 0
     while len(text) - start > max_chars:
         remaining = len(text) - start
-        count = math.ceil(remaining / max_chars)
+        # plan with 10% slack, so a good break just short of the limit never forces
+        # an extra small piece at the end
+        count = math.ceil(remaining / (max_chars * 0.9))
         target = start + remaining // count
         window = max(1, max_chars // 5)
         low = max(start + 1, target - window)

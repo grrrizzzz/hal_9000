@@ -14,6 +14,7 @@ The LLM-path test also needs ``-m "house and live"`` and an OpenAI key in
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -73,7 +74,7 @@ def test_no_running_header_survives_cleaning(house_pages):
     result = clean_pages(house_pages, file_sha="0" * 64, parser="pdfium")
     for page in result.pages:
         assert "Envelope ID" not in page.text, page.page
-        assert "Page " + str(page.page) + " of" not in page.text, page.page
+        assert not re.search(r"Page \d+ of \d+", page.text), page.page
 
 
 @pytest.mark.live

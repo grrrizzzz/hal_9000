@@ -108,9 +108,10 @@ _FORMS: tuple[tuple[str, str], ...] = tuple(
         key=lambda item: -len(item[0]),
     )
 )
+# "Invoice # BE-10442", "Estimate No. TPR-1": on one line, and the number has a digit
 _REFERENCE = re.compile(
-    r"\b(invoice|estimate|proposal|quote|work\s*order|report|order)\s*"
-    r"(?:no\.?|number|num\.?|#)\s*:?\s*#?\s*([A-Z0-9][A-Z0-9-]{2,})",
+    r"\b(invoice|estimate|proposal|quote|work[ \t]*order|report|order)[ \t]*"
+    r"(?:no\.?|number|num\.?|#)[ \t]*:?[ \t]*#?[ \t]*(?=[A-Z-]*\d)([A-Z0-9][A-Z0-9-]{2,})",
     re.IGNORECASE,
 )
 _COMPANY = re.compile(
@@ -119,6 +120,8 @@ _COMPANY = re.compile(
     r"pest\s+control|heating|air\s+conditioning|realtors?|rooter|contractors?)\b\.?",
     re.IGNORECASE,
 )
+_LEGAL = re.compile(r"\b(inc|llc|l\.l\.c|co|corp|corporation|company|ltd)\b\.?", re.IGNORECASE)
+_LETTERHEAD_LINES = 2
 _MONTHS = {
     name: index
     for index, names in enumerate(
@@ -166,6 +169,8 @@ def find_date(text: str) -> date | None:
 
 def _form(line: str) -> tuple[str, str] | None:
     """``(phrase, doc_type)`` when ``line`` is a heading-like form header."""
+    if "$" in line or re.search(r":\s*[#$]?\s*\d", line):
+        return None  # an amount or a "Label: 123" line, not a heading
     words = " ".join(re.sub(r"[^A-Z ]+", " ", line.upper().replace("'", "")).split())
     if not words or len(words) > 60:
         return None
@@ -175,10 +180,18 @@ def _form(line: str) -> tuple[str, str] | None:
     return None
 
 
-def _vendor(line: str) -> str | None:
-    """A company name from a letterhead-like line, or ``None``."""
+def _vendor(line: str, position: int) -> str | None:
+    """A company name from a letterhead-like line, or ``None``.
+
+    A name with a legal suffix (Inc., LLC, Co., Corp., Ltd.) counts anywhere in
+    the top lines; one that only has a trade word ("Plumbing", "Inspections")
+    counts only on the first two lines, so a heading such as "Plumbing Services
+    Overview" further down never looks like a new letterhead.
+    """
     first = line.split("|")[0].strip(" -–:\t")
     if not first or len(first) > 70 or not _COMPANY.search(first):
+        return None
+    if position >= _LETTERHEAD_LINES and not _LEGAL.search(first):
         return None
     if first[0].isdigit() or ":" in first:
         return None  # a numbered heading or a "Label: value" line
@@ -218,7 +231,9 @@ def page_signals(page: ParsedPage) -> PageSignals:
     top = [repair_letter_spacing(line.lstrip("#").strip()) for line in lines[:_TOP_LINES]]
     form_line = next((line for line in top if _form(line)), None)
     form = _form(form_line) if form_line else None
-    vendor = next((found for found in map(_vendor, top) if found), None)
+    vendor = next(
+        (found for found in (_vendor(line, i) for i, line in enumerate(top)) if found), None
+    )
     references = tuple(
         dict.fromkeys(
             (re.sub(r"\s+", " ", m.group(1).casefold()), m.group(2).upper())
@@ -288,6 +303,12 @@ def _boundary_reason(signals: PageSignals, current: _Current) -> str | None:
             return f"new {kind} number {value}"
     if signals.form and current.form and signals.form != current.form:
         return f"form header {signals.form_line}"
+    if signals.form and signals.form == current.form:
+        # the same form header again without a page-number reset: a new document
+        # (back-to-back invoices), unless the page carries the same reference number
+        shared = any(current.references.get(kind) == value for kind, value in signals.references)
+        if not shared:
+            return f"form header {signals.form_line} repeats"
     if (
         signals.vendor
         and current.vendor
