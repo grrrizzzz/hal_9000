@@ -51,7 +51,7 @@ def vector_search(
     k: int = 30,
     filters: SearchFilters | None = None,
 ) -> list[VectorHit]:
-    """Cosine KNN over the profile's ``vec0`` table, filters inside the KNN (``stage("vector")``)."""
+    """Cosine KNN over the profile's ``vec0`` table, filtered inside the KNN (``vector`` stage)."""
     with stage(Stage.VECTOR):
         return SqliteVecIndex(conn, _id(profile), profile.dimensions).search(
             query_vector, k, filters
