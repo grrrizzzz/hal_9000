@@ -146,3 +146,24 @@ def test_no_text_page_stays_flagged_after_cleaning():
     pages = cleaned(corpus.BUNDLE).pages
     assert [p.page for p in pages if not p.has_text_layer] == list(corpus.BUNDLE.no_text_pages)
     assert pages[8].text == ""
+
+
+def test_mixed_bundle_cleans_to_content_once_segmented():
+    from hal9000.knowledge.ingest.clean import clean_pages
+    from hal9000.knowledge.ingest.segment import segment_file
+
+    pages = parsed(corpus.MIXED).pages
+    documents = segment_file(pages, file_sha="0" * 64, use_llm=False).documents
+    result = clean_pages(pages, file_sha="0" * 64, parser="pdfium", documents=documents)
+    text = "\n".join(page.text for page in result.pages)
+    assert "Docusign" not in text
+    assert not re.search(r"(?im)page \d+ of \d+\s*$", text)
+    assert not re.search(r"(?m)^(Invoice|Estimate) #\d+", text)
+    # the four-page pest report's form rows are its own furniture, wherever they sit
+    for page in result.pages[13:17]:
+        assert "NUMBER OF PAGES" not in page.text and " of 4" not in page.text
+    # content stays: labels, line items, the letter's letterhead (one page, nothing repeats)
+    for page in result.pages[2:6]:
+        assert page.text.count("Moderate") == 2 and page.text.count("Recommendation") == 2
+    assert "Invoice line 2.3: pipe work item 3" in text
+    assert "Lic # 000111" in result.pages[20].text

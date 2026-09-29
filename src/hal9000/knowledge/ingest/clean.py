@@ -10,7 +10,11 @@ Four repairs, in order, on each page:
    (``ingest.header_repeat_fraction``) and on at least three. That catches
    DocuSign envelope IDs, "Page 12 of 58" and an inspector's name in the
    header, while a finding line repeated on two pages, or estimate line items
-   that differ only in their numbers, stay.
+   that differ only in their numbers, stay. Detection runs over the whole file
+   *and* within each segmented sub-document (``documents=``), so a 3-page
+   invoice's own letterhead and footers go even in an 89-page bundle. A line
+   that is nothing but a page number ("Page 2 of 3", "2 of 7", "Invoice #123
+   Page 2 of 3") is removed from the edge zone wherever it appears.
 2. **Hyphenation**: PDFium's line-break hyphen marker (U+FFFE), soft hyphens,
    and ``word-⏎word`` at a line end are joined.
 3. **Letter spacing**: headings such as ``D ES C R I PT I O N O F`` are rejoined
@@ -22,6 +26,11 @@ Four repairs, in order, on each page:
    such as ``A B testing`` or ``SEE A OR B`` is untouched.
 4. **Whitespace**: tabs, no-break spaces and runs of spaces collapse to one
    space, lines are trimmed, and three or more newlines become two.
+
+Pipeline order (plan §5.1, for the ingest worker): **parse → segment (raw
+pages) → clean (pages, documents) → chunk**. Segmentation reads the raw pages
+because cleaning removes the "Page N of M" lines it relies on; cleaning takes
+its document boundaries back.
 
 Every cleaned character remembers where it came from. Each
 :class:`~hal9000.knowledge.contracts.Page` stores that as ``offset_map``:
@@ -36,7 +45,6 @@ import bisect
 import gzip
 import math
 import re
-from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -57,6 +65,7 @@ __all__ = [
     "clean_pages",
     "normalize_line",
     "repair_letter_spacing",
+    "body_lines",
     "running_lines",
     "source_offset",
     "word_costs",
@@ -116,7 +125,26 @@ _HEX_ID = re.compile(
     r"(?:[0-9a-f]{4,}(?:-[0-9a-f]{2,}){2,}|[0-9a-f]{12,})(?![0-9a-z])"
 )
 # folded lines that are page numbers: "page # of #", "pg. #", "#/#", "- # -", "#"
-_PAGE_NUMBER = re.compile(r"\bp(?:age|g)?\.? ?#|# ?(?:of|/) ?#|^[^a-z#]*#[^a-z#]*$")
+# a line that is only "Page k [of N]", optionally after a reference ("Invoice #12 Page 1 of 3"):
+# always page furniture
+_PAGE_WORD_LINE = re.compile(
+    r"[\s(\[|–-]*"
+    r"(?:(?:invoice|estimate|proposal|quote|report|order|statement)\b[^\n]{0,30}?\s)?"
+    r"(?:page|pg\.?)\s*\d{1,4}(?:\s*(?:of|/)\s*\d{1,4})?"
+    r"[\s)\]|–-]*",
+    re.IGNORECASE,
+)
+# a line that is only "k of N": a page number only where k and N are the page's own place
+_BARE_OF_LINE = re.compile(r"[\s(\[|–-]*(\d{1,4})\s+of\s+(\d{1,4})[\s)\]|–-]*", re.IGNORECASE)
+# digit runs inside these are dates or amounts, never page numbers
+_DATE_OR_AMOUNT = re.compile(
+    r"\d{1,4}[/-]\d{1,2}[/-]\d{2,4}"
+    r"|(?i:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}"
+    r"|\$\s*[\d,]+(?:\.\d+)?|\b\d[\d,]*\.\d{2}\b"
+)
+_PAGE_WORD_BEFORE = re.compile(r"(?i)(?:\bpage|\bpg\.?|\bp\.|\bsheet|\bfolio)\s*$")
+_OF_AFTER = re.compile(r"(?i)\s*(?:of|/)\s*(\d{1,4})")
+_MAX_COUNTER_WORDS = 4
 # 3+ groups of 1-3 capitals separated by single spaces, on one line
 _SPACED_RUN = re.compile(r"(?<![A-Za-z0-9])(?:[A-Z]{1,3} ){2,}[A-Z]{1,3}(?![A-Za-z0-9])")
 
@@ -207,7 +235,12 @@ def _line_spans(text: str) -> list[tuple[int, int]]:
 
 
 #: A running line: which edge, its position from that edge, and its normalised text.
+#: Two extra kinds widen removal to other edge positions: ``(_ANYWHERE, 0, exact
+#: text)`` for a line identical on every page, and ``(_VARYING, 0, key)`` for a
+#: page-number line, which elsewhere goes only if it ends in the page's own "k of N".
 RunningLine = tuple[str, int, str]
+_ANYWHERE = "anywhere"
+_VARYING = "varying"
 
 
 def _edge_lines(text: str, zone: int) -> list[tuple[int, int, RunningLine]]:
@@ -228,27 +261,81 @@ def _exact(line: str) -> str:
     return _HEX_ID.sub("<id>", _SPACES.sub(" ", line).strip().casefold())
 
 
-def _counts_with_pages(entries: list[tuple[int, str]], minimum: int) -> bool:
-    """Whether one number in the line moves in step with the page number on ≥ ``minimum`` pages."""
-    numbers = [(page, [int(n) for n in _DIGITS.findall(text)]) for page, text in entries]
-    width = min(len(values) for _, values in numbers)
-    for index in range(width):
-        offsets = Counter(values[index] - page for page, values in numbers)
-        if offsets.most_common(1)[0][1] >= minimum:
-            return True
-    return False
+def _digit_runs(text: str) -> list[tuple[int, int, int, bool]]:
+    """``(start, end, value, protected)`` for each digit run; protected = in a date or amount."""
+    shielded = [m.span() for m in _DATE_OR_AMOUNT.finditer(text)]
+    return [
+        (m.start(), m.end(), int(m.group()), any(a <= m.start() < b for a, b in shielded))
+        for m in _DIGITS.finditer(text)
+    ]
+
+
+def _varying_is_page_number(entries: list[tuple[int, str]], scope: int, per_document: bool) -> bool:
+    """Whether a line whose numbers vary between pages is a page number.
+
+    Every number that varies must be outside dates and amounts and move with the
+    page (``position``: the page's place in the scope) in a page-number context:
+    after "Page"/"Sheet" or alone on the line (any constant offset, for bundles
+    whose printed numbers are shifted), or as a bare "k of N" (k is the position
+    and N the scope's page count). Within one document a short line (≤ 4 words)
+    with a counter that rises with the page also qualifies.
+    """
+    runs = [(position, text, _digit_runs(text)) for position, text in entries]
+    if len({len(r) for _, _, r in runs}) != 1:
+        return False
+    _, sample, sample_runs = runs[0]
+    for index, (start, end, _, protected) in enumerate(sample_runs):
+        values = [(position, r[index][2]) for position, _, r in runs]
+        if len({value for _, value in values}) == 1:
+            continue  # constant: the same on every page
+        if protected or any(r[index][3] for _, _, r in runs):
+            return False  # a date or an amount changes: content
+        before, after = sample[:start], sample[end:]
+        offsets = {value - position for position, value in values}
+        of = _OF_AFTER.match(after)
+        if _PAGE_WORD_BEFORE.search(before) or not re.sub(r"[\W_]+", "", before + after):
+            if len(offsets) == 1:
+                continue
+            return False
+        if of and not re.search(r"[a-z]\s*$", before):
+            totals = {int(_OF_AFTER.match(text[r[index][1] :]).group(1)) for _, text, r in runs}
+            if offsets == {0} and totals == {scope}:
+                continue
+            return False
+        if per_document and len(offsets) == 1 and len(sample.split()) <= _MAX_COUNTER_WORDS:
+            continue
+        return False
+    return True
+
+
+def body_lines(texts: Sequence[str], zone: int = DEFAULT_ZONE) -> set[str]:
+    """Normalised lines found as whole lines away from the page edges anywhere in ``texts``."""
+    body: set[str] = set()
+    for text in texts:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        spans = {(start, stop) for start, stop, _ in _edge_lines(text, zone)}
+        body.update(normalize_line(text[a:b]) for a, b in _line_spans(text) if (a, b) not in spans)
+    return body
 
 
 def running_lines(
-    texts: Sequence[str], fraction: float, zone: int = DEFAULT_ZONE
+    texts: Sequence[str],
+    fraction: float,
+    zone: int = DEFAULT_ZONE,
+    *,
+    body: set[str] | None = None,
+    per_document: bool = False,
 ) -> set[RunningLine]:
     """Lines at the same edge position on ≥ ``fraction`` of the pages with text, and ≥ 3.
 
-    ``texts`` are the file's pages in order (page *n* is ``texts[n - 1]``). A line
-    that is identical on those pages is running. One whose numbers vary (the
-    digit folding made them match) is running only if it is a page number
-    ("Page # of #", "#", "#/#") or one of its numbers counts up with the page;
-    estimate items and totals that happen to share a position are not.
+    ``texts`` are the pages of the scope in order (a file, or one document of it;
+    page *n* of the scope is ``texts[n - 1]``). A line that also appears as a
+    whole line in the body (``body``, by default computed from ``texts``; the
+    cleaner passes the whole file's) is content -- a severity label, a heading --
+    never furniture. A line identical on those pages is running, except, within
+    one document, a short label (≤ 3 words, no digits). A line whose numbers vary
+    is running only if :func:`_varying_is_page_number` says so; dates, amounts,
+    ratings and line items are not.
     """
     pages = [
         (number, text.replace("\r\n", "\n").replace("\r", "\n"))
@@ -262,16 +349,22 @@ def running_lines(
     for number, text in pages:
         for start, stop, slot in _edge_lines(text, zone):
             seen.setdefault(slot, []).append((number, _exact(text[start:stop])))
+    if body is None:
+        body = body_lines(texts, zone)
     running: set[RunningLine] = set()
     for slot, entries in seen.items():
-        if len(entries) < minimum:
-            continue
-        if (
-            len({text for _, text in entries}) == 1
-            or _PAGE_NUMBER.search(slot[2])
-            or _counts_with_pages(entries, minimum)
-        ):
+        key = slot[2]
+        if len(entries) < minimum or key in body:
+            continue  # too rare, or also a body line: content (a label, a heading), not furniture
+        exact = entries[0][1]
+        if len({text for _, text in entries}) == 1:
+            if per_document and len(exact.split()) <= 3 and not _DIGITS.search(exact):
+                continue  # "Severity", "Recommendation": a label at a fixed place, not furniture
             running.add(slot)
+            running.add((_ANYWHERE, 0, exact))  # the same text goes from any edge position
+        elif _varying_is_page_number(entries, len(texts), per_document):
+            running.add(slot)
+            running.add((_VARYING, 0, key))
     return running
 
 
@@ -380,15 +473,41 @@ _MANY_NEWLINES = re.compile(r"\n{3,}")
 _EDGES = re.compile(r"^\s+|\s+$")
 
 
+def _page_number_line(line: str, place: tuple[int, int] | None) -> bool:
+    """A "Page k of N" line, or a bare "k of N" whose k and N are the page's ``place``."""
+    if _PAGE_WORD_LINE.fullmatch(line):
+        return True
+    bare = _BARE_OF_LINE.fullmatch(line)
+    return bool(bare and place and (int(bare.group(1)), int(bare.group(2))) == place)
+
+
+def _ends_in_place(line: str, place: tuple[int, int] | None) -> bool:
+    """Whether ``line`` ends in "k of N" with k and N the page's place in its document."""
+    end = re.search(r"(\d{1,4})\s+of\s+(\d{1,4})\W*$", line, re.IGNORECASE)
+    return bool(end and place and (int(end.group(1)), int(end.group(2))) == place)
+
+
 def _clean_tracked(
     tracked: _Tracked,
     running: set[RunningLine],
     zone: int,
     costs: Mapping[str, float],
+    place: tuple[int, int] | None = None,
 ) -> _Tracked:
     tracked = tracked.sub(_CRLF, "\n")
-    if running:
-        drop = {(a, b) for a, b, slot in _edge_lines(tracked.text, zone) if slot in running}
+    # a line found running (by its position) goes from any edge position of the page:
+    # a form row can sit at the foot of a document's first page and the top of the rest
+    drop = set()
+    for a, b, slot in _edge_lines(tracked.text, zone):
+        line = tracked.text[a:b]
+        if (
+            slot in running
+            or (_ANYWHERE, 0, _exact(line)) in running
+            or _page_number_line(line, place)
+            or ((_VARYING, 0, slot[2]) in running and _ends_in_place(line, place))
+        ):
+            drop.add((a, b))
+    if drop:
         tracked = tracked.keep(span for span in _line_spans(tracked.text) if span not in drop)
     tracked = tracked.sub(_BREAK_HYPHEN, "")
     tracked = tracked.sub(_LINE_END_HYPHEN, "")
@@ -490,11 +609,14 @@ def clean_pages(
     zone: int = DEFAULT_ZONE,
     vocabulary: Iterable[str] | None = None,
     pseudo_pages: bool = False,
+    documents: Sequence[object] | None = None,
 ) -> CleanResult:
     """Clean every page of one file, timed as ``stage("clean")`` (rule K7).
 
-    Header and footer frequency is counted across the whole file, before it is
-    segmented, as plan §5.1 orders the steps. Pseudo-pages (DOCX, HTML,
+    Header and footer frequency is counted across the whole file and, when
+    ``documents`` are given (the segmenter's ``DocumentMeta`` list, or
+    ``(page_start, page_end)`` pairs), again within each document, with the same
+    thresholds (≥ 3 pages and ≥ ``repeat_fraction``) applied inside it. Pseudo-pages (DOCX, HTML,
     Markdown, TXT; ``ParsedFile.pseudo_pages``) have no running headers, so
     nothing is removed from them for repeating. ``repeat_fraction`` defaults to
     ``ingest.header_repeat_fraction`` in ``config/knowledge.yaml``.
@@ -505,14 +627,31 @@ def clean_pages(
 
             repeat_fraction = load_knowledge_file().ingest.header_repeat_fraction
         costs = word_costs(vocabulary)
-        running = (
-            set()
-            if pseudo_pages
-            else running_lines([page.text for page in pages], float(repeat_fraction), zone)
-        )
+        running: set[RunningLine] = set()
+        per_page: dict[int, set[RunningLine]] = {}
+        ranges = _ranges(documents or ()) or [(1, len(pages))]
+        place = {
+            number: (number - start + 1, end - start + 1)
+            for start, end in ranges
+            for number in range(start, end + 1)
+        }
+        if not pseudo_pages:
+            fraction = float(repeat_fraction)
+            texts = [page.text for page in pages]
+            body = body_lines(texts, zone)  # the whole file's body protects every scope
+            running = running_lines(texts, fraction, zone, body=body)
+            for start, end in _ranges(documents or ()):
+                part = [page for page in pages if start <= page.page <= end]
+                found = running_lines(
+                    [page.text for page in part], fraction, zone, body=body, per_document=True
+                )
+                for page in part:
+                    per_page.setdefault(page.page, set()).update(found)
         cleaned: list[Page] = []
         for page in pages:
-            tracked = _clean_tracked(_Tracked.of(page.text), running, zone, costs)
+            here = running | per_page.get(page.page, set())
+            spot = None if pseudo_pages else place.get(page.page)
+            tracked = _clean_tracked(_Tracked.of(page.text), here, zone, costs, spot)
             cleaned.append(
                 Page(
                     file_sha=file_sha,
@@ -523,4 +662,17 @@ def clean_pages(
                     offset_map=tracked.offset_map(),
                 )
             )
-        return CleanResult(pages=cleaned, removed=frozenset(key for _, _, key in running))
+        removed = running.union(*per_page.values())
+        keys = frozenset(key for kind, _, key in removed if kind in ("top", "bottom"))
+        return CleanResult(pages=cleaned, removed=keys)
+
+
+def _ranges(documents: Sequence[object]) -> list[tuple[int, int]]:
+    """``(page_start, page_end)`` from ``DocumentMeta``-like objects or pairs."""
+    ranges = []
+    for document in documents:
+        if isinstance(document, tuple):
+            ranges.append((int(document[0]), int(document[1])))
+        else:
+            ranges.append((int(document.page_start), int(document.page_end)))  # type: ignore[attr-defined]
+    return ranges

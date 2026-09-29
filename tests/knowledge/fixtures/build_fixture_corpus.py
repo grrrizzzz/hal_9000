@@ -29,6 +29,18 @@ Files:
   invoice number), a 2-page roofing proposal whose second page has a
   "Roofing Services Overview" heading but no letterhead, and a pest-control
   completion notice.
+- ``mixed_bundle.pdf``: 22 pages and 10 documents in the shapes a real closing
+  bundle takes: a 2-page form numbered "(FORM PAGE 1 OF 2)"; a 4-page
+  inspection whose letterhead line ends in "Page k of 4", with "Moderate" and
+  "Recommendation" labels that also sit at a fixed bottom position; an invoice
+  and two estimates from one vendor with "Invoice #… Page k of N" footers; two
+  pest reports numbered only by a bare "k of N" at the end of a form row; a
+  completion notice with a long title; a letter-style invoice whose top lines
+  are a letterhead (address, licence, phone, date); and an invoice whose
+  contact block is at the bottom. A DocuSign line runs along pp. 3-17.
+- ``review_b1.pdf``, ``review_b1b.pdf``, ``review_b2.pdf``, ``review_b3.pdf``:
+  the KWP1b reviewer's over-fitting probes (manuals with step and figure
+  counters, letters, logs, permits, invoices, notices; see ``review_bundle1``).
 - ``heat_pump_guide.docx``: a title and three top-level headings.
 - ``irrigation_notes.html``: a title and three second-level sections, plus
   script and style that must not leak into the text.
@@ -427,6 +439,541 @@ def draw_unnumbered(canvas) -> None:
         canvas.showPage()
 
 
+MIXED_STARTS = (1, 3, 7, 10, 12, 14, 18, 19, 21, 22)
+MIXED_TYPES = (
+    "disclosure_form", "inspection_report", "invoice", "estimate", "estimate",
+    "pest_report", "completion_notice", "pest_report", "invoice", "invoice",
+)  # fmt: skip
+MIXED_ENVELOPE = "Docusign Envelope ID: 3C9A51E2-6B7D-4F80-9A1B-2C3D4E5F6A7B"
+MIXED_WDO_LABELS = "BLDG NO. STREET CITY ZIP INSPECTION DATE NUMBER OF PAGES"
+_OSPREY = ("Osprey Plumbing & Drain", "License #000321 | Port Alder, CA 90000")
+
+
+def _lines_page(canvas, top: list[str], bottom: list[str] = ()) -> None:
+    """Draw ``top`` from the top down, then ``bottom`` upward from the foot (drawn last)."""
+    page = _Page(canvas, top=750)
+    for text in top:
+        page.line(text, lead=14)
+    canvas.setFont(BODY_FONT, 8)
+    for index, text in enumerate(bottom):  # in reading order, so the stream order matches
+        canvas.drawString(LEFT, 28 + 12 * (len(bottom) - 1 - index), text)
+    canvas.showPage()
+
+
+def _mixed_pages() -> list[tuple[list[str], list[str]]]:
+    env = [MIXED_ENVELOPE]
+    pages: list[tuple[list[str], list[str]]] = []
+    # D1: a two-page disclosure form
+    for k in (1, 2):
+        pages.append(
+            (
+                [
+                    "RECEIPT FOR REPORTS",
+                    f"(FORM RR PAGE {k} OF 2)",
+                    "The buyer acknowledges receipt of the reports listed below.",
+                    *(f"Report line {k}.{n}: received and reviewed." for n in range(1, 5)),
+                ],
+                ["Form RR, a fictional disclosure form"],
+            )
+        )
+    # D2: a four-page inspection, letterhead line carries the page number
+    for k in range(1, 5):
+        top = [
+            f"Harbor Point Home Inspections Page {k} of 4",
+            "(555) 010-0300",
+            "office@harborpoint.example",
+        ]
+        if k == 1:
+            top.append("PROPERTY INSPECTION REPORT")
+        body = [
+            f"{k}.1 Finding about the roof, part {k}",
+            "Moderate",
+            f"The flashing at corner {k} is loose.",
+            "Recommendation",
+            "Have a roofer reseal it.",
+            f"{k}.2 Finding about the gutters, part {k}",
+            "Moderate",
+            f"Gutter run {k} sags.",
+            "Recommendation",
+            "Rehang the gutter.",
+        ]
+        pages.append((top + body, env))
+    # D3-D5: one vendor's invoice and two estimates, numbered in the footer
+    for kind, number, count, date_line in (
+        ("INVOICE", "40010001", 3, "May 2, 2025"),
+        ("ESTIMATE", "40010002", 2, "May 2, 2025"),
+        ("ESTIMATE", "40010003", 2, "May 2, 2025"),
+    ):
+        for k in range(1, count + 1):
+            top = [kind, number, f"{kind} DATE", date_line, *_OSPREY] if k == 1 else []
+            top += [f"{kind.title()} line {k}.{n}: pipe work item {n}" for n in range(1, 4)]
+            pages.append((top, [f"{kind.title()} #{number} Page {k} of {count}", *env]))
+    # D6: a four-page pest report, numbered only by "k of 4" in a form row
+    values = "12 GULL LN PORT ALDER 90000 04/02/2025"
+    for k in range(1, 5):
+        if k == 1:
+            top = [
+                "Inspector / Licence No. 000456",
+                "Sandpiper Pest Control, Inc.",
+                "WOOD DESTROYING PESTS AND ORGANISMS INSPECTION REPORT",
+                "Findings are listed by section below.",
+            ]
+            bottom = [MIXED_WDO_LABELS, f"{values} {k} of 4", *env]
+        else:
+            top = [MIXED_WDO_LABELS, f"{values} {k} of 4", f"Section {k}: subarea findings"]
+            bottom = ["Form: WDO-7 -- Report #: 70001", *env]
+        pages.append((top + [f"Item {k}A: evidence of drywood termites at the eave."], bottom))
+    # D7: a completion notice with a long title
+    pages.append(
+        (
+            [
+                "Standardized Notice of Work Completed; Items Pending",
+                "Report #: 70001",
+                "Items 1A and 2A were completed on April 20, 2025.",
+            ],
+            ["Sandpiper Pest Control, Inc.", "(555) 010-0400 - Phone"],
+        )
+    )
+    # D8: a two-page reinspection, "k of 2" in the form row
+    values = "12 GULL LN PORT ALDER 90000 05/01/2025"
+    for k in (1, 2):
+        top = (
+            [
+                "Inspector / Licence No. 000456",
+                "Sandpiper Pest Control, Inc.",
+                "WOOD DESTROYING PESTS AND ORGANISMS REINSPECTION REPORT",
+            ]
+            if k == 1
+            else [MIXED_WDO_LABELS, f"{values} {k} of 2"]
+        )
+        bottom = [MIXED_WDO_LABELS, f"{values} {k} of 2"] if k == 1 else ["Report #: 70002"]
+        pages.append((top + [f"Reinspection note {k}: no further activity."], bottom))
+    # D9: a letter-style invoice: the top lines are a letterhead
+    pages.append(
+        (
+            [
+                "Marisol Vega Finish Carpentry",
+                "88 Kelp Ave.",
+                "Port Alder, CA. 90000",
+                "Lic # 000111",
+                "(555) 010-0444",
+                "June 3, 2025",
+                "Re: 12 Gull Ln",
+                "Repaired the eave boards noted in the pest report.",
+                "Total: $900",
+            ],
+            [],
+        )
+    )
+    # D10: an invoice whose contact block is at the bottom
+    pages.append(
+        (
+            [
+                "Pay online",
+                "ITEM QTY AMOUNT",
+                "Thermostat, programmable 1 $180.00",
+                "Invoice # GA-17-2",
+                "Total: $180.00",
+            ],
+            [
+                "Gull Air Heating",
+                "Questions? Call (555) 010-0555 billing@gullair.example",
+                "License #000222",
+            ],
+        )
+    )
+    return pages
+
+
+def draw_mixed(canvas) -> None:
+    for top, bottom in _mixed_pages():
+        _lines_page(canvas, top, bottom)
+
+
+# ------------------------------------------- review bundles (KWP1b review, invented)
+# Built by the KWP1b reviewer to catch over-fitted segmentation rules: manuals with
+# "Step 3 of 5" and "Figure k of 3" lines, letters whose last page names another
+# phone number, dated logs and journals, permits with dated inspection records.
+REVIEW_FILL = [
+    "The unit should be inspected at least once a year by a qualified technician.",
+    "Keep the area around the equipment clear of debris and stored items.",
+    "Refer to the table below for recommended settings in each season.",
+    "If the indicator light flashes, turn off power and wait thirty seconds.",
+    "Clean the filter screen with warm water and a soft brush.",
+    "Do not use abrasive cleaners on the stainless surfaces.",
+    "Record each service visit so the history is available later.",
+    "Normal operating noise includes a soft hum and occasional clicks.",
+    "Contact a licensed professional for any electrical repair.",
+    "Replace worn gaskets before they start to leak.",
+    "The drain line must slope continuously toward the outlet.",
+    "Allow the system to run a full cycle after any adjustment.",
+]
+
+
+def _fill(tag, n=10, extra=()):
+    lines = [f"{tag}: {REVIEW_FILL[i % len(REVIEW_FILL)]}" for i in range(n)]
+    return list(extra) + lines
+
+
+def _draw_review(canvas, pages):
+    c = canvas
+    for top, mid, bottom in pages:
+        y = 750
+        for t in top + mid:
+            c.setFont("Helvetica", 10)
+            c.drawString(54, y, t)
+            y -= 14
+        for i, t in enumerate(bottom):
+            c.setFont("Helvetica", 8)
+            c.drawString(54, 28 + 12 * (len(bottom) - 1 - i), t)
+        c.showPage()
+
+
+def review_bundle1(step=True):
+    docs = []
+    # D1 dishwasher manual, 6 pages, running header, bare page-number footer
+    pages = []
+    for k in range(1, 7):
+        top = ["AquaSteel DW-500 Dishwasher", "Use and Care Guide"]
+        if k == 1:
+            top += ["OWNERS MANUAL", "Rev. 03/2019"]
+        mid = _fill(f"Section {k}", 10)
+        if k == 5:
+            mid[4] = "LIMITED WARRANTY"
+        bottom = []
+        if k == 1:
+            bottom.append("Customer Care: 1-800-555-0100  www.aquasteel.example")
+        if k == 4 and step:
+            mid[-1] = "Installation, Step 3 of 5"
+        if k == 6:
+            bottom.append("Parts and accessories: 1-800-555-0177")
+        bottom.append(str(k))
+        pages.append((top, mid, bottom))
+    docs.append(("manual", pages))
+    # D2 warranty registration card, same phone
+    docs.append(
+        (
+            "warranty",
+            [
+                (
+                    [
+                        "AquaSteel Appliances Inc.",
+                        "PRODUCT WARRANTY REGISTRATION",
+                        "Call 1-800-555-0100 to register by phone",
+                    ],
+                    _fill("Card", 8),
+                    [],
+                )
+            ],
+        )
+    )
+    # D3 HOA letter, 2 pages, signed by the management company
+    p1 = (
+        [
+            "Coastal Bluffs Homeowners Association",
+            "PO Box 100, Seaview, CA 92000",
+            "(760) 555-0101 | www.coastalbluffs.example",
+            "March 3, 2024",
+            "Dear Homeowner,",
+        ],
+        _fill("Letter", 10),
+        [],
+    )
+    p2 = (
+        ["Homeowner, 12 Example Lane", "March 3, 2024", "Page 2"],
+        _fill("Letter cont", 8),
+        ["Sincerely, the Board", "Managed by Sunset Property Management, Inc. (760) 555-0199"],
+    )
+    docs.append(("other", [p1, p2]))
+    # D4 building permit, 3 pages, inspection record with dates at top
+    docs.append(
+        (
+            "permit",
+            [
+                (
+                    [
+                        "City of Seaview Development Services",
+                        "BUILDING PERMIT",
+                        "Permit No. B24-0117",
+                        "Issued: 04/02/2024",
+                    ],
+                    _fill("Scope", 10),
+                    ["City of Seaview (760) 555-0300"],
+                ),
+                (
+                    [
+                        "Inspection Record - Permit B24-0117",
+                        "Footing 04/10/2024 Approved",
+                        "Framing 04/20/2024 Approved",
+                        "Rough electrical 04/22/2024 Approved",
+                    ],
+                    _fill("Inspection notes", 9),
+                    ["City of Seaview (760) 555-0300"],
+                ),
+                (
+                    ["Final 05/15/2024 Approved", "Conditions of approval"],
+                    _fill("Conditions", 10),
+                    ["City of Seaview (760) 555-0300"],
+                ),
+            ],
+        )
+    )
+    # D5, D6 two invoices from one vendor
+    for num, day in (("5521", "06/03/2024"), ("5534", "06/10/2024")):
+        docs.append(
+            (
+                "invoice",
+                [
+                    (
+                        [
+                            "Bayside Electric Co.",
+                            "Lic. No. 998877  (760) 555-0400",
+                            "INVOICE",
+                            f"Invoice # {num}",
+                            f"Date: {day}",
+                        ],
+                        _fill("Line item", 8),
+                        ["Thank you for your business"],
+                    )
+                ],
+            )
+        )
+    # D7 pool service log, 4 pages, date at top of each page
+    pages = []
+    for k, wk in enumerate(("2024-05-06", "2024-05-13", "2024-05-20", "2024-05-27"), 1):
+        pages.append(
+            (
+                ["Blue Wave Pool Service - Weekly Service Log", f"Week of {wk}"],
+                _fill(f"Visit {k}", 10),
+                ["Blue Wave Pool Service (760) 555-0500"],
+            )
+        )
+    docs.append(("other", pages))
+    # D8 roof warranty, 2 pages, second page heading repeats the form word
+    docs.append(
+        (
+            "warranty",
+            [
+                (
+                    ["Summit Roofing, Inc.", "LIMITED WORKMANSHIP WARRANTY", "(760) 555-0600"],
+                    _fill("Coverage", 10),
+                    [],
+                ),
+                (["WARRANTY TERMS AND CONDITIONS (continued)"], _fill("Terms", 11), []),
+            ],
+        )
+    )
+    return docs
+
+
+def review_bundle2():
+    docs = []
+    # D1 pool pump manual, 8 pages, figure captions "Figure k of 3" near the foot
+    pages = []
+    for k in range(1, 9):
+        top = ["HydroMax Variable Speed Pump", "Installation and User Guide"]
+        mid = _fill(f"Chapter {k}", 11)
+        bottom = []
+        if k == 1:
+            bottom.append("Technical support (800) 555-0142")
+        if k in (3, 4):
+            bottom.append(f"Wiring diagram, Figure {k - 2} of 3")
+        if k == 7:
+            bottom.append("Still stuck? Call our service line (888) 555-0190")
+        bottom.append(f"- {k} -")
+        pages.append((top, mid, bottom))
+    docs.append(("manual", pages))
+    # D2, D3 two monthly statements from the utility, "Page k of 2"
+    for month in ("01/15/2024", "02/15/2024"):
+        pages = []
+        for k in (1, 2):
+            top = (
+                ["Seaview Water District", f"Statement date {month}"]
+                if k == 1
+                else ["Seaview Water District", "Usage detail"]
+            )
+            pages.append((top, _fill("Usage", 10), [f"Page {k} of 2", "(760) 555-0700"]))
+        docs.append(("other", pages))
+    # D4 one-page letter from a tile contractor
+    docs.append(
+        (
+            "other",
+            [
+                (
+                    ["Rivera Tile and Stone", "Lic # 445566", "(760) 555-0800", "Dear Owner,"],
+                    _fill("Tile note", 8),
+                    [],
+                )
+            ],
+        )
+    )
+    # D5 renovation journal, 3 pages, a dated heading at the top of each page
+    pages = []
+    for d in ("Tuesday, June 4, 2024", "Friday, June 7, 2024", "Monday, June 10, 2024"):
+        pages.append(([d, "Kitchen remodel journal"], _fill("Journal", 11), []))
+    docs.append(("other", pages))
+    # D6 HOA violation notice
+    docs.append(
+        (
+            "other",
+            [
+                (
+                    [
+                        "Coastal Bluffs Homeowners Association",
+                        "August 1, 2024",
+                        "NOTICE OF VIOLATION",
+                        "(760) 555-0101",
+                    ],
+                    _fill("Notice", 8),
+                    [],
+                )
+            ],
+        )
+    )
+    # D7 two-page quote
+    docs.append(
+        (
+            "estimate",
+            [
+                (
+                    ["Pacific Solar Screens LLC", "QUOTE", "Quote # Q-778", "July 2, 2024"],
+                    _fill("Quote item", 9),
+                    ["(760) 555-0900"],
+                ),
+                (
+                    ["Pacific Solar Screens LLC", "Quote # Q-778 (continued)"],
+                    _fill("Quote terms", 9),
+                    ["(760) 555-0900"],
+                ),
+            ],
+        )
+    )
+    return docs
+
+
+def review_bundle3():
+    docs = []
+    # D1 3-page report, "Page k of 3"
+    docs.append(
+        (
+            "inspection_report",
+            [
+                (
+                    ["Harbor Chimney Sweeps", "CHIMNEY INSPECTION REPORT"]
+                    if k == 1
+                    else ["Harbor Chimney Sweeps"],
+                    _fill(f"Chimney {k}", 10),
+                    [f"Page {k} of 3"],
+                )
+                for k in (1, 2, 3)
+            ],
+        )
+    )
+    # D2 one-page handwritten-style receipt, no letterhead
+    docs.append(
+        (
+            "invoice",
+            [
+                (
+                    [
+                        "Thank you for your business!",
+                        "Received from owner for gutter cleaning, paid in full.",
+                    ],
+                    _fill("Receipt", 6),
+                    ["Gutter Guys"],
+                )
+            ],
+        )
+    )
+    # D3 garage door opener manual, 2 pages, unnumbered
+    docs.append(
+        (
+            "manual",
+            [
+                (["LiftRight 3000 Garage Door Opener", "OWNERS MANUAL"], _fill("Opener", 10), []),
+                (["LiftRight 3000 Garage Door Opener"], _fill("Opener", 10), []),
+            ],
+        )
+    )
+    # D4, D5 two letters from the same HOA, same phone, different dates
+    for d in ("January 5, 2024", "February 9, 2024"):
+        docs.append(
+            (
+                "other",
+                [
+                    (
+                        [
+                            "Coastal Bluffs Homeowners Association",
+                            "(760) 555-0101 | www.coastalbluffs.example",
+                            d,
+                        ],
+                        _fill("HOA letter", 9),
+                        [],
+                    )
+                ],
+            )
+        )
+    # D6 a neighbour's note, nothing distinctive
+    docs.append(
+        (
+            "other",
+            [
+                (
+                    ["Hi neighbours,", "About the shared fence repair"],
+                    _fill("Fence", 8),
+                    ["Thanks, Pat"],
+                )
+            ],
+        )
+    )
+    # D7 a 2-page electrical panel label schedule, then its manufacturer's data sheet
+    docs.append(
+        (
+            "other",
+            [
+                (["Panel schedule, main service"], _fill("Circuit", 12), []),
+                (["Panel schedule, sub panel"], _fill("Circuit", 12), []),
+            ],
+        )
+    )
+    docs.append(
+        (
+            "manual",
+            [
+                (
+                    ["Voltek Breakers Inc.", "Product data sheet"],
+                    _fill("Spec", 10),
+                    ["www.voltek.example"],
+                )
+            ],
+        )
+    )
+    return docs
+
+
+def review_flatten(docs):
+    pages, starts, types, p = [], [], [], 1
+    for t, ps in docs:
+        starts.append(p)
+        types.append(t)
+        pages += ps
+        p += len(ps)
+    return pages, starts, types
+
+
+REVIEW_BUNDLES = {
+    "review_b1.pdf": lambda: review_bundle1(True),
+    "review_b1b.pdf": lambda: review_bundle1(False),
+    "review_b2.pdf": review_bundle2,
+    "review_b3.pdf": review_bundle3,
+}
+
+
+def review_layout(name: str) -> tuple[list, list[int], list[str]]:
+    """``(pages, document starts, doc types)`` of a review bundle."""
+    return review_flatten(REVIEW_BUNDLES[name]())
+
+
 def _pdf(path: Path, *drawers) -> None:
     from reportlab.pdfgen import canvas as rl_canvas
 
@@ -610,6 +1157,11 @@ FILE_NAMES = (
     "invoice.pdf",
     "bundle.pdf",
     "unnumbered_bundle.pdf",
+    "mixed_bundle.pdf",
+    "review_b1.pdf",
+    "review_b1b.pdf",
+    "review_b2.pdf",
+    "review_b3.pdf",
     "heat_pump_guide.docx",
     "irrigation_notes.html",
     "garage_door.md",
@@ -625,6 +1177,10 @@ def build(out_dir: Path = FILES_DIR) -> list[Path]:
     _pdf(out_dir / "invoice.pdf", draw_invoice)
     _pdf(out_dir / "bundle.pdf", draw_inspection, draw_estimate, draw_invoice)
     _pdf(out_dir / "unnumbered_bundle.pdf", draw_unnumbered)
+    _pdf(out_dir / "mixed_bundle.pdf", draw_mixed)
+    for name in REVIEW_BUNDLES:
+        pages = review_layout(name)[0]
+        _pdf(out_dir / name, lambda canvas, pages=pages: _draw_review(canvas, pages))
     write_docx(out_dir / "heat_pump_guide.docx")
     (out_dir / "irrigation_notes.html").write_text(HTML_SOURCE, encoding="utf-8")
     (out_dir / "garage_door.md").write_text(MARKDOWN_SOURCE, encoding="utf-8")

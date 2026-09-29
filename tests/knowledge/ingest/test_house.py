@@ -71,7 +71,9 @@ def test_heuristics_find_at_least_nine_of_the_eleven_boundaries(house_pages):
 
 
 def test_no_running_header_survives_cleaning(house_pages):
-    result = clean_pages(house_pages, file_sha="0" * 64, parser="pdfium")
+    # the pipeline order: segment the raw pages, then clean with the documents
+    documents = segment_file(house_pages, file_sha="0" * 64, use_llm=False).documents
+    result = clean_pages(house_pages, file_sha="0" * 64, parser="pdfium", documents=documents)
     for page in result.pages:
         assert "Envelope ID" not in page.text, page.page
         assert not re.search(r"Page \d+ of \d+", page.text), page.page
