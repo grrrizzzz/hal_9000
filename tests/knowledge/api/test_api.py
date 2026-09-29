@@ -683,8 +683,8 @@ def _raw_get(app, raw_path: bytes) -> tuple[int, bytes]:
 
 def test_the_services_wire_the_post_ingest_regression_and_retention(tmp_path):
     from hal9000.knowledge.api.services import build_services
-    from hal9000.knowledge.obs import traces
     from hal9000.knowledge.ingest.pipeline import IngestPipeline, no_regression
+    from hal9000.knowledge.obs import traces
     from tests.knowledge.answer.conftest import make_settings
 
     settings = make_settings(tmp_path)
