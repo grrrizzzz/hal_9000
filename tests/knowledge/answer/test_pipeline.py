@@ -491,7 +491,10 @@ def test_a_slow_query_embedding_counts_against_the_deadline(settings, conn):
 
     stream = ScriptedStream([FURNACE_OK])
     started = time.monotonic()
-    answer, events = ask(make(settings, stream, embedder=Slow()), conn, "How old is the furnace?")
+    from hal9000.knowledge.retrieve import QueryVectorCache
+
+    pipeline = make(settings, stream, embedder=Slow(), query_cache=QueryVectorCache())  # cold
+    answer, events = ask(pipeline, conn, "How old is the furnace?")
     assert time.monotonic() - started < 1.5
     assert answer.outcome == "error" and stream.calls == []
     assert events.of("sources")[0].banner == BANNER_EMBEDDING  # BM25 was tried meanwhile
@@ -560,3 +563,20 @@ def test_cancelling_closes_the_upstream_stream_explicitly(settings, conn, embedd
             conn, "How old is the furnace?", emit=lambda e: None, cancel=cancel
         )
     assert kept[0].closed is True and kept[0].sent == 3
+
+
+def test_a_cap_reached_inside_retrieval_turns_retrieval_only(settings, conn):
+    """KWP4 lets BudgetExceeded out of retrieve(); the chat answers from BM25 without a call."""
+    from hal9000.cost.metering import MonthlyCapExceeded
+    from hal9000.knowledge.retrieve import QueryVectorCache
+
+    def capped(*args, **kw):
+        raise MonthlyCapExceeded("synthetic: the knowledge cap was reached mid-question")
+
+    stream = ScriptedStream([])
+    pipeline = make(settings, stream, embedder=capped, query_cache=QueryVectorCache())
+    answer, events = ask(pipeline, conn, "How old is the furnace?")
+    assert stream.calls == [] and answer.outcome == "retrieval_only"
+    sources = events.of("sources")
+    assert sources[-1].retrieval_only and sources[-1].banner == BANNER_CAP and answer.citations
+    assert events.names()[-2:] == ["verify", "done"]

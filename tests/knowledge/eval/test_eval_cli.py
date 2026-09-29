@@ -267,7 +267,8 @@ def test_eval_judge_prep(env, tmp_path, fixture_docs, monkeypatch, capsys):
     _approve_facts(env)
     assert main(["kb", "eval", "judge-prep", run.id, "--yes"]) == 1
     # KWP6's answer binding is found; the run's profile has not been built here
-    assert "index profile 'p1' is not built" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "index profile 'p1' is not built" in err or "no index to search" in err
 
     def answerer(conn, settings, *, meter, run):
         assert run.stage == "S4" and meter is not None

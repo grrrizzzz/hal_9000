@@ -60,11 +60,13 @@ from hal9000.knowledge.answer.prompt import (
     read_policy,
     regeneration_prompt,
 )
+from hal9000.knowledge.answer.retrieval import NoActiveProfile as _RetrieveNoActiveProfile
 from hal9000.knowledge.answer.retrieval import (
     RetrievalConfig,
     Retriever,
     Turn,
     embedding_unavailable,
+    search_documents,
 )
 from hal9000.knowledge.answer.verify import Verification, verify_answer
 from hal9000.knowledge.config import AGENT, KnowledgeFile, KnowledgeSettings, load_knowledge_file
@@ -130,8 +132,9 @@ def _is_refusal(text: str) -> bool:
     return text.strip().startswith(NOT_IN_SOURCES)
 
 
-class NoActiveProfile(LookupError):
-    """No index profile serves the chat yet (plan §6.2, gate G-K2)."""
+#: No index profile serves the chat yet (plan §6.2, gate G-K2): KWP4's error, so the
+#: API and the CLI catch one class whichever side notices first.
+NoActiveProfile = _RetrieveNoActiveProfile
 
 
 @dataclass
@@ -143,7 +146,8 @@ class AnswerDeps:
         generate_fn: like :func:`hal9000.llm.generate_response` (condensing).
         meter: meters every paid call (``None``: fake mode, nothing is paid).
         embed_fn: the embedding callable for query vectors (``None``: by model).
-        retriever_cls: the KWP4 ``Retriever`` (or a stand-in with its interface).
+        retriever_cls: KWP4's ``Retriever`` (one is built per question).
+        query_cache: the query-vector cache (``None``: KWP4's process-wide one).
         budget_check: raises ``BudgetExceeded`` when the question may not pay for
             anything (default: the meter's cap check for the agent).
         agent: ``knowledge``, or ``knowledge-eval`` for the evaluation harness.
@@ -154,6 +158,7 @@ class AnswerDeps:
     meter: Any | None = None
     embed_fn: Callable[..., Any] | None = None
     retriever_cls: type = Retriever
+    query_cache: Any | None = None
     budget_check: Callable[[str], None] | None = None
     agent: str = AGENT
     clock: Callable[[], float] = time.monotonic
@@ -281,23 +286,33 @@ class AnswerPipeline:
             generate=condense,
             config=config,
             profile=profile,
+            tier=self.settings.condense_tier,
+            query_cache=self.deps.query_cache,
         )
 
-    def retrieve(
+    def search(
         self,
         conn: sqlite3.Connection,
-        question: str,
+        query: str,
         *,
-        history: Sequence[Turn] = (),
+        k: int = 10,
         filters: SearchFilters | None = None,
         bm25_only: bool = False,
     ) -> RetrievalResult:
-        """Retrieval alone (``GET /api/search``, and the first half of :meth:`ask`)."""
+        """Retrieval alone (``GET /api/search``), with KWP4's :func:`search_documents`."""
         profile = self._profile(conn)
         config = RetrievalConfig.from_settings(self.knowledge_file or self.settings)
         if bm25_only:
             config = replace(config, mode="bm25")
-        return self._retriever(conn, profile, config).retrieve(question, history, filters, config)
+        return search_documents(
+            conn,
+            self._embeddings(conn, profile),
+            query,
+            k=k,
+            filters=filters,
+            config=config,
+            profile=profile,
+        )
 
     # ---------------------------------------------------------------- ask
     def ask(
@@ -422,12 +437,21 @@ class AnswerPipeline:
         trace.hits = hits_from_retrieval(result)
         trace.context_tokens = result.context_tokens
         state.sources = number_sources(conn, result.selected)
-        if embedding_unavailable(result, config.mode):
+        if embedding_unavailable(result):
             state.banner = BANNER_EMBEDDING
 
         if capped:
             self._sources(emit, state, retrieval_only=True, banner=BANNER_CAP)
             state.outcome = "retrieval_only"
+            return
+        if self.deps.clock() >= deadline:
+            # the retriever falls back quietly when condensing or embedding time out
+            # (the question as asked, BM25 only); the question's time is still up
+            if state.banner:
+                self._sources(emit, state, banner=state.banner)
+            trace.error = describe_error(DeadlineExceeded("the question's time limit passed"))
+            state.outcome = "error"
+            self._sources(emit, state, retrieval_only=True, banner=BANNER_TIMEOUT)
             return
         if result.abstained or not state.sources:
             self._sources(emit, state, banner=state.banner)

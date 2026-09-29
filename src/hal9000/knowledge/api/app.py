@@ -592,9 +592,9 @@ def _api_router() -> APIRouter:
         try:
             try:
                 pipeline.deps.check_budget(q)
-                result = pipeline.retrieve(conn, q, filters=filters)
-            except BudgetExceeded:
-                result = pipeline.retrieve(conn, q, filters=filters, bm25_only=True)
+                result = pipeline.search(conn, q, k=k, filters=filters)
+            except BudgetExceeded:  # over the cap: keyword search still works (plan §7.4)
+                result = pipeline.search(conn, q, k=k, filters=filters, bm25_only=True)
         except NoActiveProfile as error:
             raise HTTPException(status_code=409, detail=str(error)) from None
         return result.model_copy(update={"candidates": result.candidates[:k]})
