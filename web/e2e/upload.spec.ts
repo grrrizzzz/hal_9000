@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { dropFiles, NESTED_FOLDER, signIn, writeTree } from "./fixtures";
+import { dropFiles, NESTED_FOLDER, RUN, signIn, writeTree } from "./fixtures";
 
 test("pick a nested folder: summary skips the images, jobs reach indexed", async ({ page }, info) => {
   const root = info.outputPath("pick");
@@ -34,8 +34,8 @@ test("pick a nested folder: summary skips the images, jobs reach indexed", async
 test("drop loose files onto the drop zone", async ({ page }) => {
   await signIn(page, "/upload");
   await dropFiles(page, '[data-testid="drop-zone"]', [
-    { name: "boiler-notes.txt", body: "Synthetic boiler notes." },
-    { name: "deck.md", body: "# Deck\n\nStained in 2024." },
+    { name: "boiler-notes.txt", body: `Synthetic boiler notes. Fixture run ${RUN}.` },
+    { name: "deck.md", body: `# Deck\n\nStained in 2024. Fixture run ${RUN}.` },
     { name: "photo.jpg", body: "x", type: "image/jpeg" },
   ]);
   await expect(page.getByTestId("summary-text")).toHaveText("3 files found: 2 will be added, 1 skipped (.jpg ×1)");
