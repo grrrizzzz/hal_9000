@@ -25,6 +25,23 @@ from tests.fakes import FakeLLM
 PROVIDER_VARS = ("LLM_PROVIDER", "ANTHROPIC_API_KEY", "OPENAI_API_KEY")
 
 
+#: Markers that run only when named in ``-m`` (registered in pyproject.toml).
+OPT_IN_MARKERS = ("live", "models", "house")
+
+
+def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
+    """Skip opt-in tests unless selected: ``pytest -m house`` runs the house tests.
+
+    A plain ``pytest`` on a machine that has keys, models and the house bundle must
+    still spend nothing and read no house data (knowledge rules K2, K3, K9).
+    """
+    selected = config.getoption("markexpr") or ""
+    for item in items:
+        for marker in OPT_IN_MARKERS:
+            if item.get_closest_marker(marker) and marker not in selected:
+                item.add_marker(pytest.mark.skip(reason=f"opt-in: select it with -m {marker}"))
+
+
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Strip provider keys and every ``AGENT_*`` variable for the duration of a test."""
