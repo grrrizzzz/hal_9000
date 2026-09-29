@@ -681,8 +681,9 @@ def _raw_get(app, raw_path: bytes) -> tuple[int, bytes]:
     return sent["status"], sent["body"]
 
 
-def test_the_services_wire_the_post_ingest_regression(tmp_path):
+def test_the_services_wire_the_post_ingest_regression_and_retention(tmp_path):
     from hal9000.knowledge.api.services import build_services
+    from hal9000.knowledge.obs import traces
     from hal9000.knowledge.ingest.pipeline import IngestPipeline, no_regression
     from tests.knowledge.answer.conftest import make_settings
 
@@ -691,6 +692,7 @@ def test_the_services_wire_the_post_ingest_regression(tmp_path):
     try:
         hook = built.ingest.regression
         assert hook is not no_regression and hook.__qualname__.startswith("ingest_hook")
+        assert traces._retention.yaml_path == settings.yaml_path  # trace_retention_days
     finally:
         built.close()
 

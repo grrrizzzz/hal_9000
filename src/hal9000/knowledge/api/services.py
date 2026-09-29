@@ -148,10 +148,11 @@ def build_services(
     from hal9000.knowledge.eval.regression import ingest_hook
     from hal9000.knowledge.ingest.jobs import BUS
     from hal9000.knowledge.ingest.pipeline import IngestPipeline, no_regression
-    from hal9000.knowledge.obs import metrics
+    from hal9000.knowledge.obs import metrics, traces
     from hal9000.knowledge.storage import open_db
 
     open_db(settings.db_path).close()  # migrated before anything else opens it
+    traces.configure_retention(settings.yaml_path)  # trace_retention_days
     kf = load_knowledge_file(settings.yaml_path)
     auth = Auth(
         settings.require_passcode(), load_secret(settings.data_dir / "knowledge" / "session.key")

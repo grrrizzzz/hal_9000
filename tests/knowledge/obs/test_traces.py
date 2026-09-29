@@ -309,6 +309,31 @@ def test_retention_is_180_days(kb_db):
     assert RetentionJob().days == 180
 
 
+def test_retention_reads_trace_retention_days_from_knowledge_yaml(kb_db, tmp_path, caplog):
+    yaml_path = tmp_path / "knowledge.yaml"
+    job = RetentionJob(yaml_path=yaml_path, interval_s=0)
+    assert job.days == RETENTION_DAYS  # no file: the default
+    yaml_path.write_text("trace_retention_days: 30\n")
+    assert job.days == 30  # read when the job runs, so an edit applies at the next purge
+    now = datetime.now(UTC)
+    _insert(kb_db, "day-31", now - timedelta(days=31))
+    _insert(kb_db, "day-29", now - timedelta(days=29))
+    assert job.maybe_run(kb_db) == 1
+    assert {r[0] for r in kb_db.execute("SELECT id FROM traces")} == {"day-29"}
+    for bad in ("trace_retention_days: 0\n", "trace_retention_days: [\n", "no_such_key: 1\n"):
+        yaml_path.write_text(bad)
+        assert job.days == RETENTION_DAYS  # never breaks a request
+    assert "keeping 180 days" in caplog.text
+    assert RetentionJob(days=7, yaml_path=yaml_path).days == 7
+
+
+def test_the_service_points_retention_at_its_own_knowledge_yaml(tmp_path, monkeypatch):
+    monkeypatch.setattr(traces, "_retention", traces._retention)  # restored afterwards
+    traces.configure_retention(tmp_path / "knowledge.yaml")
+    (tmp_path / "knowledge.yaml").write_text("trace_retention_days: 90\n")
+    assert traces._retention.days == 90
+
+
 # ------------------------------------------------------------ cancellation
 def test_a_closed_stream_is_cancelled_not_answered(kb_db):
     cancelled = _get("kb_questions_total", {"outcome": "cancelled"})
