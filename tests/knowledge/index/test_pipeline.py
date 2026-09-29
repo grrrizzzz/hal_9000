@@ -417,6 +417,24 @@ def test_a_parse_over_its_time_limit_kills_and_restarts_the_process(tmp_path):
         process.close()
 
 
+def test_a_file_the_child_cannot_parse_fails_inside_the_parse_stage(tmp_path):
+    """The child's ParseError is raised within stage("parse"): it counts there, not as "request"."""
+    from hal9000.knowledge.ingest.parsers import ParseError, get_parser
+    from hal9000.knowledge.ingest.pipeline import ParseProcess
+    from hal9000.knowledge.obs.timing import start_trace
+
+    broken = tmp_path / "broken.pdf"
+    broken.write_bytes(b"%PDF-1.7\n" + b"\x00 not a pdf \x00" * 40)
+    process = ParseProcess()
+    try:
+        with start_trace(kind="ingest") as trace, pytest.raises(ParseError):
+            process.parse(broken, get_parser("pdfium"), timeout_s=30, max_chars=3000)
+    finally:
+        process.close()
+    [timing] = trace.stages
+    assert timing.stage == "parse" and timing.error == "ParseError"
+
+
 # ------------------------------------------------------------ segmentation
 def _llm_reply(documents: list[dict]) -> str:
     return json.dumps({"tool": "record_documents", "args": {"documents": documents}})

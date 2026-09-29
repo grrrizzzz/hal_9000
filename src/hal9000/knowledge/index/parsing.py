@@ -182,8 +182,9 @@ class ParseProcess:
                     f"Could not parse {path.name}: the {parser.name} parser crashed "
                     f"(exit code {code})."
                 ) from None
-        if kind == "ok":
-            return payload
-        if kind == "parse_error":
-            raise ParseError(payload)
-        raise ParseError(f"Could not parse {path.name}: {payload}")
+            # still inside the stage, so a file that fails to parse counts under "parse"
+            if kind == "parse_error":
+                raise ParseError(payload)
+            if kind != "ok":
+                raise ParseError(f"Could not parse {path.name}: {payload}")
+        return payload

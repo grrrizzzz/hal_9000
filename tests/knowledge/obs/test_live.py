@@ -462,24 +462,15 @@ def test_tokens_and_cost_by_purpose(live: Live):
         assert labels["purpose"] in metrics.PURPOSES
 
 
-#: KWP3's ``ParseProcess.parse`` (index/parsing.py) raises the child's ParseError
-#: after its ``stage("parse")`` block has closed, so a file that fails to parse is
-#: counted as ``stage="request"`` and the Ingestion dashboard's error panel (the
-#: ingest stages) never shows it. Strict: this turns red once that is fixed.
-PARSE_ERROR_OUTSIDE_STAGE = pytest.mark.xfail(
-    strict=True, reason="ParseProcess.parse raises ParseError outside stage('parse') (KWP3)"
-)
-
-
 def test_errors_are_counted_once_by_stage_and_kind(live: Live):
     assert live.delta("kb_errors_total", stage="embed_query", kind="RuntimeError") == 1
     total = sum(live.delta("kb_errors_total", **d) for d, _ in live.samples("kb_errors_total"))
     assert total == 2  # the embedding and the broken PDF, once each
 
 
-@PARSE_ERROR_OUTSIDE_STAGE
 def test_a_file_that_fails_to_parse_is_counted_under_parse(live: Live):
     assert live.delta("kb_errors_total", stage="parse", kind="ParseError") == 1
+    assert live.delta("kb_errors_total", stage="request", kind="ParseError") == 0
 
 
 def test_grounding_feedback_and_ingest_counters(live: Live):
@@ -565,20 +556,7 @@ def check_promql_live(expr: str, live: Live) -> None:
             assert label in available, f"grouping by {label!r}: not on {names} ({expr})"
 
 
-LIVE_PROM_QUERIES = [
-    pytest.param(
-        where,
-        expr,
-        id=where,
-        marks=[PARSE_ERROR_OUTSIDE_STAGE]
-        if where.endswith("Ingestion errors by stage and kind")
-        else [],
-    )
-    for where, expr in PROM_QUERIES
-]
-
-
-@pytest.mark.parametrize("where,expr", LIVE_PROM_QUERIES)
+@pytest.mark.parametrize("where,expr", PROM_QUERIES, ids=[w for w, _ in PROM_QUERIES])
 def test_every_prometheus_query_selects_live_series(live: Live, where, expr):
     check_promql_live(expr, live)
 
