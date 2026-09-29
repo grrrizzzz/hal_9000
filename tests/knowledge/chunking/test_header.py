@@ -26,10 +26,10 @@ def test_header_format() -> None:
             "Synthetic Home Inspection",
             "inspection_report",
             "Example Inspections LLC",
-            date(2023, 6, 22),
+            date(2001, 2, 3),
             ("3 PLUMBING", "3.1.2 Plumbing – Water Heater: Valve Leak"),
         )
-        == "Synthetic Home Inspection (inspection report, Example Inspections LLC, 2023-06-22)"
+        == "Synthetic Home Inspection (inspection report, Example Inspections LLC, 2001-02-03)"
         " › 3 PLUMBING › 3.1.2 Plumbing – Water Heater: Valve Leak"
     )
 
@@ -55,7 +55,7 @@ def test_header_is_indexed_but_not_displayed(name: str) -> None:
     assert drafts
     for d in drafts:
         assert d.header.startswith(
-            "Synthetic Home Inspection (inspection report, Example Inspections LLC, 2023-06-22)"
+            "Synthetic Home Inspection (inspection report, Example Inspections LLC, 2001-02-03)"
         )
         assert d.index_text == f"{d.header}\n{d.text}"
         assert d.index_tokens == count_tokens(d.index_text) > d.tokens
@@ -88,7 +88,7 @@ def test_chunks_before_any_heading_have_the_document_header_only() -> None:
     (d,) = chunk(inp, "fixed", size=64)
     assert d.section_path == ()
     assert d.header == (
-        "Synthetic Home Inspection (inspection report, Example Inspections LLC, 2023-06-22)"
+        "Synthetic Home Inspection (inspection report, Example Inspections LLC, 2001-02-03)"
     )
 
 

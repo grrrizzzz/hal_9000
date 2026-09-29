@@ -157,7 +157,7 @@ def test_detector_heading_forms(line: str, title: str, level: int) -> None:
     [
         "1. Replace the valve and test the relief line.",  # a numbered list item
         "3.5 gallons were found in the pan.",  # a measurement
-        "2023 was the year of the inspection.",
+        "2001 was the year of the inspection.",
         "Recommendation: Replace the valve.",
         "The WATER HEATER is old.",
         "A",

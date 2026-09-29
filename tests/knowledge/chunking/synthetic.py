@@ -43,7 +43,7 @@ META = dict(
     title="Synthetic Home Inspection",
     doc_type="inspection_report",
     vendor="Example Inspections LLC",
-    doc_date=date(2023, 6, 22),
+    doc_date=date(2001, 2, 3),
 )
 
 

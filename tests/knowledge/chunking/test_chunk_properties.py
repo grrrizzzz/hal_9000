@@ -29,10 +29,20 @@ CHUNKERS = ["fixed", "recursive", "structure", "parent_child"]
 
 @st.composite
 def cases(draw, texts=None):
-    """(input, chunker kwargs) with a size, an overlap up to half the size and a parent size."""
+    """(input, chunker kwargs) with a size, an overlap up to half the size and a parent size.
+
+    About a quarter of the cases have no overlap; the rest mostly 10–20% of N.
+    """
     inp = draw(chunk_inputs(texts))
     size = draw(sizes)
-    overlap = draw(st.one_of(st.just(0), st.integers(0, size // 2)))
+    overlap = draw(
+        st.one_of(
+            st.just(0),
+            st.integers(1, size // 2),
+            st.integers(size // 10, size // 5),
+            st.sampled_from([overlap_tokens(size, 15)]),
+        )
+    )
     parent_size = draw(st.integers(size, max(size, 2000)))
     return inp, dict(size=size, overlap=overlap, parent_size=parent_size)
 
@@ -144,16 +154,37 @@ def test_fixed_overlap_equals_the_configured_value_within_one_sentence(case) -> 
 @pytest.mark.parametrize("name", ["recursive", "structure", "parent_child"])
 @PROPERTY
 @given(case=cases(doc_texts()))
-def test_sentence_overlap_never_exceeds_the_configured_value(name: str, case) -> None:
-    """Other chunkers carry whole trailing sentences into the next chunk, up to *O* tokens."""
+def test_sentence_overlap_is_within_one_sentence_of_the_configured_value(name: str, case) -> None:
+    """Other chunkers carry whole trailing sentences (else lines) into the next chunk.
+
+    Upper bound: never more than *O* tokens. Lower bound: when the previous
+    chunk is long enough to give *O* tokens, the carried text falls short of
+    *O* by less than two sentences (the earliest sentence start that fits,
+    or the next one when the extended chunk would pass *N*). ``structure``
+    overlaps only inside a split unit, so its pairs are checked when they
+    overlap; ``recursive`` pairs always, ``parent_child`` pairs under one parent.
+    """
     inp, kw = case
+    overlap = kw["overlap"]
     drafts = [d for d in _run(name, inp, kw) if d.role != "parent"]
+    sentence = max(
+        _longest_sentence_tokens(inp.text, lines=False), _longest_sentence_tokens(inp.text)
+    )
     for a, b in zip(drafts, drafts[1:]):
-        if b.char_start < a.char_end:
-            assert count_tokens(inp.text[b.char_start : a.char_end]) <= kw["overlap"] + 2
-    if kw["overlap"] == 0:
-        for a, b in zip(drafts, drafts[1:]):
+        shared = (
+            count_tokens(inp.text[b.char_start : a.char_end]) if b.char_start < a.char_end else 0
+        )
+        assert shared <= overlap + 2
+        if overlap == 0:
             assert b.char_start >= a.char_end
+            continue
+        related = {
+            "recursive": True,
+            "structure": b.char_start < a.char_end,
+            "parent_child": a.parent_key == b.parent_key,
+        }[name]
+        if related and a.tokens >= 2 * overlap + sentence:
+            assert shared >= overlap - 2 * sentence - 3, (shared, overlap, sentence)
 
 
 @pytest.mark.parametrize("size", [256, 512, 768, 1024, 1536])
