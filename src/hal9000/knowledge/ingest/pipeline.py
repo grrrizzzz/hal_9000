@@ -336,16 +336,15 @@ def clean_for_documents(
 
     The one adapter between the pipeline and KWP1's cleaning.
     """
-    # TODO(KWP1b): pass `documents` to clean_pages once it takes segmented document
-    # boundaries (kwp/1b-house), so running lines are detected per sub-document. Until
-    # then clean_pages counts repeated lines across the whole file.
-    del documents
+    # Running headers and footers are detected per segmented document as well as per
+    # file, so a short sub-document's own letterhead and page footers are found.
     return clean_pages(
         parsed.pages,
         file_sha=file_sha,
         parser=parsed.parser,
         repeat_fraction=repeat_fraction,
         pseudo_pages=parsed.pseudo_pages,
+        documents=list(documents),
     )
 
 

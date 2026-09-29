@@ -59,7 +59,10 @@ def test_the_whole_fixture_corpus_ingests_under_five_seconds(conn, make_pipeline
     assert profile is not None and profile.name == PROFILE
     counts = table_counts(conn)
     assert counts["files"] == len(corpus.ALL_FILES)
+    # heuristic segmentation (no LLM here) cannot see the review-b3 boundaries that carry no
+    # signal at all; those are left to the LLM path (KWP1b)
     expected_docs = sum(len(item.documents) for item in corpus.ALL_FILES)
+    expected_docs -= len(corpus.REVIEW_B3_NO_SIGNAL)
     assert counts["documents"] == expected_docs
     assert counts["pages"] == sum(item.page_count for item in corpus.ALL_FILES)
     assert counts[fts_table(profile.id)] == counts[vec_table(profile.id)] == counts["chunks"] > 0
@@ -580,3 +583,25 @@ def test_uploading_again_recovers_a_job_left_running_by_a_dead_process(conn, mak
     again = pipeline.submit(conn, corpus.TEXT.path, "pool_log.txt")
     assert again.status == "added" and again.job_id == first.job_id and "retrying" in again.reason
     assert pipeline.worker(":unused:").run_job(conn, again.job_id).status == "done"
+
+
+def test_cleaning_receives_the_segmented_documents(monkeypatch):
+    """The pipeline cleans with per-document running-line detection (order: segment → clean)."""
+    from hal9000.knowledge.ingest import pipeline as pl
+
+    seen: dict[str, object] = {}
+
+    def spy(pages, **kwargs):
+        seen.update(kwargs)
+        return "cleaned"
+
+    monkeypatch.setattr(pl, "clean_pages", spy)
+
+    class _Parsed:
+        pages = ["p1", "p2"]
+        parser = "pdfium"
+        pseudo_pages = False
+
+    docs = [object(), object()]
+    assert pl.clean_for_documents(_Parsed(), docs, file_sha="0" * 64) == "cleaned"
+    assert seen["documents"] == docs
