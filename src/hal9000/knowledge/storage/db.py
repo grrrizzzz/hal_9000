@@ -79,31 +79,71 @@ def schema_version(conn: sqlite3.Connection) -> int:
     return int(row[0])
 
 
-def migrate(conn: sqlite3.Connection) -> int:
-    """Apply every migration newer than the database, each atomically. Returns the version."""
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS schema_version ("
-        "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+_VERSION_TABLE = (
+    "CREATE TABLE IF NOT EXISTS schema_version ("
+    "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+)
+
+
+def statements(script: str) -> list[str]:
+    """Split a migration script into complete SQL statements."""
+    out: list[str] = []
+    buffer = ""
+    for line in script.splitlines(keepends=True):
+        buffer += line
+        if sqlite3.complete_statement(buffer):
+            if buffer.strip():
+                out.append(buffer.strip())
+            buffer = ""
+    if buffer.strip():
+        raise ValueError(f"incomplete SQL at the end of a migration: {buffer.strip()[:60]!r}")
+    return out
+
+
+def _too_new(current: int) -> SchemaTooNew:
+    return SchemaTooNew(
+        f"knowledge.db is at schema version {current}, but this code knows only up to "
+        f"{SCHEMA_VERSION}. Update hal9000 before opening it."
     )
-    conn.commit()
+
+
+def migrate(conn: sqlite3.Connection) -> int:
+    """Apply every migration newer than the database, each atomically. Returns the version.
+
+    Safe when several processes open a new database at once (the web service
+    and a CLI command): each migration runs under ``BEGIN IMMEDIATE`` (the
+    write lock) and re-reads the version *inside* that transaction, so a
+    migration another process applied while this one waited is skipped, not
+    applied twice. ``executescript`` is avoided because it commits first.
+    """
     current = schema_version(conn)
     if current > SCHEMA_VERSION:
-        raise SchemaTooNew(
-            f"knowledge.db is at schema version {current}, but this code knows only up to "
-            f"{SCHEMA_VERSION}. Update hal9000 before opening it."
-        )
-    for version, script in MIGRATIONS:
-        if version <= current:
-            continue
-        try:
-            conn.executescript(
-                "BEGIN;\n" + script + f"\nINSERT INTO schema_version (version, applied_at) "
-                f"VALUES ({version}, '{_now()}');\nCOMMIT;"
-            )
-        except sqlite3.Error:
-            if conn.in_transaction:
-                conn.rollback()
-            raise
+        raise _too_new(current)
+    if current == SCHEMA_VERSION:
+        return current
+    saved = conn.isolation_level
+    conn.isolation_level = None  # transactions are managed explicitly below
+    try:
+        for version, script in MIGRATIONS:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(_VERSION_TABLE)
+                current = schema_version(conn)
+                if current > SCHEMA_VERSION:
+                    raise _too_new(current)
+                if version > current:
+                    for statement in statements(script):
+                        conn.execute(statement)
+                    conn.execute(
+                        "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
+                        (version, _now()),
+                    )
+                conn.execute("COMMIT")
+            except BaseException:
+                conn.execute("ROLLBACK")
+                raise
+    finally:
+        conn.isolation_level = saved
     return schema_version(conn)
 
 

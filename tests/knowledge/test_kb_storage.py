@@ -108,6 +108,98 @@ def test_a_new_migration_applies_forward(tmp_path, monkeypatch):
     assert "note" in {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
 
 
+def test_a_migration_applied_by_another_process_while_waiting_is_skipped(tmp_path):
+    """Review (d): two connections open a new DB; the second waits, re-reads, skips."""
+    import threading
+    import time
+
+    path = tmp_path / "k.db"
+    other = storage.connect(path)  # the process that wins the race
+    mine = storage.connect(path)
+    other.isolation_level = None
+    other.execute("BEGIN IMMEDIATE")
+    other.execute(kdb._VERSION_TABLE)
+    for statement in kdb.statements(storage.MIGRATIONS[0][1]):
+        other.execute(statement)
+    other.execute("INSERT INTO schema_version VALUES (1, 'other process')")
+
+    outcome: dict = {}
+
+    def run() -> None:
+        try:
+            outcome["version"] = storage.migrate(mine)
+        except BaseException as error:  # reported below
+            outcome["error"] = error
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    time.sleep(0.3)
+    assert thread.is_alive(), "migrate() should be waiting for the write lock"
+    other.execute("COMMIT")
+    thread.join(timeout=30)
+
+    assert "error" not in outcome, outcome.get("error")
+    assert outcome["version"] == 1
+    rows = mine.execute("SELECT version, applied_at FROM schema_version").fetchall()
+    assert [tuple(r) for r in rows] == [(1, "other process")]
+    assert PLAN_TABLES <= _tables(mine)
+
+
+def test_the_version_is_reread_inside_the_write_lock(tmp_path, monkeypatch):
+    """Another process migrates between our first version read and our write: skip, don't redo."""
+    path = tmp_path / "k.db"
+    other, mine = storage.connect(path), storage.connect(path)
+    real = kdb.schema_version
+    raced: list[int] = []
+
+    def racing(conn):
+        value = real(conn)
+        if conn is mine and not raced:
+            raced.append(value)
+            storage.migrate(other)  # lands right after our (now stale) read
+        return value
+
+    monkeypatch.setattr(kdb, "schema_version", racing)
+    assert storage.migrate(mine) == 1
+    assert raced == [0]
+    assert mine.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 1
+
+
+def test_many_connections_migrating_a_new_file_at_once(tmp_path):
+    import threading
+
+    for attempt in range(3):
+        path = tmp_path / f"race{attempt}.db"
+        conns = [storage.connect(path) for _ in range(4)]
+        barrier = threading.Barrier(len(conns))
+        errors: list[BaseException] = []
+
+        def run(conn, barrier=barrier, errors=errors) -> None:
+            barrier.wait()
+            try:
+                storage.migrate(conn)
+            except BaseException as error:
+                errors.append(error)
+
+        threads = [threading.Thread(target=run, args=(c,)) for c in conns]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=60)
+        assert errors == []
+        assert conns[0].execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 1
+        assert PLAN_TABLES <= _tables(conns[0])
+
+
+def test_statements_splits_complete_sql():
+    assert kdb.statements("CREATE TABLE a (x TEXT DEFAULT ';');\n\nCREATE INDEX i ON a(x);\n") == [
+        "CREATE TABLE a (x TEXT DEFAULT ';');",
+        "CREATE INDEX i ON a(x);",
+    ]
+    with pytest.raises(ValueError, match="incomplete SQL"):
+        kdb.statements("CREATE TABLE b (x")
+
+
 def _profile(conn, name="p", active=0):
     cur = conn.execute(
         "INSERT INTO profiles (name, parser, chunker, size, header, embed_model, dimensions, "
