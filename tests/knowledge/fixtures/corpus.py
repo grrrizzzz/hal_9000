@@ -43,6 +43,7 @@ __all__ = [
     "REPEATED_LINE",
     "RUNNING_LINES",
     "TEXT",
+    "UNNUMBERED",
 ]
 
 FILES_DIR: Path = _b.FILES_DIR
@@ -144,6 +145,20 @@ BUNDLE = CorpusFile(
     (_INSPECTION_DOC, _shift(_ESTIMATE_DOC, 12), _shift(_INVOICE_DOC, 14)),
     no_text_pages=(_b.PHOTO_PAGE,),
 )
+UNNUMBERED = CorpusFile(
+    "unnumbered_bundle.pdf",
+    5,
+    (
+        ExpectedDocument(1, 1, "invoice", _b.UNNUMBERED_VENDORS[0],
+                         date.fromisoformat(_b.UNNUMBERED_DATES[0]), "Invoice DPS-1001"),
+        ExpectedDocument(2, 2, "invoice", _b.UNNUMBERED_VENDORS[0],
+                         date.fromisoformat(_b.UNNUMBERED_DATES[1]), "Invoice"),
+        ExpectedDocument(3, 4, "estimate", _b.UNNUMBERED_VENDORS[1],
+                         date.fromisoformat(_b.UNNUMBERED_DATES[2]), "Proposal HPR-311"),
+        ExpectedDocument(5, 5, "completion_notice", _b.UNNUMBERED_VENDORS[2],
+                         date.fromisoformat(_b.UNNUMBERED_DATES[3]), "Notice Of Work Completed"),
+    ),
+)  # fmt: skip
 DOCX = CorpusFile(
     "heat_pump_guide.docx",
     3,
@@ -177,12 +192,13 @@ ALL_FILES: tuple[CorpusFile, ...] = (
     ESTIMATE,
     INVOICE,
     BUNDLE,
+    UNNUMBERED,
     DOCX,
     HTML,
     MARKDOWN,
     TEXT,
 )
-PDF_FILES: tuple[CorpusFile, ...] = (INSPECTION, ESTIMATE, INVOICE, BUNDLE)
+PDF_FILES: tuple[CorpusFile, ...] = (INSPECTION, ESTIMATE, INVOICE, BUNDLE, UNNUMBERED)
 
 FINDINGS: tuple[ExpectedFinding, ...] = tuple(
     ExpectedFinding(f.id, f.heading, f.severity, f.recommendation, f.page) for f in _b.FINDINGS

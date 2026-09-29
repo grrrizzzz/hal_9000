@@ -9,6 +9,8 @@ letter spacing repaired).
 from __future__ import annotations
 
 import re
+import zipfile
+import zlib
 
 import pytest
 
@@ -20,15 +22,48 @@ def _squash(text: str) -> str:
     return re.sub(r"\s+", " ", text)
 
 
-def test_builder_reproduces_the_committed_files_byte_for_byte(tmp_path):
+def _content(path) -> object:
+    """File content with compression undone, so a different zlib build can't fail the test."""
+    data = path.read_bytes()
+    if path.suffix == ".pdf":
+        streams = re.findall(rb"stream\r?\n(.*?)\r?\nendstream", data, re.DOTALL)
+        inflated = []
+        for stream in streams:
+            try:
+                inflated.append(zlib.decompress(stream))
+            except zlib.error:
+                inflated.append(stream)  # page streams are written uncompressed
+        return re.sub(
+            rb"stream\r?\n.*?\r?\nendstream|/Length \d+", b"", data, flags=re.DOTALL
+        ), inflated
+    if path.suffix == ".docx":
+        with zipfile.ZipFile(path) as archive:
+            return [
+                (info.filename, info.date_time, archive.read(info)) for info in archive.infolist()
+            ]
+    return data
+
+
+def test_builder_reproduces_the_committed_files(tmp_path):
     built = build_fixture_corpus.build(tmp_path)
     assert [p.name for p in built] == [f.name for f in corpus.ALL_FILES]
     for path in built:
         committed = corpus.FILES_DIR / path.name
-        assert committed.read_bytes() == path.read_bytes(), (
+        if committed.read_bytes() == path.read_bytes():
+            continue  # byte-for-byte: the usual case with the locked versions
+        assert _content(committed) == _content(path), (
             f"{path.name} differs from the committed fixture; rerun "
             "`uv run python -m tests.knowledge.fixtures.build_fixture_corpus`"
         )
+
+
+def test_content_comparison_notices_a_real_change(tmp_path):
+    built = build_fixture_corpus.build(tmp_path)
+    pdf = built[0]
+    pdf.write_bytes(pdf.read_bytes().replace(b"Valve Leak", b"Valve Lake"))
+    assert _content(pdf) != _content(corpus.FILES_DIR / pdf.name)
+    docx = tmp_path / "heat_pump_guide.docx"
+    assert _content(docx) == _content(corpus.FILES_DIR / docx.name)
 
 
 def test_corpus_lists_every_committed_file():

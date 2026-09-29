@@ -9,7 +9,8 @@ Run it to regenerate ``tests/knowledge/fixtures/files/``::
     uv run python -m tests.knowledge.fixtures.build_fixture_corpus
 
 The output is byte-for-byte reproducible for the locked ``reportlab`` and
-``python-docx`` versions (``invariant=1`` PDFs, fixed DOCX timestamps); a test
+``python-docx`` versions (``invariant=1`` PDFs with uncompressed page streams,
+a DOCX with fixed timestamps and member order); a test
 rebuilds it into a temp dir and compares. :mod:`tests.knowledge.fixtures.corpus`
 exposes the paths and the ground truth that later work packages test against.
 
@@ -23,6 +24,11 @@ Files:
 - ``estimate.pdf``: 2 pages with letter-spaced headings ("D ES C R I PT I O N O F").
 - ``invoice.pdf``: 1 page.
 - ``bundle.pdf``: the three above concatenated (15 pages), for segmentation.
+- ``unnumbered_bundle.pdf``: 5 pages and 4 documents with no page numbering at
+  all: two back-to-back invoices from the same vendor (the second without an
+  invoice number), a 2-page roofing proposal whose second page has a
+  "Roofing Services Overview" heading but no letterhead, and a pest-control
+  completion notice.
 - ``heat_pump_guide.docx``: a title and three top-level headings.
 - ``irrigation_notes.html``: a title and three second-level sections, plus
   script and style that must not leak into the text.
@@ -383,10 +389,51 @@ def draw_invoice(canvas) -> None:
     canvas.showPage()
 
 
+UNNUMBERED_VENDORS = (
+    "Driftwood Pool Service LLC",
+    "Harbor Point Roofing Co.",
+    "Pelican Pest Control, Inc.",
+)
+UNNUMBERED_DATES = ("2025-05-05", "2025-06-05", "2025-05-12", "2025-06-20")
+
+
+def draw_unnumbered(canvas) -> None:
+    """Four documents on five pages, with no "Page N of M" anywhere."""
+    pool, roofing, pest = UNNUMBERED_VENDORS
+    pages = (
+        (pool, "INVOICE", ("Invoice # DPS-1001", "Date: May 5, 2025", "Customer: Morgan Example",
+                           "Monthly pool service (May): $140.00", "Total: $140.00")),
+        (pool, "INVOICE", ("Date: June 5, 2025", "Customer: Morgan Example",
+                           "Monthly pool service (June): $140.00",
+                           "Replacement filter cartridge: $65.00", "Total: $205.00")),
+        (roofing, "PROPOSAL", ("Proposal No. HPR-311", "Date: May 12, 2025",
+                               f"Job site: {ADDRESS}",
+                               "Scope: replace cracked concrete tiles on the south slope.")),
+        (None, None, ("Scope of work (continued)", "Reseal the chimney step flashing.",
+                      "Roofing Services Overview",
+                      "All work is done by our own crews and carries a 5-year warranty.",
+                      "Proposal total: $1,480.00")),
+        (pest, "NOTICE OF WORK COMPLETED", ("Date: June 20, 2025", f"Property: {ADDRESS}",
+                                            "Fumigation for drywood termites was completed.")),
+    )  # fmt: skip
+    for vendor, form, lines in pages:
+        page = _Page(canvas, top=740)
+        if vendor:
+            page.line(vendor, BOLD_FONT, 15, 22)
+        if form:
+            page.line(form, BOLD_FONT, 16, 24)
+        for text in lines:
+            page.line(text)
+        canvas.showPage()
+
+
 def _pdf(path: Path, *drawers) -> None:
     from reportlab.pdfgen import canvas as rl_canvas
 
-    canvas = rl_canvas.Canvas(str(path), pagesize=(PAGE_W, PAGE_H), invariant=1)
+    # invariant: fixed dates and IDs; pageCompression=0: page streams don't depend
+    # on the zlib build (the photo's image stream is still Flate-encoded, so the
+    # reproducibility test compares decompressed streams when bytes differ)
+    canvas = rl_canvas.Canvas(str(path), pagesize=(PAGE_W, PAGE_H), invariant=1, pageCompression=0)
     canvas.setAuthor("HAL 9000 fixture builder")
     canvas.setTitle(path.stem)
     canvas.setCreator("tests/knowledge/fixtures/build_fixture_corpus.py")
@@ -562,6 +609,7 @@ FILE_NAMES = (
     "estimate.pdf",
     "invoice.pdf",
     "bundle.pdf",
+    "unnumbered_bundle.pdf",
     "heat_pump_guide.docx",
     "irrigation_notes.html",
     "garage_door.md",
@@ -576,6 +624,7 @@ def build(out_dir: Path = FILES_DIR) -> list[Path]:
     _pdf(out_dir / "estimate.pdf", draw_estimate)
     _pdf(out_dir / "invoice.pdf", draw_invoice)
     _pdf(out_dir / "bundle.pdf", draw_inspection, draw_estimate, draw_invoice)
+    _pdf(out_dir / "unnumbered_bundle.pdf", draw_unnumbered)
     write_docx(out_dir / "heat_pump_guide.docx")
     (out_dir / "irrigation_notes.html").write_text(HTML_SOURCE, encoding="utf-8")
     (out_dir / "garage_door.md").write_text(MARKDOWN_SOURCE, encoding="utf-8")
