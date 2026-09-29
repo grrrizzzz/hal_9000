@@ -545,12 +545,28 @@ def test_eval_runs_and_paged_results(api: Api, signed, tmp_path):
 
 
 # -------------------------------------------------------------------- profile
-def test_profile_state_and_activating_an_existing_profile(api: Api, signed):
+def test_profile_state_and_switching_to_an_existing_profile(api: Api, signed):
     state = signed.get("/api/profile").json()
-    assert state["active"]["name"] == "pdfium.structure-64.hdr.fake-64"
-    assert [p["name"] for p in state["profiles"]] == [state["active"]["name"]]
-    assert signed.put("/api/profile", json={"name": state["active"]["name"]}).status_code == 200
+    first = state["active"]["name"]
+    assert first == "pdfium.structure-64.hdr.fake-64" and state["reindex_job"] is None
+    assert [p["name"] for p in state["profiles"]] == [first]
     assert signed.put("/api/profile", json={"name": "no.such-1.hdr.fake-64"}).status_code == 404
+
+    other = "pdfium.structure-64.nohdr.fake-64"
+    conn = api.conn()
+    try:
+        api.services.ingest.build(conn, other)  # built, not active
+    finally:
+        conn.close()
+    switched = signed.put("/api/profile", json={"name": other}).json()
+    assert switched["active"]["name"] == first  # the old one serves until the job runs
+    assert switched["reindex_job"]["kind"] == "reindex"
+    assert switched["reindex_job"]["status"] == "queued"
+    jobs = api.run_jobs()
+    assert [j.status for j in jobs] == ["done"]
+    assert signed.get("/api/profile").json()["active"]["name"] == other
+    assert done(chat(signed, "How old is the furnace?"))["outcome"] == "answered"
+
     conn = api.conn()
     try:
         with conn:

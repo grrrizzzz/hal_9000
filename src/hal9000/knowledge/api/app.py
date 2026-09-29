@@ -629,22 +629,30 @@ def _api_router() -> APIRouter:
         tags=["profile"],
         responses={409: {"model": ErrorResponse, "description": "The profile isn't built yet"}},
     )
-    def put_profile(body: ProfileActivate, conn: Db) -> ProfileState:
-        """Make an existing, built profile the one that serves the chat."""
-        from hal9000.knowledge.api.evaluation import profile_state
-        from hal9000.knowledge.index.profiles import (
-            ProfileError,
-            ProfileNotReady,
-            activate_profile,
-        )
+    def put_profile(body: ProfileActivate, services: Services, conn: Db) -> ProfileState:
+        """Switch to an existing, built profile.
 
-        try:
+        The switch runs as a background ``reindex`` job (a built profile is not
+        rebuilt: the job only activates it), so the UI follows it on the job
+        stream like any re-index; answers keep using the old profile until then.
+        """
+        from hal9000.knowledge.api.evaluation import profile_state
+        from hal9000.knowledge.index.profiles import activate_profile, profile_status
+
+        status = profile_status(conn, body.name)
+        if status is None or "#" in body.name:
+            raise _not_found("Profile")
+        if status != "ready":
+            raise HTTPException(
+                status_code=409,
+                detail=f"profile {body.name!r} is {status}; only a built profile can be activated",
+            )
+        if services.ingest is None:
             activate_profile(conn, body.name)
-        except ProfileNotReady as error:
-            raise HTTPException(status_code=409, detail=str(error)) from None
-        except ProfileError:
-            raise _not_found("Profile") from None
-        return profile_state(conn)
+            return profile_state(conn)
+        job = services.ingest.enqueue_build(conn, body.name, activate=True)
+        services.notify_worker()
+        return profile_state(conn).model_copy(update={"reindex_job": job})
 
     @r.get("/traces", response_model=list[TraceSummary], tags=["traces"])
     def list_traces(

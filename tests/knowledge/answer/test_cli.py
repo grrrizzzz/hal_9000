@@ -71,6 +71,10 @@ def test_serve_fake_seeds_the_synthetic_library_and_serves(monkeypatch, tmp_path
         assert client.post("/api/session", json={"passcode": "pod-bay-doors"}).status_code == 200
         docs = client.get("/api/documents").json()
         served["titles"] = {d["document"]["title"] for d in docs}
+        served["drafts"] = client.get("/api/eval/gold", params={"status": "draft"}).json()
+        served["labels"] = client.get("/api/eval/judge-labels").json()
+        served["runs"] = client.get("/api/eval/runs").json()
+        served["profiles"] = client.get("/api/profile").json()["profiles"]
         answer = client.post("/api/chat", json={"message": "How old is the furnace?"})
         served["chat"] = answer.text
         served["where"] = (host, port)
@@ -84,6 +88,12 @@ def test_serve_fake_seeds_the_synthetic_library_and_serves(monkeypatch, tmp_path
         enable_fake_mode(False)
     assert served["where"] == ("127.0.0.1", 8931)
     assert {"Home inspection report", "Invoice 1001 — termite repair"} <= served["titles"]
+    assert len(served["drafts"]) >= 2 and served["drafts"][0]["evidence"][0]["page"] == 2
+    labels = served["labels"]
+    assert len(labels) == 4 and sum(1 for label in labels if label["human"]) == 1
+    assert labels[0]["citations"][0]["page"] == 2
+    assert len(served["runs"]) == 28 and served["runs"][0]["metrics"]["n_questions"] == 58
+    assert len(served["profiles"]) == 2
     done = [
         json.loads(line[5:]) for line in served["chat"].splitlines() if line.startswith("data:")
     ][-1]
