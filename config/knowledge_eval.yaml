@@ -1,0 +1,102 @@
+# Setup evaluation settings (docs/KNOWLEDGE_PLAN.md §8). Unknown keys are rejected.
+# Model names and prices are not here: calls ask for a tier (src/hal9000/config.py),
+# the judge's tier is KB_JUDGE_TIER, and spend is capped by KB_EVAL_CAP_USD (.env).
+
+scoring:                    # plan §8.2
+  budgets: [1000, 2000, 4000]   # budgeted evidence recall @ B (tokens)
+  hit_ks: [1, 3, 5, 10]         # full-support hit @ k
+  min_similarity: 90            # rapidfuzz partial alignment on normalized text
+  full_support: 0.80            # every quote at least this covered within top k
+  min_span_words: 3             # a partial alignment must cover at least this many words
+  word_cover: 0.50              # a plain quote word counts as covered at this share of its characters
+  min_fuzzy_chars: 12           # aligned spans shorter than this (letters+digits) must match exactly
+  n_boot: 1000                  # bootstrap replicates for the 95% intervals
+  seed: 20260928                # bootstrap seed (deterministic intervals)
+  min_paired: 10                # fewer shared questions: a paired comparison is "insufficient"
+
+gold:                       # plan §8.1
+  tier: powerful
+  quotas:                   # about 120 items
+    factoid: 34
+    money: 18
+    date: 12
+    list: 16
+    cross_document: 16
+    unanswerable: 24
+  paraphrase_quota: 0.30        # share of answerable items that must be paraphrased
+  paraphrase_jaccard: 0.30      # paraphrased = token Jaccard with the evidence below this
+  dev_fraction: 0.60            # stratified dev/test split within each category
+  overgenerate: 1.5             # items asked for per item needed (validation drops some)
+  window_pages: 3               # pages of one sub-document per generation call
+  window_max_chars: 12000
+  min_window_chars: 200         # windows with less text are skipped
+  max_link_sets: 12             # linked sub-document sets for cross-document items
+  max_link_docs: 4              # a key shared by more documents than this is too generic
+  unanswerable_check_k: 30      # passages retrieved when checking an "unanswerable" draft
+  dedup_similarity: 90          # rapidfuzz token_sort_ratio at which two questions are duplicates
+  min_quote_words: 3            # shorter evidence quotes are rejected
+  min_quote_chars: 12           # (counting letters and digits only)
+  estimate:
+    output_tokens_per_item: 220
+    repair_allowance: 0.25      # share of calls expected to need one repair call
+    check_output_tokens: 120
+
+judge:                      # plan §8.4.1
+  n_items: 20                   # dev items answered for calibration
+  agreement_gate: 0.85          # S5 needs the judge to agree with Mike on this share of labels
+  estimate:
+    answer_prompt_tokens: 2500
+    answer_output_tokens: 350
+    judge_output_tokens: 150
+
+regression:                 # plan §9.2 kb_regression_recall
+  budget: 2000
+
+# Staged sweep grids (plan §8.4), read by the sweep runner (KWP5 part B).
+sweep:
+  S1a:
+    sizes: [128, 256, 384, 512, 768, 1024, 1536]
+    chunkers: [fixed, recursive, structure]
+    fixed_overlap: 0.15
+    parent_child:
+      child_sizes: [128, 256, 384, 512]
+      parent_size: 1500
+    parser: pdfium
+    header: true
+    embed_model: openai/text-embedding-3-small
+    retrieval: [dense, rrf]
+  S1b:
+    top: 5
+    overlap: [0.0, 0.15]
+    header: [false, true]
+    parser: [pdfium, docling]
+  S2:
+    top: 4
+    embeddings:
+      - {model: openai/text-embedding-3-small, dimensions: 1536}
+      - {model: openai/text-embedding-3-large, dimensions: 3072}
+      - {model: openai/text-embedding-3-large, dimensions: 1024}
+      - {model: openai/text-embedding-3-large, dimensions: 256}
+  S3:
+    top: 3
+    retrieval: [dense, bm25, rrf, weighted]
+    weighted_alpha: [0.3, 0.5, 0.7]
+    rerankers: [none, minilm-l6, bge-reranker-base]
+    query_transform_top: 2
+    query_transforms: [none, multi_query, hyde]
+  S4:
+    top: 3
+    budgets: [1000, 2000, 4000]
+    ks: [3, 5, 8, 10, 15]
+    abstain_decline_min: 0.80   # plan §8.5: at least 80% of unanswerables declined
+    abstain_refuse_max: 0.05    # with at most 5% of answerables refused
+    abstain_auc_min: 0.75       # below this the check moves to generation
+  S5:
+    top: 3
+    chat_tiers: [fast, powerful]
+    repeat_top: 1
+  S6:
+    top: 3
+    replay: 200
+    end_to_end: 30
+    p95_local_retrieval_ms: 300

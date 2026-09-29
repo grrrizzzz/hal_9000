@@ -91,6 +91,11 @@ def register(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         gold_cmds, "generate", "gold", "generate the draft question set", "gold generate"
     )
     generate.add_argument("--max-cost", type=float, default=2.00, metavar="USD")
+    generate.add_argument(
+        "--allow-keyword-check",
+        action="store_true",
+        help="check unanswerable drafts with keyword search when no index is available",
+    )
     _yes(generate)
     for name, help_text in (
         ("export", "write the question set to a JSONL file (keep it under data/)"),
