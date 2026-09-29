@@ -10,6 +10,7 @@
     python -m hal9000 calibrate --days 300   backfill history and fit the expectation model
     python -m hal9000 cost                   month-to-date spend
     python -m hal9000 serve                  HTTP API for the scheduler and watchdog
+    python -m hal9000 kb ...                 house knowledge base (see `hal9000 kb --help`)
 
 Exit codes: 0 report delivered (status ok or degraded); 1 no report; 2 configuration error.
 """
@@ -58,6 +59,10 @@ def build_parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve", help="run the HTTP API")
     serve.add_argument("--host", default="0.0.0.0")
     serve.add_argument("--port", type=int, default=8900)
+
+    from hal9000.knowledge.cli import register as register_kb
+
+    register_kb(sub)
     return parser
 
 
@@ -278,6 +283,12 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_kb(args) -> int:
+    from hal9000.knowledge.cli import dispatch
+
+    return dispatch(args)
+
+
 def main(argv: list[str] | None = None) -> int:
     load_dotenv(find_dotenv(usecwd=True), override=False)
     parser = build_parser()
@@ -291,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
         "calibrate": cmd_calibrate,
         "cost": cmd_cost,
         "serve": cmd_serve,
+        "kb": cmd_kb,
     }
     try:
         return handlers[args.command](args)
