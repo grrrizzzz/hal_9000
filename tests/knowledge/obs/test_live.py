@@ -9,14 +9,17 @@ builds, seeds and mounts everything itself. The driver:
   abstained, retrieval-only, with a failed grounding check, with the query
   embedding down, and cancelled by the client going away mid-answer;
 - rates two answers; uploads a new file, the same bytes again and a broken
-  PDF, and waits for the ingest jobs (the post-ingest regression runs too);
-- writes an ``eval_runs`` row from its own connection, as ``kb eval`` does;
+  PDF, and waits for the ingest jobs (the post-ingest regression should run
+  too, but isn't wired yet: a strict xfail below);
+- runs a manual regression and writes an ``eval_runs`` row on a connection of
+  its own, as ``kb eval regression`` and a sweep do;
 - scrapes ``/metrics`` before and after, and runs every Grafana SQLite query
   against the live ``knowledge.db`` opened the way Grafana opens it
   (``mode=ro``), recording which table columns each query reads.
 
-Counters are process-wide, so each "this happened" check is a delta between
-the two scrapes. The one test-only change to the service is the reranker: the
+Counters are process-wide: the session first drops the labelled series other
+tests made (a new process has none), and each "this happened" check is a
+delta between the two scrapes. The one test-only change to the service is the reranker: the
 ONNX cross-encoder can't be downloaded here, so ``knowledge.yaml`` names one
 and the retriever is handed a word-overlap stand-in, so ``rerank`` is timed
 like every other question stage.
@@ -115,7 +118,6 @@ class Live:
     month_cap: float = 0.0
     regression: tuple | None = None
     ingest_regressions: int = 0
-    eval_values: dict[str, float] = field(default_factory=dict)
 
     def delta(self, name: str, **labels) -> float:
         key = (name, frozenset(labels.items()))
@@ -306,7 +308,7 @@ def _session(app, root: Path, live: dict) -> None:
             chunk_size=binding.chunk_size,
             trigger="manual",
         )
-        run = record_run(
+        record_run(
             conn,
             eval_dir=services.settings.eval_dir,
             stage="S9",  # later than any seeded stage, so it is the one exposed
@@ -318,7 +320,6 @@ def _session(app, root: Path, live: dict) -> None:
             ),
             records=[],
         )
-        live["eval_run"] = run.id
         row = conn.execute(
             "SELECT trigger, recall_2k FROM regression_runs ORDER BY at DESC, id DESC LIMIT 1"
         ).fetchone()
