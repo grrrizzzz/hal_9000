@@ -140,16 +140,54 @@ def test_a_budget_stop_writes_no_row_and_is_counted(kb_db, caplog):
     assert facts and "post-ingest regression failed" in caplog.text
 
 
+def _regression_errors() -> float:
+    from hal9000.knowledge.obs.metrics import REGISTRY
+
+    return sum(
+        s.value
+        for m in REGISTRY.collect()
+        if m.name == "kb_errors"
+        for s in m.samples
+        if s.name == "kb_errors_total" and s.labels.get("stage") == "regression"
+    )
+
+
 def test_the_ingest_hook_does_nothing_without_approved_questions(kb_db, monkeypatch):
     from hal9000.knowledge.eval import wiring
 
-    def unexpected(*args, **kwargs):
-        raise AssertionError("no binding (and no spend) without approved questions")
-
-    monkeypatch.setattr(wiring, "retriever_for", unexpected)
+    calls = []
+    monkeypatch.setattr(wiring, "retriever_for", lambda *a, **k: calls.append((a, k)))
+    errors = _regression_errors()
     hook = ingest_hook(object(), meter=None)
     assert hook(kb_db, _Profile()) is None
+    assert calls == []  # no binding, so no query embedding and no spend
+    assert _regression_errors() == errors  # skipping is not an error
     assert kb_db.execute("SELECT COUNT(*) FROM regression_runs").fetchone()[0] == 0
+
+
+def test_the_ingest_hook_never_transforms_the_query(kb_db, monkeypatch):
+    """Whatever knowledge.yaml says (HyDE here), the check makes no LLM call."""
+    from hal9000.knowledge.eval import regression
+    from hal9000.knowledge.retrieve.config import RetrievalConfig
+
+    seed(kb_db)
+    with kb_db:
+        kb_db.execute(
+            "INSERT INTO profiles (id, name, parser, chunker, size, header, embed_model, dimensions, "
+            "active, created_at) VALUES (7, 'p', 'pdfium', 'fixed', 512, 1, 'm', 8, 1, 'now')"
+        )
+    hyde = RetrievalConfig(transform="hyde")
+    monkeypatch.setattr(RetrievalConfig, "from_settings", classmethod(lambda cls, s=None: hyde))
+    bound = []
+    monkeypatch.setattr(
+        regression, "post_ingest_regression", lambda conn, retrieve, **kw: bound.append(retrieve)
+    )
+    errors = _regression_errors()
+    ingest_hook(object(), meter=None)(kb_db, _Profile())  # meter None: a transform would refuse
+    [retrieve] = bound
+    assert retrieve.config.transform == "none"
+    assert retrieve.retriever.generate is None  # nothing to call an LLM with
+    assert _regression_errors() == errors
 
 
 def test_the_ingest_hook_checks_the_eval_cap_and_never_raises(kb_db, caplog):

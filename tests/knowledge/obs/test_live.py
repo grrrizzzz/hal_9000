@@ -117,6 +117,8 @@ class Live:
     month_cap: float = 0.0
     regression: tuple | None = None
     ingest_regressions: int = 0
+    regression_jobs: int = 0
+    after_ingest: dict = field(default_factory=dict)
 
     def delta(self, name: str, **labels) -> float:
         key = (name, frozenset(labels.items()))
@@ -237,6 +239,12 @@ def _session(app, root: Path, live: dict) -> None:
     assert client.post("/api/session", json={"passcode": services.settings.passcode}).is_success
     token = client.cookies.get(COOKIE)
     live["month_cap"] = services.settings.monthly_cap_usd
+    # the seeded library queued a regression check; the worker runs it at start
+    assert services.worker.wait_idle(30), "the worker did not finish the seeded jobs"
+    with sqlite3.connect(services.settings.db_path) as conn:
+        seeded_regressions = conn.execute(
+            "SELECT COUNT(*) FROM regression_runs WHERE trigger = 'ingest'"
+        ).fetchone()[0]
 
     # the reranker: configured in knowledge.yaml (read per question), scored by the stand-in
     yaml_path = services.settings.yaml_path
@@ -292,9 +300,16 @@ def _session(app, root: Path, live: dict) -> None:
 
     _wait_for(jobs_finished, "the ingest jobs")
     with sqlite3.connect(db_path) as conn:
-        live["ingest_regressions"] = conn.execute(
-            "SELECT COUNT(*) FROM regression_runs WHERE trigger = 'ingest'"
+        live["ingest_regressions"] = (
+            conn.execute(
+                "SELECT COUNT(*) FROM regression_runs WHERE trigger = 'ingest'"
+            ).fetchone()[0]
+            - seeded_regressions
+        )
+        live["regression_jobs"] = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE kind = 'regression'"
         ).fetchone()[0]
+    live["after_ingest"] = client.get("/metrics").text
 
     # what `kb eval regression` and a sweep write from their own processes
     conn = services.connect()
@@ -379,6 +394,7 @@ def live(tmp_path_factory) -> Live:
             metrics.install_db_collector(None)
     assert "after" in captured, "the session did not finish"
     before, _ = _parse(captured["before"])
+    after_ingest, _ = _parse(captured["after_ingest"])
     after, families = _parse(captured["after"])
     return Live(
         before=before,
@@ -392,6 +408,8 @@ def live(tmp_path_factory) -> Live:
         month_cap=captured["month_cap"],
         regression=captured["regression"],
         ingest_regressions=captured["ingest_regressions"],
+        regression_jobs=captured["regression_jobs"],
+        after_ingest=after_ingest,
     )
 
 
@@ -504,11 +522,27 @@ def test_regression_recall_and_eval_metric_come_from_the_tables(live: Live):
 
 
 def test_an_ingestion_runs_the_post_ingest_regression(live: Live):
-    # the seeded question set has an approved answerable question, so the one file
-    # that ingested writes one row (the library was seeded before the question set)
+    # the seeded question set has an approved answerable question: the upload (a file
+    # and a broken PDF queued together) is checked once, after both jobs
     assert live.ingest_regressions == 1
+    assert live.regression_jobs == 2  # the seeded library's check, and the upload's
     # and it retrieved without an error (test_errors_... counts every error of the session)
     assert live.delta("kb_stage_seconds_count", stage="regression") >= 2  # hook + manual run
+
+
+def test_the_post_ingest_retrieval_stays_out_of_the_question_latencies(live: Live):
+    """The upload's regression retrieved (vector, bm25, ...) inside its ingest trace."""
+    assert live.ingest_regressions == 1
+
+    def moved(stage: str) -> float:
+        key = ("kb_stage_seconds_count", frozenset({("stage", stage)}))
+        return live.after_ingest.get(key, 0.0) - live.before.get(key, 0.0)
+
+    # five questions searched by vector (not the retrieval-only one or the one whose
+    # embedding failed); the regression's search is not among them
+    assert moved("vector") == 5
+    assert moved("select") == 7  # every question selected, the regression did not
+    assert moved("regression") >= 1  # the check itself is an ingestion stage
 
 
 def test_no_question_or_document_text_on_metrics(live: Live):

@@ -294,7 +294,8 @@ def test_uploading_a_nested_folder_with_images(api: Api, signed):
     assert by_path["House/Yard/Pool/pool_log.txt"]["collection"] == "House/Yard/Pool"
     assert by_path["House/inspection.pdf"]["collection"] == "House"
 
-    jobs = api.run_jobs()
+    # the post-ingest regression check the seeded library queued runs too
+    jobs = [j for j in api.run_jobs() if j.kind != "regression"]
     assert len(jobs) == 6 and {j.status for j in jobs} == {"done"}, [j.error for j in jobs]
     listed = signed.get("/api/jobs").json()
     assert {j["id"] for j in listed} >= {r["job_id"] for r in added}
@@ -562,7 +563,8 @@ def test_profile_state_and_switching_to_an_existing_profile(api: Api, signed):
     assert switched["active"]["name"] == first  # the old one serves until the job runs
     assert switched["reindex_job"]["kind"] == "reindex"
     assert switched["reindex_job"]["status"] == "queued"
-    jobs = api.run_jobs()
+    # the post-ingest regression check the seeded library queued runs too
+    jobs = [j for j in api.run_jobs() if j.kind != "regression"]
     assert [j.status for j in jobs] == ["done"]
     assert signed.get("/api/profile").json()["active"]["name"] == other
     assert done(chat(signed, "How old is the furnace?"))["outcome"] == "answered"
@@ -681,18 +683,32 @@ def _raw_get(app, raw_path: bytes) -> tuple[int, bytes]:
     return sent["status"], sent["body"]
 
 
-def test_the_services_wire_the_post_ingest_regression_and_retention(tmp_path):
+@pytest.fixture
+def module_state(monkeypatch):
+    """Restore what build_services sets process-wide: trace retention and the month budget."""
+    from hal9000.knowledge.obs import metrics, traces
+
+    monkeypatch.setattr(traces, "_retention", traces._retention)
+    yield
+    metrics.use_configured_month_budget()  # the process default
+
+
+def test_the_services_wire_the_regression_retention_and_budget(tmp_path, module_state):
     from hal9000.knowledge.api.services import build_services
     from hal9000.knowledge.ingest.pipeline import IngestPipeline, no_regression
     from hal9000.knowledge.obs import traces
+    from hal9000.knowledge.obs.metrics import REGISTRY
     from tests.knowledge.answer.conftest import make_settings
 
-    settings = make_settings(tmp_path)
+    settings = make_settings(tmp_path, monthly_cap_usd=3.5)
     built = build_services(settings, fake=True, start_worker=False)
     try:
         hook = built.ingest.regression
         assert hook is not no_regression and hook.__qualname__.startswith("ingest_hook")
         assert traces._retention.yaml_path == settings.yaml_path  # trace_retention_days
+        # fake mode: nothing spent, against this service's own cap
+        assert REGISTRY.get_sample_value("kb_month_spend_usd", {}) == 0
+        assert REGISTRY.get_sample_value("kb_month_cap_usd", {}) == 3.5
     finally:
         built.close()
 

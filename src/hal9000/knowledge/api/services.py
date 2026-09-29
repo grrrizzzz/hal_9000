@@ -162,8 +162,8 @@ def build_services(
         from hal9000.knowledge.index.fake import FakeEmbedder, enable_fake_mode
 
         enable_fake_mode()
-        # nothing is paid: spend 0 against the configured cap (never a 0/0 on the dashboard)
-        metrics.use_configured_month_budget()
+        # nothing is paid: spend 0 against this service's cap (never a 0/0 on the dashboard)
+        metrics.set_month_budget(0.0, settings.monthly_cap_usd)
         deps = answer_deps or fake_deps()
         if ingest is None:
             ingest = IngestPipeline(

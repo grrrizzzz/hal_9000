@@ -169,8 +169,8 @@ class _ProfileRun:
 def ingest_hook(settings: Any, *, meter: Any = None):
     """KWP3's ``IngestPipeline.regression``: the post-ingest regression for the service.
 
-    After each ingestion, the approved answerable gold set is retrieved (only,
-    no answers) against the profile just indexed, metered as
+    After an ingestion, the approved answerable gold set is retrieved (only: no
+    answers, and no query transform) against the profile just indexed, metered as
     ``knowledge-eval`` (``meter``; ``None`` in fake mode, where nothing is
     paid), and a ``regression_runs`` row is written with ``trigger="ingest"``.
     Without approved questions it does nothing (no binding, no spend). It
@@ -188,9 +188,10 @@ def ingest_hook(settings: Any, *, meter: Any = None):
                 return None
             if meter is not None:
                 meter.precheck(EVAL_AGENT)  # KB_EVAL_CAP_USD reached: no row
-            bound = retriever_for(
-                conn, settings, meter=meter, run=_ProfileRun({"profile": profile.name})
-            )
+            # retrieval only, and no LLM query rewrite (HyDE, multi-query) whatever
+            # knowledge.yaml says: the check must not pay for chat calls
+            run = _ProfileRun({"profile": profile.name, "transform": "none"})
+            bound = retriever_for(conn, settings, meter=meter, run=run)
             config_dir = getattr(settings, "config_dir", None)  # as `kb eval regression` reads it
             config = (
                 load_eval_config(Path(config_dir) / "knowledge_eval.yaml") if config_dir else None
