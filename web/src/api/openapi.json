@@ -2123,7 +2123,8 @@
               "answered",
               "abstained",
               "retrieval_only",
-              "error"
+              "error",
+              "cancelled"
             ],
             "title": "Outcome"
           },
@@ -3211,10 +3212,17 @@
             "title": "Message Id"
           },
           "rating": {
-            "type": "integer",
-            "enum": [
-              -1,
-              1
+            "anyOf": [
+              {
+                "type": "integer",
+                "enum": [
+                  -1,
+                  1
+                ]
+              },
+              {
+                "type": "null"
+              }
             ],
             "title": "Rating"
           },
@@ -3238,10 +3246,10 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "message_id",
-          "rating"
+          "message_id"
         ],
-        "title": "FeedbackRequest"
+        "title": "FeedbackRequest",
+        "description": "Feedback on one answer. One row per message: a later POST updates it.\n\n``rating`` may be left out only to add the answer to the question set."
       },
       "FeedbackResponse": {
         "properties": {
@@ -3812,6 +3820,13 @@
             "type": "string",
             "title": "Answer"
           },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/Citation"
+            },
+            "type": "array",
+            "title": "Citations"
+          },
           "human": {
             "anyOf": [
               {
@@ -3900,7 +3915,8 @@
                   "answered",
                   "abstained",
                   "retrieval_only",
-                  "error"
+                  "error",
+                  "cancelled"
                 ]
               },
               {
@@ -3908,6 +3924,29 @@
               }
             ],
             "title": "Outcome"
+          },
+          "grounding": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "verified",
+                  "failed",
+                  "skipped"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grounding"
+          },
+          "issues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Issues"
           },
           "created_at": {
             "type": "string",
@@ -4578,7 +4617,8 @@
                   "answered",
                   "abstained",
                   "retrieval_only",
-                  "error"
+                  "error",
+                  "cancelled"
                 ]
               },
               {
@@ -4717,6 +4757,17 @@
             "format": "date-time",
             "title": "Created At"
           },
+          "question": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question"
+          },
           "outcome": {
             "anyOf": [
               {
@@ -4725,7 +4776,8 @@
                   "answered",
                   "abstained",
                   "retrieval_only",
-                  "error"
+                  "error",
+                  "cancelled"
                 ]
               },
               {
@@ -4769,7 +4821,7 @@
           "created_at"
         ],
         "title": "TraceSummary",
-        "description": "A Traces-page row: no question text (it may be shown on Grafana)."
+        "description": "A Traces-page row (the in-app list, behind the passcode).\n\nGrafana reads the ``traces`` table's scalar columns, never this model, so\nthe question text here doesn't reach it."
       },
       "UploadResponse": {
         "properties": {

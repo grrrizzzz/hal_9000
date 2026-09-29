@@ -499,7 +499,7 @@ export interface components {
              * Outcome
              * @enum {string}
              */
-            outcome: "answered" | "abstained" | "retrieval_only" | "error";
+            outcome: "answered" | "abstained" | "retrieval_only" | "error" | "cancelled";
             /**
              * Grounding
              * @default skipped
@@ -926,15 +926,17 @@ export interface components {
             /** File Sha */
             file_sha?: string | null;
         };
-        /** FeedbackRequest */
+        /**
+         * FeedbackRequest
+         * @description Feedback on one answer. One row per message: a later POST updates it.
+         *
+         *     ``rating`` may be left out only to add the answer to the question set.
+         */
         FeedbackRequest: {
             /** Message Id */
             message_id: number;
-            /**
-             * Rating
-             * @enum {integer}
-             */
-            rating: -1 | 1;
+            /** Rating */
+            rating?: (-1 | 1) | null;
             /** Comment */
             comment?: string | null;
             /**
@@ -1163,6 +1165,8 @@ export interface components {
             question: string;
             /** Answer */
             answer: string;
+            /** Citations */
+            citations?: components["schemas"]["Citation"][];
             human?: components["schemas"]["RubricLabels"] | null;
             judge?: components["schemas"]["RubricLabels"] | null;
         };
@@ -1186,7 +1190,11 @@ export interface components {
             /** Trace Id */
             trace_id?: string | null;
             /** Outcome */
-            outcome?: ("answered" | "abstained" | "retrieval_only" | "error") | null;
+            outcome?: ("answered" | "abstained" | "retrieval_only" | "error" | "cancelled") | null;
+            /** Grounding */
+            grounding?: ("verified" | "failed" | "skipped") | null;
+            /** Issues */
+            issues?: string[];
             /**
              * Created At
              * Format: date-time
@@ -1424,7 +1432,7 @@ export interface components {
              */
             cost_usd: number;
             /** Outcome */
-            outcome?: ("answered" | "abstained" | "retrieval_only" | "error") | null;
+            outcome?: ("answered" | "abstained" | "retrieval_only" | "error" | "cancelled") | null;
             /** Grounding */
             grounding?: ("verified" | "failed" | "skipped") | null;
             /** Ttft Ms */
@@ -1459,7 +1467,10 @@ export interface components {
         };
         /**
          * TraceSummary
-         * @description A Traces-page row: no question text (it may be shown on Grafana).
+         * @description A Traces-page row (the in-app list, behind the passcode).
+         *
+         *     Grafana reads the ``traces`` table's scalar columns, never this model, so
+         *     the question text here doesn't reach it.
          */
         TraceSummary: {
             /** Id */
@@ -1469,8 +1480,10 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /** Question */
+            question?: string | null;
             /** Outcome */
-            outcome?: ("answered" | "abstained" | "retrieval_only" | "error") | null;
+            outcome?: ("answered" | "abstained" | "retrieval_only" | "error" | "cancelled") | null;
             /** Total Ms */
             total_ms?: number | null;
             /** Ttft Ms */

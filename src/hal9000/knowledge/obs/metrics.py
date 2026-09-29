@@ -91,7 +91,7 @@ __all__ = [
 #: ``kb_questions_total{outcome}``: the contracts' ``Outcome`` plus ``cancelled``
 #: (the client went away, e.g. a closed stream: not an error, so not in the error rate).
 CANCELLED = "cancelled"
-OUTCOMES: tuple[str, ...] = (*get_args(Outcome), CANCELLED)
+OUTCOMES: tuple[str, ...] = tuple(dict.fromkeys((*get_args(Outcome), CANCELLED)))
 #: ``kb_tokens_total`` / ``kb_cost_usd_total`` ``{purpose}``.
 PURPOSES: tuple[str, ...] = ("embed", "condense", "answer", "judge", "segment")
 #: ``kb_grounding_failures_total{kind}``.

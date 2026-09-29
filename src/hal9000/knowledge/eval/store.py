@@ -13,7 +13,13 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
-from hal9000.knowledge.contracts import EvidenceQuote, GoldItem, JudgeLabel, RubricLabels
+from hal9000.knowledge.contracts import (
+    Citation,
+    EvidenceQuote,
+    GoldItem,
+    JudgeLabel,
+    RubricLabels,
+)
 
 __all__ = [
     "UnsafePath",
@@ -215,18 +221,20 @@ def insert_judge_label(
     eval_run_id: str | None = None,
     judge: RubricLabels | None = None,
     human: RubricLabels | None = None,
+    citations: Sequence[Citation] = (),
 ) -> int:
     now = _now()
     with conn:
         cur = conn.execute(
             "INSERT INTO judge_labels (gold_item_id, eval_run_id, answer, human_labels, "
-            "judge_labels, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "judge_labels, citations, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 gold_item_id,
                 eval_run_id,
                 answer,
                 human.model_dump_json() if human else None,
                 judge.model_dump_json() if judge else None,
+                json.dumps([c.model_dump(mode="json") for c in citations]),
                 now,
                 now,
             ),
@@ -269,6 +277,7 @@ def list_judge_labels(
             eval_run_id=r["eval_run_id"],
             question=r["question"],
             answer=r["answer"],
+            citations=[Citation.model_validate(c) for c in json.loads(r["citations"] or "[]")],
             human=_labels(r["human_labels"]),
             judge=_labels(r["judge_labels"]),
         )

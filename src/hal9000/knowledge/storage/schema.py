@@ -245,8 +245,37 @@ ALTER TABLE files ADD COLUMN superseded_by TEXT;
 CREATE INDEX ix_files_current ON files(relative_path, superseded_by);
 """
 
+# KWP6 (approved contract additions): an answer's verify result on its message;
+# feedback is one row per message whose rating may be left out when the answer
+# is only added to the question set, linked to the draft gold item it created;
+# the citations of a judge-calibration answer.
+_V4 = """
+ALTER TABLE messages ADD COLUMN grounding TEXT
+    CHECK (grounding IS NULL OR grounding IN ('verified', 'failed', 'skipped'));
+ALTER TABLE messages ADD COLUMN issues TEXT NOT NULL DEFAULT '[]';
+
+CREATE TABLE feedback_v4 (
+    id INTEGER PRIMARY KEY,
+    message_id INTEGER NOT NULL UNIQUE REFERENCES messages(id) ON DELETE CASCADE,
+    rating INTEGER CHECK (rating IN (-1, 1)),
+    comment TEXT,
+    add_to_gold INTEGER NOT NULL DEFAULT 0 CHECK (add_to_gold IN (0, 1)),
+    gold_item_id INTEGER REFERENCES gold_items(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    CHECK (rating IS NOT NULL OR add_to_gold = 1)
+);
+INSERT INTO feedback_v4 (id, message_id, rating, comment, add_to_gold, created_at, updated_at)
+    SELECT id, message_id, rating, comment, add_to_gold, created_at, created_at FROM feedback
+    WHERE id IN (SELECT MAX(id) FROM feedback GROUP BY message_id);
+DROP TABLE feedback;
+ALTER TABLE feedback_v4 RENAME TO feedback;
+
+ALTER TABLE judge_labels ADD COLUMN citations TEXT NOT NULL DEFAULT '[]';
+"""
+
 #: (version, script). Append only.
-MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _V1), (2, _V2), (3, _V3))
+MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _V1), (2, _V2), (3, _V3), (4, _V4))
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
 #: Every plan §12 table created by the migrations (the per-profile tables are separate,

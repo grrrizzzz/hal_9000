@@ -54,6 +54,8 @@ __all__ = [
     "DocumentSummary",
     "ErrorResponse",
     "EvalMetrics",
+    "EvalQuestionResult",
+    "EvalResultsPage",
     "EvalRun",
     "EvidenceQuote",
     "FeedbackRequest",
@@ -105,8 +107,9 @@ DocType = Literal[
     "other",
 ]
 ChunkerName = Literal["fixed", "recursive", "structure", "parent_child"]
-#: How a question ended (plan §9.2 ``kb_questions_total{outcome}``).
-Outcome = Literal["answered", "abstained", "retrieval_only", "error"]
+#: How a question ended (plan §9.2 ``kb_questions_total{outcome}``). ``cancelled``: the
+#: client went away before the answer finished (KWP8 records it; not an error).
+Outcome = Literal["answered", "abstained", "retrieval_only", "error", "cancelled"]
 Grounding = Literal["verified", "failed", "skipped"]
 GoldCategory = Literal["factoid", "money", "date", "list", "cross_document", "unanswerable"]
 
@@ -494,6 +497,35 @@ class DocumentPatch(_Model):
     page_end: PageNumber | None = None
 
 
+class EvalQuestionResult(_Model):
+    """One question's result in an eval run: ``GET /api/eval/runs/{id}/results`` items.
+
+    ``recall`` is keyed by the token budget as a string (``"2000"``); a missing
+    key means N/A (the chunk size exceeds the budget, or the item is
+    unanswerable).
+    """
+
+    gold_item_id: int
+    question: str
+    category: GoldCategory
+    recall: dict[str, float]
+    #: every evidence quote >= 80% covered within the top k
+    full_support: bool
+    #: rank of the first chunk covering any evidence; None if none did
+    first_hit_rank: int | None
+    abstain_score: float | None
+    abstained: bool
+
+
+class EvalResultsPage(_Model):
+    """A page of an eval run's per-question results."""
+
+    items: list[EvalQuestionResult]
+    total: int = Field(ge=0)
+    offset: int = Field(ge=0)
+    limit: int = Field(ge=1)
+
+
 class ChunkSpan(_Model):
     chunk_id: int
     char_start: int = Field(ge=0)
@@ -588,6 +620,9 @@ class MessageOut(_Model):
     citations: list[Citation] = Field(default_factory=list)
     trace_id: str | None = None
     outcome: Outcome | None = None
+    #: the verify result of an assistant answer (plan §7.1); None for user messages
+    grounding: Grounding | None = None
+    issues: list[str] = Field(default_factory=list)
     created_at: datetime
 
 
@@ -603,10 +638,21 @@ class ConversationDetail(ConversationSummary):
 
 
 class FeedbackRequest(_Model):
+    """Feedback on one answer. One row per message: a later POST updates it.
+
+    ``rating`` may be left out only to add the answer to the question set.
+    """
+
     message_id: int
-    rating: Literal[-1, 1]
+    rating: Literal[-1, 1] | None = None
     comment: str | None = None
     add_to_gold: bool = False
+
+    @model_validator(mode="after")
+    def _rating_or_gold(self) -> FeedbackRequest:
+        if self.rating is None and not self.add_to_gold:
+            raise ValueError("a rating is required unless add_to_gold is set")
+        return self
 
 
 class FeedbackResponse(_Model):
@@ -640,6 +686,8 @@ class JudgeLabel(_Model):
     eval_run_id: str | None = None
     question: str
     answer: str
+    #: the sources the answer cited (the viewer opens them)
+    citations: list[Citation] = Field(default_factory=list)
     human: RubricLabels | None = None
     judge: RubricLabels | None = None
 
@@ -659,10 +707,15 @@ class ProfileActivate(_Model):
 
 
 class TraceSummary(_Model):
-    """A Traces-page row: no question text (it may be shown on Grafana)."""
+    """A Traces-page row (the in-app list, behind the passcode).
+
+    Grafana reads the ``traces`` table's scalar columns, never this model, so
+    the question text here doesn't reach it.
+    """
 
     id: str
     created_at: datetime
+    question: str | None = None
     outcome: Outcome | None = None
     total_ms: float | None = None
     ttft_ms: float | None = None

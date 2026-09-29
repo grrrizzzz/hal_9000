@@ -13,6 +13,9 @@ the CLI connects the real implementations through
 - :class:`AnswerFn`: ``question -> AnswerOutput`` (judge calibration, S5).
 - :data:`Generate`: ``(Prompt, tier) -> str``, already metered as
   ``knowledge-eval`` (rule K9).
+
+``EvalQuestionResult`` / ``EvalResultsPage`` are API contracts and live in
+:mod:`hal9000.knowledge.contracts`; they are re-exported here.
 """
 
 from __future__ import annotations
@@ -21,10 +24,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from pydantic import BaseModel, ConfigDict
-
 from hal9000.core.prompt import Prompt
-from hal9000.knowledge.contracts import GoldCategory
+from hal9000.knowledge.contracts import Citation, EvalQuestionResult, EvalResultsPage
 
 __all__ = [
     "AnswerFn",
@@ -90,37 +91,9 @@ class AnswerOutput:
     sources: Sequence[Source] = field(default_factory=tuple)
     abstained: bool = False
     cost_usd: float = 0.0
+    #: the sources the answer cited, for the Judge calibration viewer (``judge_labels.citations``)
+    citations: Sequence[Citation] = field(default_factory=tuple)
 
 
 class AnswerFn(Protocol):
     def __call__(self, question: str) -> AnswerOutput: ...  # pragma: no cover
-
-
-class _Model(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-
-class EvalQuestionResult(_Model):
-    """One question's result in a run: ``GET /api/eval/runs/{id}/results`` items.
-
-    ``recall`` is keyed by the token budget as a string (``"2000"``); a missing
-    key means N/A (the chunk size exceeds the budget, or the item is
-    unanswerable). Matches the approved contract addition in
-    ``web/src/api/pending-contract.ts`` (item 4).
-    """
-
-    gold_item_id: int
-    question: str
-    category: GoldCategory
-    recall: dict[str, float]
-    full_support: bool
-    first_hit_rank: int | None
-    abstain_score: float | None
-    abstained: bool
-
-
-class EvalResultsPage(_Model):
-    items: list[EvalQuestionResult]
-    total: int
-    offset: int
-    limit: int
