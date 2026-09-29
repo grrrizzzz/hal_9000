@@ -176,10 +176,20 @@ class Meter:
         agent: str,
         **kw: Any,
     ) -> Any:
-        """Metered :func:`hal9000.llm.embed`: caps first, then one ledger row per request."""
+        """Metered :func:`hal9000.llm.embed`.
+
+        The caps are checked now and again before every batch request, so a
+        large ingestion stops at the cap instead of finishing the call; each
+        request writes its own ledger row, so batches already sent stay billed.
+        """
         self.precheck(agent)
         return embed(
-            texts, model, dimensions, on_usage=lambda usage: self.record(usage, agent), **kw
+            texts,
+            model,
+            dimensions,
+            on_usage=lambda usage: self.record(usage, agent),
+            before_request=lambda: self.precheck(agent),
+            **kw,
         )
 
 

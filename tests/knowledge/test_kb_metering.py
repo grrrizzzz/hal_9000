@@ -63,6 +63,8 @@ class FakeEmbed:
         self.calls += 1
         total = 0
         for tokens in self.batches:
+            if kw.get("before_request"):
+                kw["before_request"]()
             on_usage(llm.Usage(model=model, prompt=tokens, cached=0, completion=0, reasoning=0))
             total += tokens
         return llm.Embeddings(
@@ -107,6 +109,33 @@ def test_the_eval_cap_is_its_own(db):
     _spend(db, EVAL_AGENT, 10.0)
     with pytest.raises(MonthlyCapExceeded, match="knowledge-eval"):
         meter.embed(FakeEmbed(), ["a"], "openai/text-embedding-3-small", agent=EVAL_AGENT)
+
+
+def test_embed_rechecks_the_cap_before_every_batch(db, monkeypatch):
+    """Review (c): a call that crosses the cap stops before its next batch."""
+    import litellm
+
+    requests = []
+
+    def embedding(**kw):
+        requests.append(len(kw["input"]))
+        return SimpleNamespace(
+            data=[{"index": i, "embedding": [0.0]} for i in range(len(kw["input"]))],
+            usage={"prompt_tokens": 20_000},  # $0.0004 per request at $0.02/M
+        )
+
+    monkeypatch.setattr(litellm, "embedding", embedding)
+    meter = Meter(db, "r", 100, 100, monthly_caps={AGENT: 0.0003})
+    with pytest.raises(MonthlyCapExceeded):
+        meter.embed(
+            llm.embed,
+            ["x"] * 3000,
+            "openai/text-embedding-3-small",
+            agent=AGENT,
+            count_tokens=len,
+        )
+    assert requests == [2048]  # the second batch never went out
+    assert meter.month_spend(AGENT) == pytest.approx(0.0004)  # the first stays billed
 
 
 def test_last_month_spend_does_not_count(db):

@@ -86,10 +86,39 @@ def test_stream_sink_is_not_called_before_the_stream_ends(fake_stream, openai_en
 def test_stream_overrides_and_missing_usage(fake_stream, anthropic_env):
     fake_stream["chunks"] = [_chunk("x")]
     items = list(llm.stream_response(Prompt(messages=[]), "powerful", max_tokens=99))
-    assert items[0] == "x"
-    assert items[-1]["prompt"] == 0 and items[-1]["model"] == "anthropic/claude-sonnet-5"
+    assert items[0] == "x" and items[-1]["model"] == "anthropic/claude-sonnet-5"
     assert fake_stream["kwargs"]["max_tokens"] == 99
     assert "reasoning_effort" not in fake_stream["kwargs"]
+
+
+def test_missing_stream_usage_is_estimated_locally(fake_stream, openai_env):
+    fake_stream["chunks"] = [_chunk("The roof "), _chunk("is tile.")]
+    messages = [
+        {"role": "system", "content": "Answer from the sources."},
+        {"role": "user", "content": [{"type": "text", "text": "Roof?"}, {"type": "image"}]},
+    ]
+    seen = []
+    items = list(
+        llm.stream_response(Prompt(messages=messages), on_usage=seen.append, count_tokens=len)
+    )
+    usage = items[-1]
+    assert usage["estimated"] is True and seen == [usage]
+    assert usage["prompt"] == len("Answer from the sources.\nRoof?\n")
+    assert usage["completion"] == len("The roof is tile.")
+
+
+def test_missing_stream_usage_uses_the_model_tokenizer_by_default(fake_stream, openai_env):
+    from hal9000.knowledge.tokens import count_tokens
+
+    fake_stream["chunks"] = [_chunk("hello world")]
+    usage = list(llm.stream_response(Prompt(messages=[{"role": "user", "content": "hi"}])))[-1]
+    assert usage["completion"] == count_tokens("hello world", "o200k_base") == 2
+    assert usage["prompt"] == 1 and usage["estimated"]
+
+
+def test_reported_stream_usage_is_not_marked_estimated(fake_stream, openai_env):
+    fake_stream["chunks"] = [_chunk("x"), _chunk(usage=_usage(), choices=False)]
+    assert "estimated" not in list(llm.stream_response(Prompt(messages=[])))[-1]
 
 
 def test_stream_usage_on_a_content_chunk_counts(fake_stream, openai_env):
@@ -177,8 +206,24 @@ def test_missing_usage_falls_back_to_counted_tokens(monkeypatch):
         "embedding",
         lambda **kw: SimpleNamespace(data=[SimpleNamespace(index=0, embedding=[0.5])], usage=None),
     )
-    result = llm.embed(["abcd"], "openai/text-embedding-3-small", count_tokens=lambda t: 7)
+    seen = []
+    result = llm.embed(
+        ["abcd"], "openai/text-embedding-3-small", count_tokens=lambda t: 7, on_usage=seen.append
+    )
     assert result.vectors == [[0.5]] and result.usage["prompt"] == 7
+    assert result.usage["estimated"] is True and seen[0]["estimated"] is True
+
+
+def test_before_request_runs_before_every_batch(fake_embedding):
+    fake_calls_before = []
+
+    def before():
+        fake_calls_before.append(len(fake_embedding))
+
+    llm.embed(
+        ["x"] * 3000, "openai/text-embedding-3-small", count_tokens=len, before_request=before
+    )
+    assert fake_calls_before == [0, 1]  # checked before request 1 and before request 2
 
 
 def test_vector_count_mismatch_raises(monkeypatch):

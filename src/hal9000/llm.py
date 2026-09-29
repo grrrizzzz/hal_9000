@@ -37,7 +37,9 @@ __all__ = ["Embeddings", "Usage", "embed", "generate_response", "stream_response
 class Usage(dict):
     """Token counts for one call.
 
-    Keys: ``model``, ``prompt``, ``cached``, ``completion``, ``reasoning``.
+    Keys: ``model``, ``prompt``, ``cached``, ``completion``, ``reasoning``; and
+    ``estimated=True`` when the provider reported none and the counts come from
+    the local tokenizer instead.
     """
 
 
@@ -126,19 +128,34 @@ def generate_response(
 # ----------------------------------------------------------------------------
 # KF1: streaming
 # ----------------------------------------------------------------------------
+def _messages_text(messages: Sequence[dict]) -> str:
+    """All text in chat messages (string content or ``{"type": "text"}`` parts)."""
+    texts: list[str] = []
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, str):
+            texts.append(content)
+        elif isinstance(content, list):
+            texts.extend(str(part.get("text", "")) for part in content if isinstance(part, dict))
+    return "\n".join(texts)
+
+
 def stream_response(
     prompt: Prompt,
     tier: str = "fast",
     *,
     on_usage: Callable[[Usage], None] | None = None,
+    count_tokens: Callable[[str], int] | None = None,
     **kw: Any,
 ) -> Iterator[str | Usage]:
     """Stream a plain-text completion: yields ``str`` deltas in order, then one :class:`Usage`.
 
     Usage is requested with ``stream_options={"include_usage": True}``; the
     provider sends it on the final chunk. ``on_usage`` receives it exactly once,
-    before it is yielded. Tools are not offered. ``kw`` overrides the request
-    (``max_tokens``, ``temperature``...).
+    before it is yielded. When the provider sends none, prompt and completion
+    tokens are counted locally (``count_tokens``, default the model's tiktoken
+    encoding) and the Usage carries ``estimated=True``, so cost caps still bite.
+    Tools are not offered. ``kw`` overrides the request (``max_tokens``...).
     """
     import litellm
     from litellm import completion
@@ -150,6 +167,7 @@ def stream_response(
     kwargs["stream_options"] = {"include_usage": True}
 
     usage: Usage | None = None
+    parts: list[str] = []
     for chunk in completion(**kwargs):
         if _get(chunk, "usage", None):
             usage = extract_usage(chunk, model)
@@ -159,9 +177,18 @@ def stream_response(
         delta = _get(choices[0], "delta", None)
         text = _get(delta, "content", None)
         if text:
+            parts.append(text)
             yield text
     if usage is None:
-        usage = Usage(model=model, prompt=0, cached=0, completion=0, reasoning=0)
+        counter = count_tokens or _default_token_counter(model)
+        usage = Usage(
+            model=model,
+            prompt=counter(_messages_text(prompt.messages)),
+            cached=0,
+            completion=counter("".join(parts)),
+            reasoning=0,
+            estimated=True,
+        )
     if on_usage is not None:
         on_usage(usage)
     yield usage
@@ -223,13 +250,15 @@ def embed(
     *,
     on_usage: Callable[[Usage], None] | None = None,
     count_tokens: Callable[[str], int] | None = None,
+    before_request: Callable[[], None] | None = None,
 ) -> Embeddings:
     """Embed ``texts`` with ``litellm.embedding`` in token-aware batches.
 
     ``on_usage`` is called once per request, so every paid request reaches the
     ledger even if a later one fails; the returned usage is the sum. When a
-    response carries no usage, the locally counted tokens stand in, so cost
-    caps still bite.
+    response carries no usage, the locally counted tokens stand in (marked
+    ``estimated``), so cost caps still bite. ``before_request`` runs before
+    every request; the meter uses it to re-check the cap between batches.
     """
     import litellm
     from litellm import embedding
@@ -241,6 +270,8 @@ def embed(
     total = Usage(model=model, prompt=0, cached=0, completion=0, reasoning=0)
     requests = 0
     for batch in embedding_batches(counts):
+        if before_request is not None:
+            before_request()
         kwargs: dict[str, Any] = {"model": model, "input": [texts[i] for i in batch]}
         if dimensions is not None:
             kwargs["dimensions"] = dimensions
@@ -260,6 +291,8 @@ def embed(
             completion=0,
             reasoning=0,
         )
+        if not prompt_tokens:
+            usage["estimated"] = total["estimated"] = True
         total["prompt"] += usage["prompt"]
         if on_usage is not None:
             on_usage(usage)
