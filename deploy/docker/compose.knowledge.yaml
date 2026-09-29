@@ -1,0 +1,136 @@
+# The house knowledge base on the Pi (plan §15; handoff KWP11): hal-kb, and
+# Prometheus and Grafana for its dashboards. Home Assistant's container is not
+# part of this file and is never touched by it.
+#
+# Run from the repository root, always with the root .env for ${...} values:
+#
+#   docker compose --env-file .env -f deploy/docker/compose.knowledge.yaml up -d --build
+#
+# (Without --env-file, Compose would look for .env next to this file, and the
+# required GRAFANA_ADMIN_PASSWORD check below stops it.) Relative paths here
+# are relative to this file, so ../../data is the repository's data/ folder.
+#
+# Settings read from .env (see deploy/README.md):
+#   KB_PORT=8910  PROMETHEUS_PORT=9090  GRAFANA_PORT=3001   host ports (LAN only)
+#   KB_UID=1000   KB_GID=1000         the owner of ./data (`id -u`, `id -g`)
+#   KB_WITH_DOCLING=0  KB_WITH_RERANK=none                  image build options
+#   GRAFANA_ADMIN_PASSWORD                                   required
+# hal-kb also receives the whole .env (KB_PASSCODE, OPENAI_API_KEY, caps, ...).
+
+name: hal9000-knowledge
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  hal-kb:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile.kb
+      args:
+        WITH_DOCLING: ${KB_WITH_DOCLING:-0}
+        WITH_RERANK: ${KB_WITH_RERANK:-none}
+        APP_UID: ${KB_UID:-1000}
+        APP_GID: ${KB_GID:-1000}
+    image: hal9000/hal-kb:local
+    container_name: hal-kb
+    user: "${KB_UID:-1000}:${KB_GID:-1000}"
+    env_file:
+      - path: ../../.env
+        required: true
+    environment:
+      # container paths; they win over any host paths in .env
+      HAL_DATA_DIR: /app/data
+      HAL_CONFIG_DIR: /app/config
+      KB_DATA_DIR: /app/data
+    volumes:
+      - ../../data:/app/data
+      # config/knowledge.yaml (the chosen profile, after G-K2) is read from the
+      # checkout, so a `git pull` and a restart apply it without a rebuild
+      - ../../config:/app/config:ro
+    ports:
+      - "${KB_PORT:-8910}:8910"
+    mem_limit: 2g
+    restart: unless-stopped
+    stop_grace_period: 30s
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8910/health', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+    logging: *logging
+
+  prometheus:
+    image: prom/prometheus:v3.5.5
+    container_name: hal-kb-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=90d
+    volumes:
+      - ../prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9090}:9090"
+    mem_limit: 512m
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    logging: *logging
+
+  grafana:
+    # The OSS image. grafana/grafana-oss stopped receiving updates at Grafana
+    # 12.4.0; grafana/grafana carries the same OSS build.
+    image: grafana/grafana:12.4.12
+    container_name: hal-kb-grafana
+    # Same user as hal-kb, so the SQLite -shm/-wal files either container
+    # creates in ./data are usable by the other (see deploy/README.md).
+    user: "${KB_UID:-1000}:${KB_GID:-1000}"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env and pass --env-file .env}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      # To send alerts to Telegram, uncomment these two and the telegram.yaml
+      # mount below (deploy/grafana/optional/telegram.yaml).
+      # TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      # TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+    volumes:
+      - ../grafana/grafana.ini:/etc/grafana/grafana.ini:ro
+      - ../grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../grafana/dashboards:/etc/grafana/dashboards:ro
+      # - ../grafana/optional/telegram.yaml:/etc/grafana/provisioning/alerting/telegram.yaml:ro
+      # The whole data/ directory, read-write: knowledge.db is in WAL mode and a
+      # reader must be able to create and map its -shm file. The datasource
+      # opens the database with mode=ro, so Grafana cannot change it.
+      - ../../data:/data
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3001}:3001"
+    mem_limit: 512m
+    restart: unless-stopped
+    depends_on:
+      prometheus:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3001/api/health"]
+      interval: 30s
+      timeout: 5s
+      start_period: 60s
+      retries: 3
+    logging: *logging
+
+volumes:
+  prometheus-data:
+  grafana-data:
