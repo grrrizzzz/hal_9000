@@ -39,13 +39,13 @@ def test_percent_overlap_and_no_header() -> None:
 
 
 def test_parent_child_and_token_overlap() -> None:
-    p = parse_profile_name("docling.parent_child-256-p1500-o10t.hdr.te3s-1536")
+    p = parse_profile_name("docling.parent_child-256-p1500-o11t.hdr.te3s-1536")
     assert (p.parser, p.chunker, p.size, p.parent_size, p.overlap) == (
         "docling",
         "parent_child",
         256,
         1500,
-        10,
+        11,
     )
 
 

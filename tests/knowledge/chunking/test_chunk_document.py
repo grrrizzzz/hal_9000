@@ -137,7 +137,7 @@ def test_empty_and_blank_documents_give_no_chunks() -> None:
 # ----------------------------------------------------------------------- speed
 def test_chunking_a_35k_token_corpus_takes_well_under_a_second() -> None:
     """The evaluation re-chunks the ~35k-token corpus about 60 times (plan §8.4)."""
-    docs = [inspection_doc(seed=s, oversized_paragraphs=24).input for s in range(6)]
+    docs = [inspection_doc(seed=s, oversized_paragraphs=24).input for s in range(11)]
     total = sum(count_tokens(d.text) for d in docs)
     assert 30_000 <= total <= 45_000
     for name, kw in [

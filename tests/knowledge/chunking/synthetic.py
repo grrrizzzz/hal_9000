@@ -223,7 +223,7 @@ def any_texts(draw) -> str:
 def chunk_inputs(draw, texts=None) -> ChunkInput:
     """A ``ChunkInput`` with random page breaks and header metadata."""
     text = draw(texts if texts is not None else any_texts())
-    breaks = sorted(set(draw(st.lists(st.integers(1, max(1, len(text))), max_size=8))))
+    breaks = sorted(set(draw(st.lists(st.integers(1, len(text)), max_size=8)))) if text else []
     first = draw(st.integers(1, 60))
     page_starts = ((0, first), *((b, first + i + 1) for i, b in enumerate(breaks)))
     meta = draw(st.sampled_from([META, {}, dict(title="Synthetic Invoice", doc_type="invoice")]))
