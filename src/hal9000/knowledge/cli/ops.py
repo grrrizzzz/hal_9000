@@ -251,10 +251,15 @@ class RestoreReport:
 def restore(source: Path, data_dir: Path, *, force: bool = False) -> RestoreReport:
     """Restore the backup folder ``source`` into ``data_dir`` (see the module docstring)."""
     from hal9000.knowledge.ingest.jobs import WriterLock
-    from hal9000.knowledge.storage import open_db
+    from hal9000.knowledge.storage import SCHEMA_VERSION, open_db
 
     source, data_dir = Path(source), Path(data_dir)
     manifest = _check(source)
+    if int(manifest.get("schema_version", 0)) > SCHEMA_VERSION:
+        raise BackupError(
+            f"the backup was made by newer code (schema {manifest['schema_version']}, this code "
+            f"knows {SCHEMA_VERSION}); update hal9000 before restoring it"
+        )
     knowledge = data_dir / "knowledge"
     lock = WriterLock(knowledge / "worker.lock")
     if not lock.acquire():

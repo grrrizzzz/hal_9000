@@ -466,3 +466,13 @@ def test_restore_refuses_a_manifest_missing_a_part(data_dir, tmp_path, capsys):
     (report.folder / ops.MANIFEST).write_text(json.dumps(manifest))
     assert kb("restore", str(report.folder), "--into", str(tmp_path / "t")) == 1
     assert "doesn't list both of its parts" in capsys.readouterr().err
+
+
+def test_restore_refuses_a_backup_from_newer_code(data_dir, tmp_path, capsys):
+    report = ops.backup(data_dir / "knowledge.db", data_dir / "knowledge", tmp_path / "b")
+    manifest = json.loads((report.folder / ops.MANIFEST).read_text())
+    manifest["schema_version"] = 999
+    (report.folder / ops.MANIFEST).write_text(json.dumps(manifest))
+    assert kb("restore", str(report.folder), "--into", str(tmp_path / "t")) == 1
+    assert "made by newer code" in capsys.readouterr().err
+    assert not (tmp_path / "t" / "knowledge.db").exists()
