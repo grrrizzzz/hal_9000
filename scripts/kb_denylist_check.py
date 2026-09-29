@@ -5,15 +5,17 @@ The denylist holds distinctive strings from the house documents: reference
 numbers, people's names, the street, amounts. It is never committed. It is read
 from, in order:
 
-1. the ``KB_DENYLIST`` environment variable, one string per line (CI reads the
-   GitHub secret of the same name);
-2. the ``KB_DENYLIST`` key in ``.env`` at the repository root, separated by
-   ``|`` or newlines (the pre-commit hook).
+1. the ``KB_DENYLIST`` environment variable (CI reads the GitHub secret of the
+   same name);
+2. the ``KB_DENYLIST`` key in ``.env`` at the repository root (the pre-commit
+   hook).
 
-Every file ``git ls-files`` lists is scanned, case-insensitively. A hit prints
-the file, the line and the *number* of the denylist entry, never the string,
-so the check's own output can't leak what it protects. Exit codes: 0 clean or
-no list configured (with a warning), 1 a hit, 2 usage error.
+Either way, entries are separated by ``|`` or newlines. Every path ``git
+ls-files`` lists, and every such file's content, is scanned case-insensitively.
+A hit prints the file, the line and the *number* of the denylist entry, never
+the string, so the check's own output can't leak what it protects. Exit codes:
+0 clean or no list configured (with a warning; a ``::warning::`` annotation
+under GitHub Actions), 1 a hit, 2 usage error.
 
     uv run python scripts/kb_denylist_check.py
 """
@@ -30,11 +32,14 @@ from pathlib import Path
 EXCLUDED_PREFIXES = ("vendor/tiktoken/",)
 #: Shorter entries would match almost anything, so they are skipped with a warning.
 MIN_LENGTH = 3
+#: Line number reported when a tracked file's *path* contains an entry.
+PATH_HIT = -1
+NO_LIST = "no house-data denylist configured (KB_DENYLIST); nothing was checked."
 
 
-def _split(raw: str, *, pipes: bool) -> list[str]:
-    parts = raw.replace("|", "\n").splitlines() if pipes else raw.splitlines()
-    return [p.strip() for p in parts if p.strip()]
+def _split(raw: str) -> list[str]:
+    """Entries separated by ``|`` or newlines, trimmed, blanks dropped."""
+    return [p.strip() for p in raw.replace("|", "\n").splitlines() if p.strip()]
 
 
 def _from_env_file(path: Path) -> str:
@@ -55,10 +60,10 @@ def load_denylist(env: dict[str, str], env_file: Path) -> tuple[list[str], str]:
     """The entries and where they came from (``""`` when none are configured)."""
     raw = env.get("KB_DENYLIST", "")
     if raw.strip():
-        return _split(raw, pipes=False), "KB_DENYLIST environment variable"
+        return _split(raw), "KB_DENYLIST environment variable"
     raw = _from_env_file(env_file)
     if raw.strip():
-        return _split(raw, pipes=True), f"KB_DENYLIST in {env_file.name}"
+        return _split(raw), f"KB_DENYLIST in {env_file.name}"
     return [], ""
 
 
@@ -70,10 +75,15 @@ def tracked_files(root: Path) -> list[str]:
 
 
 def scan(root: Path, files: list[str], entries: list[str]) -> list[tuple[str, int, int]]:
-    """(path, line number, entry number) for every hit; line 0 means a binary file."""
+    """(path, line number, entry number) for every hit.
+
+    Line ``PATH_HIT`` means the file's path itself matched; line 0 means a
+    match inside a binary file.
+    """
     needles = [(n, e.casefold()) for n, e in enumerate(entries, 1) if len(e) >= MIN_LENGTH]
     hits: list[tuple[str, int, int]] = []
     for rel in files:
+        hits.extend((rel, PATH_HIT, n) for n, needle in needles if needle in rel.casefold())
         if rel.startswith(EXCLUDED_PREFIXES):
             continue
         path = root / rel
@@ -88,6 +98,22 @@ def scan(root: Path, files: list[str], entries: list[str]) -> list[tuple[str, in
         for lineno, line in enumerate(text.splitlines(), 1):
             hits.extend((rel, lineno, n) for n, needle in needles if needle in line)
     return hits
+
+
+def redact(text: str, entries: list[str]) -> str:
+    """``text`` with every (case-insensitive) occurrence of an entry replaced by ``***``."""
+    for entry in entries:
+        if len(entry) < MIN_LENGTH:
+            continue
+        folded, needle = text.casefold(), entry.casefold()
+        start = folded.find(needle)
+        while start != -1:
+            # casefold can change lengths for a few scripts; fall back to masking the rest
+            end = start + len(entry) if len(folded) == len(text) else len(text)
+            text = text[:start] + "***" + text[end:]
+            folded = text.casefold()
+            start = folded.find(needle)
+    return text
 
 
 def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> int:
@@ -110,10 +136,9 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
 
     entries, source = load_denylist(env, env_file)
     if not entries:
-        print(
-            "WARNING: no house-data denylist configured (KB_DENYLIST); nothing was checked.",
-            file=sys.stderr,
-        )
+        print(f"WARNING: {NO_LIST}", file=sys.stderr)
+        if env.get("GITHUB_ACTIONS") == "true":
+            print(f"::warning title=House-data denylist::{NO_LIST}")
         return 0
     short = [n for n, e in enumerate(entries, 1) if len(e) < MIN_LENGTH]
     for n in short:
@@ -125,6 +150,10 @@ def main(argv: list[str] | None = None, env: dict[str, str] | None = None) -> in
         print(f"denylist: {len(files)} tracked files clean ({len(entries)} entries, {source}).")
         return 0
     for rel, lineno, n in hits:
+        rel = redact(rel, entries)  # a path can itself contain an entry
+        if lineno == PATH_HIT:
+            print(f"{rel}: file path contains denylist entry #{n}", file=sys.stderr)
+            continue
         where = f"{rel}:{lineno}" if lineno else f"{rel} (binary)"
         print(f"{where}: contains denylist entry #{n}", file=sys.stderr)
     print(

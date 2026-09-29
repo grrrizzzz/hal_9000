@@ -73,6 +73,39 @@ def test_no_list_warns_and_passes(repo, capsys):
     assert code == 0 and "WARNING" in output
 
 
+def test_environment_value_pipe_separated(repo, capsys):
+    """A GitHub secret written as "a|b" must match both entries (review F1)."""
+    _track(repo, "invoice.txt", f"ref {REFERENCE}\n")
+    code, output = _run(repo, {"KB_DENYLIST": f"{SECRET}|{REFERENCE}"}, capsys)
+    assert code == 1 and "invoice.txt:1: contains denylist entry #2" in output
+    _track(repo, "owner.txt", f"{SECRET}\n")
+    code, output = _run(repo, {"KB_DENYLIST": f"{SECRET} | {REFERENCE}\nthird entry"}, capsys)
+    assert "owner.txt:1: contains denylist entry #1" in output
+    assert "invoice.txt:1: contains denylist entry #2" in output
+
+
+def test_tracked_file_paths_are_checked(repo, capsys):
+    name = f"docs/{REFERENCE.lower()}-invoice.txt"
+    _track(repo, name, "nothing inside\n")
+    code, output = _run(repo, {"KB_DENYLIST": REFERENCE}, capsys)
+    assert code == 1
+    assert "docs/***-invoice.txt: file path contains denylist entry #1" in output
+    assert REFERENCE.casefold() not in output.casefold()  # the path is redacted too
+
+
+def test_redact_masks_every_occurrence():
+    module = _load()
+    assert module.redact("a/QX-1/b/qx-1.txt", ["qx-1", "zz"]) == "a/***/b/***.txt"
+
+
+def test_no_list_under_github_actions_emits_an_annotation(repo, capsys):
+    code, output = _run(repo, {"GITHUB_ACTIONS": "true"}, capsys)
+    assert code == 0
+    assert "::warning title=House-data denylist::no house-data denylist configured" in output
+    code, output = _run(repo, {}, capsys)
+    assert "::warning" not in output
+
+
 def test_env_file_pipe_separated(repo, capsys):
     _track(repo, "invoice.txt", f"ref {REFERENCE}\n")
     (repo / ".env").write_text(f"OTHER=1\nKB_DENYLIST={SECRET}|{REFERENCE}\n")
