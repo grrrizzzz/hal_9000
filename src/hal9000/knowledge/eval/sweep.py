@@ -84,6 +84,7 @@ from hal9000.knowledge.eval.types import AnswerOutput, RetrievalOutput, Source
 
 __all__ = [
     "STAGES",
+    "TEST_STAGE",
     "Calibration",
     "SweepConfig",
     "SweepDeps",
@@ -102,6 +103,8 @@ __all__ = [
 log = logging.getLogger(__name__)
 
 STAGES = ("S1a", "S1b", "S2", "S3", "S4", "S5")
+#: the one-time test-split run of the chosen configuration (``kb eval test``)
+TEST_STAGE = "test"
 METHODS = ("dense", "bm25", "rrf", "weighted")
 TRANSFORMS = ("none", "multi", "hyde")
 RERANKER_NAMES = ("none", "minilm", "bge-base")
@@ -898,7 +901,9 @@ class SweepRunner:
             self.say(f"    embedded {report.embedded} new text(s), {report.cache_hits} cached")
         return report.profile
 
-    def _estimate(self, stage: str, todo: Sequence[SweepConfig]) -> _Estimate:
+    def _estimate(
+        self, stage: str, todo: Sequence[SweepConfig], items: Sequence[GoldItem] | None = None
+    ) -> _Estimate:
         from hal9000.knowledge.index.embedding import EmbeddingService, is_fake_model
         from hal9000.knowledge.index.profiles import profile_status
 
@@ -915,7 +920,8 @@ class SweepRunner:
             texts.setdefault((profile.embed_model, profile.dimensions), []).extend(
                 profile_texts(self.conn, profile)
             )
-        questions = [item.question for item in self.dev_items()]
+        items = self.dev_items() if items is None else items
+        questions = [item.question for item in items]
         for model, dims in {(c.embed_model, c.dimensions) for c in todo}:
             texts.setdefault((model, dims), []).extend(questions)
         for (model, dims), batch in sorted(texts.items()):
@@ -925,7 +931,7 @@ class SweepRunner:
             estimate.add(usd, f"embeddings: ~{tokens:,} uncached tokens with {model}-{dims}")
         if builds:
             estimate.lines.append(f"{builds} profile(s) to build from stored pages (not activated)")
-        n = len(self.dev_items())
+        n = len(items)
         cfg = self.grid.estimate
         for transform in ("multi", "hyde"):
             count = sum(c.query_transform == transform for c in todo)
@@ -938,7 +944,7 @@ class SweepRunner:
                     self.settings.condense_tier,
                 )
                 estimate.add(cost.usd, f"T10 {transform}: {cost.describe()}")
-        if stage == "S5":
+        if stage in ("S5", TEST_STAGE):
             from hal9000.knowledge.eval.judge import estimate_judge_prep
 
             for config in todo:
@@ -976,12 +982,12 @@ class SweepRunner:
         selected = output.selected[:k] if k is not None else output.selected
         return replace(output, selected=tuple(selected), latency_ms=local_latency_ms(trace))
 
-    def _retrieval_run(
-        self, stage: str, config: SweepConfig, run_id: str, profile: IndexProfile
-    ) -> EvalRun:
+    def _score_retrieval(
+        self, config: SweepConfig, items: Sequence[GoldItem]
+    ) -> tuple[list[QuestionScore], list[dict[str, Any]], float]:
+        """Retrieve and score ``items`` with ``config``: (scores, records, metered spend)."""
         bound = self._binding(config)
         spent = self.meter.spent
-        items = self.dev_items()
         if config.query_transform == "none":  # warm caches and imports (untimed, free)
             bound.retrieve(items[0].question)
         scores: list[QuestionScore] = []
@@ -998,7 +1004,13 @@ class SweepRunner:
                     score, question=item.question, selected=[s.chunk_id for s in output.selected]
                 )
             )
-        cost = self.meter.spent - spent
+        return scores, records, self.meter.spent - spent
+
+    def _retrieval_run(
+        self, stage: str, config: SweepConfig, run_id: str, profile: IndexProfile
+    ) -> EvalRun:
+        items = self.dev_items()
+        scores, records, cost = self._score_retrieval(config, items)
         metrics = aggregate(scores, config=self.scoring)
         metrics = metrics.model_copy(
             update={"cost_per_question_usd": self._query_cost(config, items, cost)}
@@ -1271,7 +1283,10 @@ class SweepRunner:
                                 for r in range(g.repeat_top)]  # fmt: skip
         self._batch("S5", configs)
 
-    def _answer_run(self, stage: str, config: SweepConfig, run_id: str) -> EvalRun:
+    def _answer_items(
+        self, config: SweepConfig, items: Sequence[GoldItem]
+    ) -> tuple[list[dict[str, Any]], float]:
+        """Answer ``items`` with every setting of ``config`` and judge each: (records, cost)."""
         from hal9000.knowledge.eval.judge import JudgeError, judge_answer
 
         answer = config_answerer(
@@ -1283,10 +1298,9 @@ class SweepRunner:
             budget=self.grid.decision_budget,
         )
         generate = self.generate()
-        spent = self.meter.spent
         records: list[dict[str, Any]] = []
         answer_cost = 0.0
-        for item in self.dev_items():
+        for item in items:
             self.meter.precheck(EVAL_AGENT)
             started = time.perf_counter()
             output, result = answer(item.question)
@@ -1297,7 +1311,7 @@ class SweepRunner:
             try:
                 labels = judge_answer(generate, self.settings.judge_tier, item, output)
             except JudgeError as error:
-                log.warning("S5: the judge failed on item %s: %s", item.id, error)
+                log.warning("the judge failed on item %s: %s", item.id, error)
                 labels = None
             records.append(
                 {
@@ -1318,6 +1332,11 @@ class SweepRunner:
                     "full_support": {},
                 }
             )
+        return records, answer_cost
+
+    def _answer_run(self, stage: str, config: SweepConfig, run_id: str) -> EvalRun:
+        spent = self.meter.spent
+        records, answer_cost = self._answer_items(config, self.dev_items())
         metrics = self._answer_metrics(records, answer_cost)
         run_config = config.run_config(stage=stage, sweep_id=self.sweep_id)
         run_config.update(self._gate)
@@ -1358,3 +1377,129 @@ class SweepRunner:
             cost_per_question_usd=round(answer_cost / len(records), 8) if records else None,
             by_category=by_category,
         )
+
+    # ------------------------------------------------------------ test split
+    def run_test(
+        self, sweep_id: str, name: str, *, force: bool = False, force_judge: bool = False
+    ) -> SweepOutcome:
+        """``kb eval test``: the chosen configuration, once, on the test split (plan §8.6).
+
+        Retrieval is scored and answers are generated and judged, as in S1-S5,
+        on the approved **test** items; one ``split="test"`` run is stored. A
+        second run of the same configuration is refused unless ``force`` (logged).
+        """
+        from hal9000.knowledge.eval.decide import find_run, target_scores
+
+        runs = [r for r in list_runs(self.conn) if r.config.get("sweep_id") == sweep_id]
+        if not runs:
+            raise ValueError(f"no sweep {sweep_id!r}")
+        self.sweep_id = sweep_id
+        self.manifest = read_manifest(self.eval_dir, sweep_id) or {"sweep_id": sweep_id}
+        source = find_run([r for r in runs if r.stage in STAGES], name)
+        if source is None:
+            raise ValueError(f"no configuration {name!r} in sweep {sweep_id}")
+        config = SweepConfig.from_run_config(source.config)
+        if config.k is not None:
+            raise ValueError(
+                "a k variant (T9) is a measurement, not a configuration: use its baseline"
+            )
+        config = replace(config, repeat=0, chat_tier=config.chat_tier or self.settings.chat_tier)
+        items = list_gold(self.conn, status="approved", split="test")
+        if not items:
+            return self._outcome("refused", "no approved test-split questions")
+        earlier = [r for r in runs if r.stage == TEST_STAGE and r.config.get("name") == config.name]
+        if earlier and not force:
+            return self._outcome(
+                "refused",
+                f"{config.name} was already run on the test split ({earlier[0].id}); the test "
+                "split is reported once (plan §8.6). Pass --force to run it again (logged).",
+            )
+        if earlier:
+            log.warning("test split re-run for %s (--force); earlier: %s", config.name,
+                        ", ".join(r.id for r in earlier))  # fmt: skip
+        try:
+            gate = self._judge_gate(force_judge)
+        except SweepRefused as refused:
+            return self._outcome("refused", str(refused).replace("S5 refused", "test refused"))
+        if earlier:
+            self.note(TEST_STAGE, f"--force: {config.name} run on the test split again "
+                      f"(earlier: {', '.join(r.id for r in earlier)})")  # fmt: skip
+        self.say(f"Test split: {config.name} on {len(items)} approved test questions, once.")
+        estimate = self._estimate(TEST_STAGE, [config], items)
+        self.say(f"Estimate for the test split: ${estimate.usd:.4f}")
+        for line in estimate.lines:
+            self.say(f"  - {line}")
+        left = self._remaining()
+        if estimate.usd > left:
+            return self._outcome("refused", f"the estimate ${estimate.usd:.4f} exceeds what is "
+                                 f"left of the caps (${left:.4f})")  # fmt: skip
+        if not self.confirm(f"Run {config.name} on the test split?"):
+            return self._outcome("refused", "not confirmed")
+        digest = hashlib.sha1(config.name.encode()).hexdigest()[:10]
+        run_id = f"{sweep_id}.{TEST_STAGE}.{digest}" + (f".{len(earlier) + 1}" if earlier else "")
+        try:
+            profile = self._ensure_profile(config.profile())
+            assert profile is not None
+            spent = self.meter.spent
+            scores, records, _ = self._score_retrieval(config, items)
+            answers, answer_cost = self._answer_items(config, items)
+        except BudgetExceeded as error:
+            return self._outcome("stopped", f"STOPPED at the cost cap: {error}; nothing was "
+                                 "stored, so the test split can be run again")  # fmt: skip
+        finally:
+            self.close()
+        by_item = {a["gold_item_id"]: a for a in answers}
+        for record in records:
+            answer = dict(by_item[record["gold_item_id"]])
+            answer["answer_latency_ms"] = answer.pop("latency_ms")
+            for key in ("recall", "full_support", "abstained"):
+                answer.pop(key)
+            record.update(answer)
+        retrieval = aggregate(scores, config=self.scoring)
+        answered = self._answer_metrics(answers, answer_cost)
+        by_category = {
+            c: {**row, **{k: v for k, v in answered.by_category.get(c, {}).items()
+                          if k == "correct"}}
+            for c, row in retrieval.by_category.items()
+        }  # fmt: skip
+        metrics = retrieval.model_copy(
+            update={
+                "correct": answered.correct,
+                "faithful": answered.faithful,
+                "abstention_correct": answered.abstention_correct,
+                "cost_per_question_usd": answered.cost_per_question_usd,
+                "by_category": by_category,
+            }
+        )
+        run_config = config.run_config(stage=TEST_STAGE, sweep_id=sweep_id)
+        run_config.update(gate)
+        run_config["source_run"] = source.id
+        run_config["declined"] = self._declined(answers)
+        if earlier:
+            run_config["forced_rerun"] = True
+        run = record_run(
+            self.conn,
+            eval_dir=self.eval_dir,
+            stage=TEST_STAGE,
+            split="test",
+            config={k: v for k, v in run_config.items() if v is not None},
+            metrics=metrics,
+            records=records,
+            cost_usd=self.meter.spent - spent,
+            run_id=run_id,
+        )
+        for row in target_scores(run):
+            self.say(f"  {row.label}: {row.describe()}")
+        return SweepOutcome(sweep_id, "done", run.id, runs=1, spent=self.meter.spent)
+
+    def _declined(self, answers: Sequence[Mapping]) -> dict[str, float] | None:
+        """Unanswerable questions correctly declined (the judge's abstention label), with a CI."""
+        values = [
+            float(bool(a["abstention_correct"]))
+            for a in answers
+            if not a["answerable"] and a.get("abstention_correct") is not None
+        ]
+        if not values:
+            return None
+        ci = bootstrap_ci(values, n_boot=self.scoring.n_boot, seed=self.scoring.seed + 600)
+        return ci.model_dump()

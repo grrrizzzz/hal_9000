@@ -10,17 +10,20 @@ from pathlib import Path
 import pytest
 
 from hal9000.knowledge.config import load_knowledge_file
-from hal9000.knowledge.contracts import EvalMetrics, EvalRun
+from hal9000.knowledge.contracts import EvalMetrics, EvalRun, MetricCI
 from hal9000.knowledge.eval.decide import (
     Ranker,
     find_run,
     identity,
     recommend,
     render_recommendation,
+    render_targets,
     simplicity,
+    target_scores,
     write_choice_yaml,
 )
 from hal9000.knowledge.eval.scoring import ScoringConfig, bootstrap_ci
+from hal9000.knowledge.retrieve.config import RetrievalConfig
 
 REPO = Path(__file__).resolve().parents[3]
 SCORING = ScoringConfig(n_boot=300, min_paired=5)
@@ -201,11 +204,12 @@ def test_the_chat_tier_is_fast_unless_powerful_is_significantly_better(tmp_path)
     assert recommend([winner], scoring=SCORING, thresholds=thresholds).abstain_threshold == 0.5
 
 
-def test_render_names_the_choice_and_notes_unsupported_settings(tmp_path):
+def test_render_names_the_choice_and_a_transform_is_a_normal_choice(tmp_path):
     hyde = make_run(tmp_path, "hyde", SPREAD, query_transform="hyde")
     rec = recommend([hyde], scoring=SCORING)
+    assert rec.chosen.unsupported == ()  # retrieval.transform is a knowledge.yaml key
     text = render_recommendation(rec, choice={"config": "hyde", "run_id": "hyde", "at": "today"})
-    assert "Chosen at G-K2:** hyde" in text and "no setting for it" in text
+    assert "Chosen at G-K2:** hyde" in text and "note:" not in text
     assert "not calibrated" in text
     assert "No recommendation yet" in render_recommendation(recommend([], scoring=SCORING))
 
@@ -233,10 +237,14 @@ def test_write_choice_yaml_keeps_the_comments_and_validates(tmp_path):
         method="weighted",
         alpha=0.3,
         budget=2000,
-        comment=["chosen by a test", "chat tier fast"],
+        comment=["chosen by a test"],
+        transform="multi",
+        chat_tier="powerful",
     )
     text = target.read_text()
     parsed = load_knowledge_file(target)
+    assert parsed.retrieval.transform == "multi" and parsed.answer.chat_tier == "powerful"
+    assert RetrievalConfig.from_file(parsed).transform == "multi"
     assert parsed.active_profile == "pdfium.structure-512.hdr.te3s-1536"
     assert parsed.reranker == "minilm"
     assert (parsed.retrieval.method, parsed.retrieval.weighted_alpha) == ("weighted", 0.3)
@@ -270,3 +278,74 @@ def test_exact_ties_break_by_name_not_by_run_id(tmp_path):
     x = make_run(tmp_path, "zz-run", SPREAD, name="a-config", profile="p1")
     y = make_run(tmp_path, "aa-run", SPREAD, name="b-config", profile="p2")
     assert Ranker(SCORING).rank([y, x])[0].run.id == "zz-run"
+
+
+def test_the_chat_tier_comes_from_knowledge_yaml_unless_kb_chat_tier_is_set(tmp_path, monkeypatch):
+    from hal9000.knowledge.config import settings
+
+    (tmp_path / "knowledge.yaml").write_text("answer:\n  chat_tier: powerful\n")
+    monkeypatch.setenv("HAL_CONFIG_DIR", str(tmp_path))
+    assert settings().chat_tier == "powerful"
+    monkeypatch.setenv("KB_CHAT_TIER", "fast")
+    assert settings().chat_tier == "fast"
+    monkeypatch.delenv("KB_CHAT_TIER")
+    (tmp_path / "knowledge.yaml").write_text("answer:\n  chat_tier: null\n")
+    assert settings().chat_tier == "fast"
+    (tmp_path / "knowledge.yaml").write_text("answer: [unclosed\n")
+    assert settings().chat_tier == "fast"  # the yaml's own loader reports the error
+    (tmp_path / "knowledge.yaml").write_text("answer:\n  chat_tier: medium\n")
+    with pytest.raises(Exception, match="must be one of"):
+        settings()
+
+
+def test_the_retrieval_transform_is_read_from_knowledge_yaml(tmp_path):
+    from hal9000.knowledge.config import KnowledgeFile
+
+    kf = KnowledgeFile.model_validate({"retrieval": {"transform": "hyde"}})
+    assert RetrievalConfig.from_file(kf).transform == "hyde"
+    assert RetrievalConfig.from_file(KnowledgeFile()).transform == "none"
+    with pytest.raises(ValueError):
+        KnowledgeFile.model_validate({"retrieval": {"transform": "rewrite"}})
+
+
+def _test_run(tmp_path, *, recall, mrr, correct, faithful, declined, forced=False):
+    ci = lambda v, lo, hi: MetricCI(value=v, low=lo, high=hi)  # noqa: E731
+    metrics = EvalMetrics(
+        n_questions=48,
+        budgeted_recall={2000: ci(*recall)},
+        mrr=ci(*mrr),
+        correct=ci(*correct) if correct else None,
+        faithful=ci(*faithful),
+    )
+    config = {"name": "chosen", "declined": ci(*declined).model_dump()}
+    if forced:
+        config["forced_rerun"] = True
+    return EvalRun(id="t1", stage="test", split="test", config=config, metrics=metrics,
+                   finished_at=datetime.now(UTC))  # fmt: skip
+
+
+def test_the_plan_s1_pass_rule_on_test_split_scores(tmp_path):
+    run = _test_run(
+        tmp_path,
+        recall=(0.86, 0.80, 0.91),  # upper bound reaches 0.90, point within 5 points: pass
+        mrr=(0.69, 0.60, 0.80),  # point 6 points short: fail
+        correct=None,  # not measured
+        faithful=(0.92, 0.90, 0.94),  # point within 5 points, upper bound short: fail
+        declined=(0.80, 0.70, 0.90),  # exactly on the target: pass
+    )
+    scores = {s.key: s for s in target_scores(run)}
+    assert [s.key for s in target_scores(run)] == ["recall", "mrr", "correct", "faithful",
+                                                   "declined"]  # fmt: skip
+    assert scores["recall"].passes is True
+    assert scores["mrr"].passes is False
+    assert scores["correct"].passes is None
+    assert scores["faithful"].passes is False
+    assert scores["declined"].passes is True
+    assert "PASS" in scores["recall"].describe() and "not measured" in scores["correct"].describe()
+    text = render_targets([run])
+    assert "| Evidence recall within a 2,000-token budget | >= 0.90 |" in text
+    assert text.count("| PASS |") == 2 and text.count("| FAIL |") == 2
+    assert "not measured" in text and render_targets([]) == ""
+    forced = _test_run(tmp_path, recall=(0.9, 0.8, 1.0), mrr=(0.8, 0.7, 0.9), correct=None,
+                       faithful=(1, 1, 1), declined=(1, 1, 1), forced=True)  # fmt: skip
+    assert "a forced re-run" in render_targets([forced])

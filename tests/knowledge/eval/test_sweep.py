@@ -283,3 +283,69 @@ def test_local_latency_excludes_the_embedding_call():
         ]
     )
     assert local_latency_ms(trace) == 6.0
+
+
+# ------------------------------------------------------------------ the test split
+def test_the_test_split_runs_once_judged_and_scored_against_the_targets(swept_env, caplog):
+    from hal9000.knowledge.eval.decide import render_targets
+    from hal9000.knowledge.eval.report import render_report
+
+    env, sweep_id = swept_env
+    runner = env.runner()
+    runner.sweep_id = sweep_id
+    leader = runner.finalists()
+    name = leader[0].config["name"]
+    refused = env.runner().run_test(sweep_id, name)
+    assert refused.status == "refused" and "no judge calibration labels" in refused.message
+
+    label_calibration(env.conn, leader[0].id)
+    env.out.seek(0)
+    env.out.truncate()
+    outcome = env.runner().run_test(sweep_id, name)
+    out = env.out.getvalue()
+    assert outcome.status == "done", (outcome.message, out)
+    assert out.index("Estimate for the test split") < out.index("FIRST LLM CALL")
+    (run,) = [r for r in list_runs(env.conn) if r.stage == "test"]
+    assert run.split == "test" and run.config["sweep_id"] == sweep_id
+    assert run.config["chat_tier"] == "fast" and run.config["source_run"] == leader[0].id
+    assert run.metrics.n_questions == 4  # the approved test items
+    assert 2000 in run.metrics.budgeted_recall and run.metrics.mrr is not None
+    assert run.metrics.correct is not None and run.metrics.faithful is not None
+    assert run.config["declined"]["low"] <= run.config["declined"]["value"]
+    record = results(run)[0]
+    assert "recall" in record and record["correctness"] and "answer_latency_ms" in record
+    assert run.cost_usd > 0 and {a for a, _ in env.ledger()} == {"knowledge-eval"}
+    assert "Evidence recall within a 2,000-token budget:" in out
+
+    again = env.runner().run_test(sweep_id, name)
+    assert again.status == "refused" and "--force" in again.message
+    forced = env.runner().run_test(sweep_id, name, force=True)
+    assert forced.status == "done"
+    tests = [r for r in list_runs(env.conn) if r.stage == "test"]
+    assert len(tests) == 2 and any(r.config.get("forced_rerun") for r in tests)
+    assert "test split re-run" in caplog.text
+    assert any(
+        "--force" in n for n in read_manifest(env.settings.eval_dir, sweep_id)["notes"]["test"]
+    )
+    report = render_report([*sweep_runs(env.conn, sweep_id), *tests], source=sweep_id)
+    assert "Plan §1 targets" in report and render_targets(tests).split("\n")[0] in report
+
+
+def test_the_test_split_refuses_what_it_cannot_run(swept_env):
+    env, sweep_id = swept_env
+    k_variant = next(r for r in sweep_runs(env.conn, sweep_id, "S4") if r.config.get("k"))
+    with pytest.raises(ValueError, match="k variant"):
+        env.runner().run_test(sweep_id, k_variant.id)
+    with pytest.raises(ValueError, match="no configuration"):
+        env.runner().run_test(sweep_id, "nope")
+    with pytest.raises(ValueError, match="no sweep"):
+        env.runner().run_test("sweep-missing", "nope")
+    name = k_variant.config["name"].rsplit("+k", 1)[0]
+    over = env.runner(cap=1e-9).run_test(sweep_id, name, force_judge=True)
+    assert over.status == "refused" and "exceeds what is left" in over.message
+    declined = env.runner(confirm=lambda q: False).run_test(sweep_id, name, force_judge=True)
+    assert declined.status == "refused" and declined.message == "not confirmed"
+    with env.conn:
+        env.conn.execute("UPDATE gold_items SET split = 'dev'")
+    assert "no approved test-split" in env.runner().run_test(sweep_id, name).message
+    assert not [r for r in list_runs(env.conn) if r.stage == "test"]

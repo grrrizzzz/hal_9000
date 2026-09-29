@@ -11,7 +11,8 @@ module                  commands                            owner
 ``cli/ingest.py``       ``ingest``                          KWP3
 ``cli/gold.py``         ``gold generate|export|import``     KWP5
 ``cli/eval.py``         ``eval sweep|judge-prep|latency|    KWP5
-                        choose|export|report|regression``
+                        choose|test|export|report|
+                        regression``
 ``cli/serve.py``        ``serve``                           KWP6
 ``cli/ask.py``          ``ask``                             KWP6
 ``cli/ops.py``          ``profile list|activate``,          KWP10
@@ -141,6 +142,22 @@ def register(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     choose.add_argument("run", metavar="RUN", help="the sweep ID")
     choose.add_argument("--config", required=True, metavar="NAME", help="configuration or run ID")
     _yes(choose)
+    test = _command(
+        ev_cmds,
+        "test",
+        "eval",
+        "score the chosen configuration once on the test split (answers judged)",
+        "eval test",
+    )
+    test.add_argument("run", metavar="RUN", help="the sweep ID")
+    test.add_argument("--config", required=True, metavar="NAME", help="configuration or run ID")
+    test.add_argument(
+        "--force", action="store_true", help="run it again although it was already run (logged)"
+    )
+    test.add_argument(
+        "--force-judge", action="store_true", help="run without judge agreement >= 85%%"
+    )
+    _yes(test)
     for name, help_text in (
         ("export", "aggregates and per-question scores, no document text"),
         ("report", "write docs/KNOWLEDGE_EVAL_REPORT.md (aggregates only)"),

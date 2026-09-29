@@ -1,6 +1,6 @@
-"""``hal9000 kb eval sweep|judge-prep|latency|choose|export|report|regression`` (plan §8, §17).
+"""``hal9000 kb eval sweep|judge-prep|latency|choose|test|export|report|regression`` (§8, §17).
 
-``sweep``, ``latency`` and ``choose`` are the staged sweep (KWP5 part B):
+``sweep``, ``latency``, ``choose`` and ``test`` are the staged sweep (KWP5 part B):
 :mod:`hal9000.knowledge.eval.sweep`, :mod:`~hal9000.knowledge.eval.latency` and
 :mod:`~hal9000.knowledge.eval.decide`. Exit codes: 0 done, 1 error, 3 not run
 (refused or not confirmed), 4 stopped at a cost cap (partial results kept).
@@ -39,6 +39,7 @@ def run(args: argparse.Namespace) -> int:
             "eval sweep": _sweep,
             "eval latency": _latency,
             "eval choose": _choose,
+            "eval test": _test,
         }[command]
         return handler(args, conn, current)
     finally:
@@ -148,7 +149,9 @@ def _judge_prep(args, conn, current) -> int:
         if not confirm("Generate and judge the calibration answers?", yes=args.yes):
             return EXIT_NOT_RUN
         try:
-            answer = answerer_for(conn, current, meter=spend.meter, run=run)
+            answer = _run_answerer(conn, current, run, spend.meter)
+            if answer is None:  # not a sweep run: KWP6's binding (the run's profile only)
+                answer = answerer_for(conn, current, meter=spend.meter, run=run)
             generate = spend.generate()
         except NotWired as error:
             _err(str(error))
@@ -176,6 +179,34 @@ def _judge_prep(args, conn, current) -> int:
         return EXIT_OK
     finally:
         spend.close()
+
+
+def _run_answerer(conn, current, run, meter):
+    """``question -> AnswerOutput`` with every setting of a sweep run (profile, method,
+    reranker, transform, chat tier), or None for a run that isn't a sweep configuration."""
+    from hal9000.knowledge.config import EVAL_AGENT
+    from hal9000.knowledge.eval.config import load_eval_config
+    from hal9000.knowledge.eval.sweep import (
+        SweepConfig,
+        SweepDeps,
+        config_answerer,
+        load_sweep_settings,
+    )
+
+    if not (run.config.get("sweep_id") and run.config.get("retrieval")):
+        return None
+    config = SweepConfig.from_run_config(run.config)
+    cfg = load_eval_config(current.config_dir / "knowledge_eval.yaml")
+    budget = load_sweep_settings(cfg).decision_budget if cfg.sweep else 2000
+    answer = config_answerer(conn, current, config, meter=meter, deps=SweepDeps(), budget=budget)
+
+    def answer_fn(question: str):
+        output, result = answer(question)
+        if result.outcome in ("retrieval_only", "error"):
+            meter.precheck(EVAL_AGENT)  # a spending cap: stop (judge-prep keeps what it has)
+        return output
+
+    return answer_fn
 
 
 # --------------------------------------------------------------- regression
@@ -434,11 +465,8 @@ def _choose(args, conn, current) -> int:
     )
     comment = [
         f"chosen by `hal9000 kb eval choose {args.run} --config {config.name}` on {when}",
-        f"chat tier {tier or 'unchanged'} (set KB_CHAT_TIER in .env); abstain threshold "
-        f"{threshold_text}",
+        f"abstain threshold {threshold_text}",
     ]
-    if config.query_transform != "none":
-        comment.append(f"query transform {config.query_transform} has no setting here: not used")
     write_choice_yaml(
         current.yaml_path,
         profile=profile.name,
@@ -447,6 +475,8 @@ def _choose(args, conn, current) -> int:
         alpha=config.alpha,
         budget=budget,
         comment=comment,
+        transform=config.query_transform,
+        chat_tier=tier,
     )
     manifest = read_manifest(current.eval_dir, args.run)
     manifest["choice"] = {
@@ -460,8 +490,50 @@ def _choose(args, conn, current) -> int:
     write_manifest(current.eval_dir, args.run, manifest)
     print(f"Chosen: {config.name}. {profile.name} is now the active profile.")
     print(f"Wrote {current.yaml_path}: profile, reranker {config.reranker}, retrieval "
-          f"{config.retrieval}, context budget {budget} tokens.")  # fmt: skip
+          f"{config.retrieval}, transform {config.query_transform}, context budget {budget} "
+          f"tokens, chat tier {tier or 'unchanged'}.")  # fmt: skip
     print(f"Abstain threshold: {threshold_text}.")
-    if tier and tier != current.chat_tier:
-        print(f"Set KB_CHAT_TIER={tier} in .env (now {current.chat_tier}).")
+    import os
+
+    override = os.environ.get("KB_CHAT_TIER", "").strip().lower()
+    if tier and override and override != tier:
+        print(f"Note: KB_CHAT_TIER={override} in the environment overrides answer.chat_tier.")
+    print(f"Then: hal9000 kb eval test {args.run} --config {config.name} --yes (once).")
+    return EXIT_OK
+
+
+# --------------------------------------------------------------------- test
+def _test(args, conn, current) -> int:
+    from hal9000.knowledge.eval.config import load_eval_config
+    from hal9000.knowledge.eval.spend import confirm, open_spend
+    from hal9000.knowledge.eval.sweep import SweepRunner
+
+    cfg = load_eval_config(current.config_dir / "knowledge_eval.yaml")
+    spend = open_spend(current, max_cost=None, label="test")
+    try:
+        runner = SweepRunner(
+            conn,
+            current,
+            eval_config=cfg,
+            meter=spend.meter,
+            max_cost=spend.meter.hard_cap,
+            eval_cap=spend.eval_cap,
+            confirm=lambda question: confirm(question, yes=args.yes),
+        )
+        outcome = runner.run_test(
+            args.run, args.config, force=args.force, force_judge=args.force_judge
+        )
+    except (hal_config.ConfigError, ValueError) as error:
+        _err(str(error))
+        return EXIT_ERROR
+    finally:
+        spend.close()
+    if outcome.status == "refused":
+        _err(f"not run: {outcome.message}")
+        return EXIT_NOT_RUN
+    if outcome.status == "stopped":
+        print(outcome.message)
+        return EXIT_STOPPED
+    print(f"Stored {outcome.message} (split test); spent ${outcome.spent:.4f} (knowledge-eval).")
+    print(f"Report: hal9000 kb eval report {args.run}")
     return EXIT_OK

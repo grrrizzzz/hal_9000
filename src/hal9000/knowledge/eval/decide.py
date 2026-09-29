@@ -50,7 +50,9 @@ __all__ = [
     "identity",
     "recommend",
     "render_recommendation",
+    "render_targets",
     "simplicity",
+    "target_scores",
 ]
 
 #: plan §8.6: the highest budgeted recall @ 2k on dev
@@ -254,13 +256,10 @@ class Recommendation:
 
 
 def _unsupported(config: Mapping) -> tuple[str, ...]:
-    out = []
-    if (config.get("query_transform") or "none") != "none":
-        out.append(
-            f"query transform {config['query_transform']!r} (config/knowledge.yaml has no "
-            "setting for it: the chat would run without it)"
-        )
-    return tuple(out)
+    """Settings of a configuration the chat can't be configured with (none at present:
+    ``retrieval.transform`` and ``answer.chat_tier`` are ``knowledge.yaml`` keys, and
+    *k* variants are never candidates)."""
+    return ()
 
 
 def _chat_tier(ranker: Ranker, winner: EvalRun, s5: Sequence[EvalRun]) -> tuple[str | None, str]:
@@ -512,14 +511,16 @@ def _set_line(lines: list[str], key: str, value: object, parent: str | None = No
 
 def write_choice_yaml(
     path, *, profile: str, reranker: str, method: str, alpha: float | None, budget: int,
-    comment: Sequence[str],
+    comment: Sequence[str], transform: str = "none", chat_tier: str | None = None,
 ) -> None:  # fmt: skip
     """Write the chosen configuration into ``config/knowledge.yaml``, keeping its comments.
 
-    Sets ``active_profile``, ``reranker`` and the ``retrieval:`` block's ``method``,
-    ``weighted_alpha`` and ``context_budget_tokens``; replaces the ``# G-K2:``
-    comment lines (chat tier and abstain threshold, which live in ``.env`` and
-    ``abstain_thresholds``). The result is validated before it replaces the file.
+    Sets ``active_profile``, ``reranker``, the ``retrieval:`` block's ``method``,
+    ``weighted_alpha``, ``context_budget_tokens`` and ``transform``, and
+    ``answer.chat_tier`` (``KB_CHAT_TIER`` in ``.env`` still overrides it);
+    replaces the ``# G-K2:`` comment lines. The abstain threshold lives in
+    ``abstain_thresholds`` in the database. The result is validated before it
+    replaces the file.
     """
     from pathlib import Path
 
@@ -533,6 +534,9 @@ def write_choice_yaml(
     _set_line(lines, "method", method, parent="retrieval")
     _set_line(lines, "weighted_alpha", alpha if method == "weighted" else None, parent="retrieval")
     _set_line(lines, "context_budget_tokens", budget, parent="retrieval")
+    _set_line(lines, "transform", transform or "none", parent="retrieval")
+    if chat_tier is not None:
+        _set_line(lines, "chat_tier", chat_tier, parent="answer")
     at = next((i for i, line in enumerate(lines) if line.startswith("active_profile:")), 0)
     lines[at:at] = [f"{_MARK} {text}" for text in comment]
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -557,3 +561,76 @@ def find_run(runs: Sequence[EvalRun], name: str) -> EvalRun | None:
     if not named:
         return None
     return max(named, key=lambda r: (stage_order(r.stage), r.id))
+
+
+# ------------------------------------------------------------ plan §1 targets
+#: plan §1 quality targets on the test split: (label, target)
+TARGETS: tuple[tuple[str, str, float], ...] = (
+    ("recall", "Evidence recall within a 2,000-token budget", 0.90),
+    ("mrr", "MRR of the first evidence-bearing chunk", 0.75),
+    ("correct", "Correct (judge)", 0.85),
+    ("faithful", "Faithful to the cited sources (judge)", 0.95),
+    ("declined", "Unanswerable questions correctly declined", 0.80),
+)
+#: plan §1: the point estimate must be within this of the target
+TARGET_SLACK = 0.05
+
+
+@dataclass(frozen=True)
+class TargetScore:
+    key: str
+    label: str
+    target: float
+    ci: MetricCI | None
+
+    @property
+    def passes(self) -> bool | None:
+        """Plan §1: the CI's upper bound reaches the target and the point estimate is
+        within 5 points of it; None when not measured."""
+        if self.ci is None:
+            return None
+        return self.ci.high >= self.target and self.ci.value >= self.target - TARGET_SLACK
+
+    def describe(self) -> str:
+        verdict = {True: "PASS", False: "FAIL", None: "not measured"}[self.passes]
+        return f"{_ci(self.ci)} against >= {self.target:.2f}: {verdict}"
+
+
+def target_scores(run: EvalRun, *, budget: int = DECISION_BUDGET) -> list[TargetScore]:
+    """A test-split run's scores against the plan §1 quality targets."""
+    m = run.metrics
+    declined = run.config.get("declined")
+    values = {
+        "recall": m.budgeted_recall.get(budget) if m else None,
+        "mrr": m.mrr if m else None,
+        "correct": m.correct if m else None,
+        "faithful": m.faithful if m else None,
+        "declined": MetricCI.model_validate(declined) if isinstance(declined, dict) else None,
+    }
+    return [TargetScore(key, label, target, values[key]) for key, label, target in TARGETS]
+
+
+def render_targets(runs: Sequence[EvalRun]) -> str:
+    """Markdown: each test-split run's scores with CIs against the plan §1 targets."""
+    tests = [r for r in runs if r.split == "test" and r.metrics is not None]
+    if not tests:
+        return ""
+    lines = [
+        "Plan §1 targets (a target passes when the 95% interval's upper bound reaches it and "
+        "the point estimate is within 5 points of it):",
+        "",
+    ]
+    for run in tests:
+        forced = " (a forced re-run)" if run.config.get("forced_rerun") else ""
+        lines += [
+            f"**{run.config.get('name', run.id)}** (run `{run.id}`{forced}, "
+            f"{run.metrics.n_questions} test questions):",
+            "",
+            "| metric | target | test split [95% CI] | result |",
+            "|---|---|---|---|",
+        ]
+        for score in target_scores(run):
+            verdict = {True: "PASS", False: "FAIL", None: "not measured"}[score.passes]
+            lines.append(f"| {score.label} | >= {score.target:.2f} | {_ci(score.ci)} | {verdict} |")
+        lines.append("")
+    return "\n".join(lines)

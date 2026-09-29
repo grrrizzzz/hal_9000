@@ -22,7 +22,6 @@ from tests.knowledge.eval.test_sweep_fixtures import (  # noqa: F401 - fixtures
     fake_chat,
     fake_mode,
     fresh_query_cache,
-    label_calibration,
     make_settings,
 )
 
@@ -65,7 +64,11 @@ def sweep_id_from(out: str) -> str:
     return out.split("Sweep ", 1)[1].split(":", 1)[0]
 
 
-def test_sweep_s5_report_and_choose(cli, capsys):
+def test_sweep_judge_prep_s5_report_choose_and_test(cli, capsys, monkeypatch):
+    from hal9000.knowledge.eval import sweep as sweep_module
+    from hal9000.knowledge.eval.store import list_judge_labels, set_human_labels
+    from hal9000.knowledge.eval.sweep import SweepConfig
+
     settings = cli
     assert main(["kb", "eval", "sweep", "--stages", "S1a,S1b,S2,S3,S4", "--yes"]) == 0
     out = capsys.readouterr().out
@@ -75,10 +78,25 @@ def test_sweep_s5_report_and_choose(cli, capsys):
     assert main(["kb", "eval", "sweep", "--stages", "S5", "--resume", sweep, "--yes"]) == 3
     assert "S5 refused" in capsys.readouterr().err
 
+    # judge-prep answers with the leading configuration's full settings (config_answerer)
+    leader_id = out.split("kb eval judge-prep ", 1)[1].split(",", 1)[0]
+    leader = next(r for r in runs(settings) if r.id == leader_id)
+    calls = []
+    real = sweep_module.config_answerer
+
+    def spy(conn, current, config, **kw):
+        calls.append(config)
+        return real(conn, current, config, **kw)
+
+    monkeypatch.setattr(sweep_module, "config_answerer", spy)
+    assert main(["kb", "eval", "judge-prep", leader_id, "--yes"]) == 0
+    assert calls == [SweepConfig.from_run_config(leader.config)]
     conn = open_db(settings.db_path)
     try:
-        leader = next(r for r in list_runs(conn) if r.stage == "S4" and r.config.get("k") is None)
-        label_calibration(conn, leader.id)
+        labels = list_judge_labels(conn, eval_run_id=leader_id)
+        assert len(labels) == 3 and all(label.judge for label in labels)
+        for label in labels:  # Mike agrees with the judge
+            set_human_labels(conn, label.id, label.judge)
     finally:
         conn.close()
     assert main(["kb", "eval", "sweep", "--stages", "S5", "--resume", sweep, "--yes"]) == 0
@@ -99,11 +117,25 @@ def test_sweep_s5_report_and_choose(cli, capsys):
     yaml_text = settings.yaml_path.read_text()
     assert f"active_profile: {s4[-1].config['profile']}" in yaml_text
     assert f"method: {s4[-1].config['retrieval']}" in yaml_text and "# G-K2: chosen by" in yaml_text
+    assert f"transform: {s4[-1].config['query_transform']}" in yaml_text
+    assert "chat_tier: fast" in yaml_text
     choice = read_manifest(settings.eval_dir, sweep)["choice"]
     assert choice["config"] == chosen and choice["chat_tier"] == "fast"
     assert main(["kb", "eval", "report", sweep]) == 0
     report = (settings.config_dir.parent / "docs" / "KNOWLEDGE_EVAL_REPORT.md").read_text()
     assert f"**Chosen at G-K2:** {chosen}" in report
+
+    # the test split, once
+    assert main(["kb", "eval", "test", sweep, "--config", chosen, "--yes"]) == 0
+    assert "(split test)" in capsys.readouterr().out
+    (test_run,) = runs(settings, "test")
+    assert test_run.split == "test" and test_run.config["chat_tier"] == "fast"
+    assert main(["kb", "eval", "test", sweep, "--config", chosen, "--yes"]) == 3
+    assert "already run on the test split" in capsys.readouterr().err
+    assert main(["kb", "eval", "test", sweep, "--config", "nope", "--yes"]) == 1
+    assert main(["kb", "eval", "report", sweep]) == 0
+    report = (settings.config_dir.parent / "docs" / "KNOWLEDGE_EVAL_REPORT.md").read_text()
+    assert "Plan §1 targets" in report and "| Correct (judge) | >= 0.85 |" in report
 
     k_variant = next(r for r in runs(settings, "S4") if r.config.get("k") is not None)
     assert main(["kb", "eval", "choose", sweep, "--config", k_variant.id, "--yes"]) == 1

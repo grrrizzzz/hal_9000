@@ -230,6 +230,11 @@ def render_report(
             ["run", "stage", "profile", *METRIC_HEADERS],
             [[r.id, r.stage, _cell(r.config.get("profile")), *_metric_row(r)] for r in test],
         )
+        from hal9000.knowledge.eval.decide import render_targets
+
+        targets = render_targets(test)
+        if targets:
+            lines += ["", targets.rstrip()]
     else:
         lines.append("Not run yet.")
     lines += ["", "## Chosen configuration", ""]
