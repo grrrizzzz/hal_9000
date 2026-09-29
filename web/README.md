@@ -67,6 +67,16 @@ the Query Inspector.
   `@playwright/test` is pinned to 1.56.1, whose Chromium revision (1194)
   matches the pre-installed browsers; never run `playwright install` there.
 
+### Pending contract
+
+`src/api/pending-contract.ts` holds the contract additions approved for KWP6 but
+not yet in `openapi.json`: `MessageOut.grounding`/`issues`, optional `rating`
+with `add_to_gold` (feedback is one row per message; a later POST updates it),
+`citations` on judge-label items, `GET /api/eval/runs/{id}/results` (paged),
+`POST /api/jobs/{id}/retry` and `TraceSummary.question`. The UI and the MSW
+mocks use them only through that file; when `openapi.json` is regenerated,
+swap each type for the generated one and delete the file.
+
 ### Fake-mode triggers
 
 The mocks (and, to pass the same suite, `kb serve --fake`) react to phrases in

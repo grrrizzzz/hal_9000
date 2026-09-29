@@ -5,7 +5,7 @@
  * sized by cost per question), and per-category bars.
  */
 import { useQuery } from "@tanstack/react-query";
-import { BarChart3 } from "lucide-react";
+import { BarChart3, ChevronLeft, ChevronRight } from "lucide-react";
 import { useMemo, useState } from "react";
 import {
   Area,
@@ -24,14 +24,16 @@ import {
   ZAxis,
 } from "recharts";
 import { api } from "@/api/client";
+import { pendingApi } from "@/api/pending-contract";
 import type { EvalRun } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Select } from "@/components/ui/input";
 import { Segmented } from "@/components/ui/segmented";
 import { EmptyState, ErrorState, Skeleton } from "@/components/ui/states";
-import { formatDateTime, formatMs, formatUsd, pct } from "@/lib/format";
+import { formatDateTime, formatMs, formatUsd, pct, plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { axisProps, ChartCard, Legend, SERIES, TooltipBox } from "./ChartCard";
 import {
@@ -51,6 +53,24 @@ import {
 const BUDGETS = ["1000", "2000", "4000"] as const;
 type Budget = (typeof BUDGETS)[number];
 const PI_P95_BUDGET_MS = 300;
+
+/** Tick labels short enough for a 390 px chart; the tooltip and table use the long form. */
+const CATEGORY_SHORT: Record<string, string> = {
+  factoid: "Fact",
+  money: "Money",
+  date: "Date",
+  list: "List",
+  cross_document: "Cross-doc",
+  unanswerable: "Unans.",
+};
+const CATEGORY_LONG: Record<string, string> = {
+  factoid: "Factoid",
+  money: "Money or number",
+  date: "Date or age",
+  list: "List",
+  cross_document: "Cross-document",
+  unanswerable: "Unanswerable",
+};
 
 /** Percent ticks every 10 points from `lo` to 100%. */
 const pctTicks = (lo: number) => Array.from({ length: Math.round((1 - lo) * 10) + 1 }, (_, i) => +(lo + i / 10).toFixed(2));
@@ -118,7 +138,7 @@ export function SweepRuns() {
             ]}
           />
         </div>
-        <span className="text-xs text-muted-foreground">{runs.length} runs</span>
+        <span className="text-xs text-muted-foreground">{plural(runs.length, "run")}</span>
       </div>
 
       {!runs.length ? (
@@ -256,7 +276,10 @@ function Pareto({ runs }: { runs: EvalRun[] }) {
   const pi = points.filter((p) => p.pi);
   const frontier = paretoFrontier(mac);
   // Keep the Pi budget line in view, and start the y-axis at the nearest 10% below the data.
-  const xMax = Math.ceil(Math.max(PI_P95_BUDGET_MS * 1.1, ...points.map((p) => p.latency)) / 50) * 50;
+  const rawMax = Math.max(PI_P95_BUDGET_MS * 1.1, ...points.map((p) => p.latency));
+  const xStep = rawMax > 600 ? 200 : rawMax > 300 ? 100 : 50;
+  const xMax = Math.ceil(rawMax / xStep) * xStep;
+  const xTicks = Array.from({ length: xMax / xStep + 1 }, (_, i) => i * xStep);
   const yLo = points.length ? Math.max(0, Math.floor(Math.min(...points.map((p) => p.recall)) * 10) / 10) : 0;
   const tip = (p: TipProps) => {
     const d = tipRow<ParetoPoint>(p);
@@ -297,6 +320,7 @@ function Pareto({ runs }: { runs: EvalRun[] }) {
                 type="number"
                 name="p95 latency"
                 domain={[0, xMax]}
+                ticks={xTicks}
                 tickFormatter={(v: number) => `${v}`}
                 {...axisProps}
                 label={{ value: "p95 local retrieval (ms)", position: "insideBottom", offset: -2, fill: "var(--chart-muted)", fontSize: 11 }}
@@ -375,7 +399,7 @@ function CategoryBars({ runs }: { runs: EvalRun[] }) {
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={rows} margin={{ top: 8, right: 8, bottom: 4, left: 0 }} barGap={2} barCategoryGap="22%">
                 <CartesianGrid vertical={false} stroke="var(--chart-grid)" />
-                <XAxis dataKey="category" {...axisProps} tickFormatter={(c: string) => c.replace("_", "-")} interval={0} height={30} />
+                <XAxis dataKey="category" {...axisProps} tickFormatter={(c: string) => CATEGORY_SHORT[c] ?? c} interval={0} height={30} />
                 <YAxis domain={[0, 1]} tickFormatter={(v: number) => pct(v)} width={44} {...axisProps} axisLine={false} />
                 <Tooltip
                   cursor={{ fill: "var(--subtle)" }}
@@ -383,7 +407,7 @@ function CategoryBars({ runs }: { runs: EvalRun[] }) {
                     const row = tipRow<(typeof rows)[number]>(p);
                     return row ? (
                       <TooltipBox
-                        title={String(row.category).replace("_", "-")}
+                        title={CATEGORY_LONG[String(row.category)] ?? String(row.category)}
                         rows={runs.map((r) => [label(r), row[r.id] === null || row[r.id] === undefined ? "—" : pct(row[r.id] as number, 1)])}
                       />
                     ) : null;
@@ -414,7 +438,7 @@ function CategoryBars({ runs }: { runs: EvalRun[] }) {
           <tbody className="tabular">
             {rows.map((row) => (
               <tr key={row.category} className="border-t border-border">
-                <td className="py-1.5">{row.category}</td>
+                <td className="py-1.5">{CATEGORY_LONG[row.category] ?? row.category}</td>
                 {runs.map((r) => (
                   <td key={r.id} className="py-1.5">
                     {row[r.id] === null ? "—" : pct(row[r.id] as number, 1)}
@@ -563,11 +587,77 @@ function RunDetail({ run, onClose }: { run: EvalRun | null; onClose: () => void 
             <section>
               <h4 className="mb-2 text-xs font-medium tracking-wide text-muted-foreground uppercase">Configuration</h4>
               <pre className="overflow-auto rounded-lg bg-surface-2 p-3 font-mono text-xs leading-relaxed">{JSON.stringify(r.config, null, 2)}</pre>
-              {r.results_path ? <p className="mt-2 text-xs text-muted-foreground">Per-question results: {r.results_path}</p> : null}
+              {r.results_path ? <p className="mt-2 text-xs text-muted-foreground">Results file: {r.results_path}</p> : null}
             </section>
           </div>
+          <RunResults runId={r.id} />
         </DialogContent>
       ) : null}
     </Dialog>
+  );
+}
+
+const PAGE = 20;
+
+/** The per-question drill-down (plan §8.6), paged. */
+function RunResults({ runId }: { runId: string }) {
+  const [offset, setOffset] = useState(0);
+  const q = useQuery({ queryKey: ["run-results", runId, offset], queryFn: () => pendingApi.runResults(runId, offset, PAGE), placeholderData: (prev) => prev });
+  const page = q.data;
+  return (
+    <section className="border-t border-border px-5 py-4" data-testid="run-results">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h4 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">Per question</h4>
+        {page ? (
+          <div className="flex items-center gap-1 text-xs text-muted-foreground">
+            <span className="tabular" aria-live="polite">
+              {page.total ? `${page.offset + 1}–${Math.min(page.offset + page.items.length, page.total)} of ${page.total}` : "none"}
+            </span>
+            <Button size="icon-sm" variant="ghost" aria-label="Previous questions" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - PAGE))}>
+              <ChevronLeft />
+            </Button>
+            <Button size="icon-sm" variant="ghost" aria-label="Next questions" disabled={offset + PAGE >= page.total} onClick={() => setOffset(offset + PAGE)}>
+              <ChevronRight />
+            </Button>
+          </div>
+        ) : null}
+      </div>
+      {q.isLoading ? (
+        <Skeleton className="h-40" />
+      ) : q.isError ? (
+        <ErrorState error={q.error} onRetry={() => q.refetch()} className="py-4" />
+      ) : !page?.items.length ? (
+        <p className="text-sm text-muted-foreground">No per-question results for this run.</p>
+      ) : (
+        <div className={cn("relative overflow-x-auto", q.isFetching && "opacity-60")}>
+          <table className="w-full text-[13px]">
+            <thead className="text-left text-xs text-muted-foreground">
+              <tr>
+                <th className="py-1.5 pr-3 font-medium">Question</th>
+                <th className="hidden py-1.5 pr-3 font-medium sm:table-cell">Category</th>
+                <th className="py-1.5 pr-3 text-right font-medium">Recall @ 2k</th>
+                <th className="hidden py-1.5 pr-3 text-right font-medium sm:table-cell">Full support</th>
+                <th className="py-1.5 text-right font-medium">First hit</th>
+              </tr>
+            </thead>
+            <tbody className="tabular divide-y divide-border">
+              {page.items.map((it) => (
+                <tr key={it.gold_item_id}>
+                  <td className="w-full max-w-0 py-1.5 pr-3">
+                    <span className="block truncate" title={it.question}>
+                      {it.question}
+                    </span>
+                  </td>
+                  <td className="hidden py-1.5 pr-3 whitespace-nowrap sm:table-cell">{CATEGORY_LONG[it.category] ?? it.category}</td>
+                  <td className="py-1.5 pr-3 text-right">{it.recall["2000"] === undefined ? (it.abstained ? "abstained" : "N/A") : pct(it.recall["2000"])}</td>
+                  <td className="hidden py-1.5 pr-3 text-right sm:table-cell">{it.full_support ? "yes" : "—"}</td>
+                  <td className="py-1.5 text-right">{it.first_hit_rank ?? "—"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
   );
 }

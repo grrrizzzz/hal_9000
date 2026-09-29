@@ -43,6 +43,40 @@ export function uploadOne(
   });
 }
 
+/**
+ * A concurrency limiter shared by everything that uploads: new batches and
+ * retries queue behind what's already running, so there are never more than
+ * `limit` uploads in flight in total.
+ */
+export class TaskQueue {
+  private active = 0;
+  private waiting: (() => void)[] = [];
+  constructor(readonly limit: number) {}
+
+  get inFlight(): number {
+    return this.active;
+  }
+
+  run<T>(task: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const start = () => {
+        this.active++;
+        task()
+          .then(resolve, reject)
+          .finally(() => {
+            this.active--;
+            this.waiting.shift()?.();
+          });
+      };
+      if (this.active < this.limit) start();
+      else this.waiting.push(start);
+    });
+  }
+}
+
+/** The app-wide upload queue (plan §5.2: three files at a time). */
+export const uploadQueue = new TaskQueue(UPLOAD_CONCURRENCY);
+
 /** Run `task` over `items` with at most `limit` in flight; resolves when all settle. */
 export async function runPool<T>(items: T[], limit: number, task: (item: T, index: number) => Promise<void>): Promise<void> {
   let next = 0;

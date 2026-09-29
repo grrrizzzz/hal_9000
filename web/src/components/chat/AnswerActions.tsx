@@ -2,7 +2,7 @@ import { useMutation } from "@tanstack/react-query";
 import { Check, Info, ListPlus, ThumbsDown, ThumbsUp } from "lucide-react";
 import { useState } from "react";
 import { Link } from "react-router";
-import { api } from "@/api/client";
+import { pendingApi, type FeedbackRequestPending } from "@/api/pending-contract";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
@@ -13,12 +13,12 @@ export function AnswerActions({ messageId, traceId }: { messageId: number | null
   const [rating, setRating] = useState<1 | -1 | null>(null);
   const [downOpen, setDownOpen] = useState(false);
   const [comment, setComment] = useState("");
-  const [goldId, setGoldId] = useState<number | null>(null);
+  const [goldId, setGoldId] = useState<number | null | undefined>(undefined);
   const [note, setNote] = useState<string | null>(null);
 
+  // One feedback row per message: rating and "Add to question set" update the same row.
   const send = useMutation({
-    mutationFn: (body: { rating: 1 | -1; comment?: string | null; add_to_gold?: boolean }) =>
-      api.post("/api/feedback", { body: { message_id: messageId!, add_to_gold: false, ...body } }),
+    mutationFn: (body: Omit<FeedbackRequestPending, "message_id">) => pendingApi.feedback({ message_id: messageId!, ...body }),
   });
 
   if (!messageId) return null;
@@ -67,9 +67,9 @@ export function AnswerActions({ messageId, traceId }: { messageId: number | null
           </form>
         </PopoverContent>
       </Popover>
-      {goldId ? (
+      {goldId !== undefined ? (
         <Button size="sm" variant="ghost" asChild className="text-success">
-          <Link to={`/evaluation?tab=review&status=draft&item=${goldId}`}>
+          <Link to={goldId !== null ? `/evaluation?tab=review&status=draft&item=${goldId}` : "/evaluation?tab=review&status=draft"}>
             <Check /> In the review queue
           </Link>
         </Button>
@@ -79,9 +79,10 @@ export function AnswerActions({ messageId, traceId }: { messageId: number | null
           variant="ghost"
           disabled={send.isPending}
           onClick={() =>
+            // Carries the rating already given (if any); never invents one.
             send.mutate(
-              { rating: rating ?? 1, comment: comment.trim() || null, add_to_gold: true },
-              { onSuccess: (r) => setGoldId(r.gold_item_id ?? -1) },
+              { ...(rating !== null ? { rating } : {}), add_to_gold: true },
+              { onSuccess: (r) => setGoldId(r.gold_item_id ?? null) },
             )
           }
         >

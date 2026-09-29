@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Input, Select } from "@/components/ui/input";
 import { EmptyState, ErrorState, SkeletonRows } from "@/components/ui/states";
-import { docTypeLabel, formatDocDate } from "@/lib/format";
+import { docTypeLabel, formatDocDate, pageRange, plural } from "@/lib/format";
 
 interface FileGroup {
   sha: string;
@@ -150,7 +150,7 @@ function FileBlock({ file }: { file: FileGroup }) {
         <span className="truncate font-mono" title={file.path}>
           {file.path}
         </span>
-        {file.docs.length > 1 ? <span className="shrink-0">· {file.docs.length} documents</span> : null}
+        {file.docs.length > 1 ? <span className="shrink-0">· {plural(file.docs.length, "document")}</span> : null}
       </div>
       <ul className="divide-y divide-border">
         {file.docs.map((d) => (
@@ -177,7 +177,7 @@ function DocRow({ doc }: { doc: DocumentSummary }) {
       void qc.invalidateQueries({ queryKey: ["documents"] });
     },
   });
-  const range = d.page_start === d.page_end ? `p. ${d.page_start}` : `pp. ${d.page_start}–${d.page_end}`;
+
   return (
     <li className="px-4 py-3 sm:px-5" data-testid="library-row">
       <div className="flex items-start gap-3">
@@ -197,15 +197,19 @@ function DocRow({ doc }: { doc: DocumentSummary }) {
           </p>
           <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
             <StatusBadge status={doc.status} />
-            <Badge tone="outline" className="tabular">
-              {range} of {doc.pages}
+            {/* pages = the sub-document's own page count; page_start/end are file page numbers. */}
+            <Badge tone="outline" className="tabular" title="Pages of the file this document spans">
+              {pageRange(d.page_start, d.page_end)}
             </Badge>
             <Badge tone="outline" className="tabular">
-              {doc.chunks} chunks
+              {plural(doc.pages, "page")}
+            </Badge>
+            <Badge tone="outline" className="tabular">
+              {plural(doc.chunks, "chunk")}
             </Badge>
             {doc.pages_without_text ? (
               <Badge tone="warning" title="Pages with no text layer can't be searched">
-                {doc.pages_without_text} {doc.pages_without_text === 1 ? "page" : "pages"} without text
+                {plural(doc.pages_without_text, "page")} without text
               </Badge>
             ) : null}
           </div>

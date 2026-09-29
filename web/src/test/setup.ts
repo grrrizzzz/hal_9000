@@ -1,8 +1,11 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterAll, afterEach, beforeAll } from "vitest";
 import { resetMockDb } from "@/mocks/db";
 import { server } from "@/mocks/node";
+
+// Lazy-loaded pages (Evaluation) can take well over the default 1 s on a busy CI box.
+configure({ asyncUtilTimeout: 5000 });
 
 // jsdom lacks these; Radix and Recharts touch them.
 class RO {

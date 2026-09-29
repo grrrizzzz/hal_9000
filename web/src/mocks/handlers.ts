@@ -5,6 +5,7 @@
  */
 import { bypass, delay, http, HttpResponse, type HttpHandler } from "msw";
 import type { ResponseOf } from "@/api/client";
+import type { FeedbackRequestPending, TraceSummaryPending } from "@/api/pending-contract";
 import type {
   ChatEvent,
   ChatRequest,
@@ -16,7 +17,7 @@ import type {
   JudgeLabel,
   UploadResult,
 } from "@/api/types";
-import { chunkText, makeTrace, MIME, MOCK_PASSCODE, PAGES, SHA, TRIGGERS } from "./data";
+import { chunkText, makeTrace, MIME, MOCK_PASSCODE, PAGES, SHA, seedRunResults, TRIGGERS } from "./data";
 import { db, nextId } from "./db";
 import pdfUrl from "./fixtures/synthetic-house.pdf?url";
 
@@ -266,6 +267,8 @@ function chatStream(req: ChatRequest): ReadableStream<Uint8Array> {
           citations: answer.citations,
           trace_id: traceId,
           outcome: script.outcome,
+          grounding: script.grounding,
+          issues: script.issues,
           created_at: new Date().toISOString(),
         });
         convo!.updated_at = new Date().toISOString();
@@ -506,11 +509,17 @@ export const handlers: HttpHandler[] = [
   http.post(
     "/api/feedback",
     authed(async ({ request }) => {
-      const body = (await request.json()) as { message_id: number; rating: number; comment?: string | null; add_to_gold?: boolean };
-      const id = nextId();
-      db.feedback.push({ id, ...body, add_to_gold: Boolean(body.add_to_gold) });
-      let goldId: number | null = null;
-      if (body.add_to_gold) {
+      // Pending contract (2): rating is optional when add_to_gold; one row per message.
+      const body = (await request.json()) as FeedbackRequestPending;
+      let row = db.feedback.find((f) => f.message_id === body.message_id);
+      if (!row) {
+        row = { id: nextId(), message_id: body.message_id, rating: null, comment: null, add_to_gold: false, gold_item_id: null };
+        db.feedback.push(row);
+      }
+      if (body.rating !== undefined && body.rating !== null) row.rating = body.rating;
+      if (body.comment) row.comment = body.comment;
+      if (body.add_to_gold && row.gold_item_id === null) {
+        row.add_to_gold = true;
         let question = "";
         let answer = "";
         let citations: Citation[] = [];
@@ -523,10 +532,10 @@ export const handlers: HttpHandler[] = [
             question = msgs[i - 1]?.content ?? "";
           }
         }
-        goldId = nextId();
+        row.gold_item_id = nextId();
         const evidence: EvidenceQuote[] = citations.map((c) => ({ quote: c.snippet || c.title, page: c.page, file_sha: c.file_sha }));
         db.gold.unshift({
-          id: goldId,
+          id: row.gold_item_id,
           question: question || "(question)",
           reference_answer: answer || null,
           category: evidence.length ? "factoid" : "unanswerable",
@@ -535,11 +544,11 @@ export const handlers: HttpHandler[] = [
           evidence,
           status: "draft",
           split: null,
-          reviewer_note: body.comment ?? null,
+          reviewer_note: row.comment,
           origin: "feedback",
         });
       }
-      return json<ResponseOf<"/api/feedback", "post">>({ id, gold_item_id: goldId });
+      return json<ResponseOf<"/api/feedback", "post">>({ id: row.id, gold_item_id: row.gold_item_id });
     }),
   ),
   http.get(
@@ -630,6 +639,32 @@ export const handlers: HttpHandler[] = [
       return r ? json<ResponseOf<"/api/eval/runs/{id}", "get">>(r) : notFound("Run");
     }),
   ),
+  // Pending contract (4): paged per-question results.
+  http.get(
+    "/api/eval/runs/:id/results",
+    authed(({ params, request }) => {
+      const r = db.runs.find((x) => x.id === params.id);
+      if (!r) return notFound("Run");
+      const u = new URL(request.url).searchParams;
+      const offset = Math.max(0, Number(u.get("offset") ?? 0));
+      const limit = Math.min(200, Math.max(1, Number(u.get("limit") ?? 25)));
+      const all = seedRunResults(r.id, r.metrics?.n_questions ?? 0, (r.metrics?.budgeted_recall as Record<string, { value: number }>)?.["2000"]?.value ?? 0.7);
+      return json({ items: all.slice(offset, offset + limit), total: all.length, offset, limit });
+    }),
+  ),
+  // Pending contract (5): retry a failed job.
+  http.post(
+    "/api/jobs/:id/retry",
+    authed(({ params }) => {
+      const job = db.jobs.find((j) => j.id === Number(params.id));
+      if (!job) return notFound("Job");
+      if (job.status !== "failed") return json({ detail: "Only failed jobs can be retried." }, { status: 409 });
+      Object.assign(job, { status: "queued", progress: 0, detail: "queued", error: null, updated_at: new Date().toISOString() });
+      db.jobs = db.jobs.filter((j) => j !== job);
+      startJob(job);
+      return json(job);
+    }),
+  ),
   http.get(
     "/api/profile",
     authed(() =>
@@ -660,7 +695,9 @@ export const handlers: HttpHandler[] = [
     authed(({ request }) => {
       const limit = Number(new URL(request.url).searchParams.get("limit") ?? 50);
       return json<ResponseOf<"/api/traces", "get">>(
-        db.traces.slice(0, limit).map((t) => ({ id: t.id!, created_at: t.created_at!, outcome: t.outcome ?? null, total_ms: t.total_ms ?? null, ttft_ms: t.ttft_ms ?? null, cost_usd: t.cost_usd })),
+        db.traces.slice(0, limit).map(
+          (t): TraceSummaryPending => ({ id: t.id!, created_at: t.created_at!, question: t.question ?? null, outcome: t.outcome ?? null, total_ms: t.total_ms ?? null, ttft_ms: t.ttft_ms ?? null, cost_usd: t.cost_usd }),
+        ),
       );
     }),
   ),

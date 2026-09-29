@@ -47,4 +47,17 @@ describe("Upload", () => {
     expect(calls.sort()).toEqual(["Box/Sub/b.md", "Box/a.pdf"]);
     expect(screen.getByText("Box/Sub/b.md")).toBeInTheDocument();
   });
+
+  it("retries a file whose processing failed through the job retry route", { timeout: 15000 }, async () => {
+    const user = userEvent.setup();
+    renderApp("/upload");
+    fireEvent.change(await screen.findByTestId("folder-input"), { target: { files: [withPath("corrupt-scan.pdf", "Box/corrupt-scan.pdf")] } });
+    await user.click(await screen.findByRole("button", { name: "Upload 1 file" }));
+    const row = () => document.querySelector("[data-testid=upload-row]")!;
+    await waitFor(() => expect(row().getAttribute("data-status")).toMatch(/could not be opened/), { timeout: 8000 });
+    const uploadsBefore = calls.length;
+    await user.click(screen.getByRole("button", { name: "Retry Box/corrupt-scan.pdf" }));
+    await waitFor(() => expect(row().getAttribute("data-status")).toBe("Indexed"), { timeout: 8000 });
+    expect(calls.length).toBe(uploadsBefore); // not uploaded again
+  });
 });

@@ -1,4 +1,5 @@
 /** The mocks' in-memory state. Reset between Vitest tests; lives for the page in the browser. */
+import type { JudgeLabelPending, MessageOutPending } from "@/api/pending-contract";
 import type {
   ConversationDetail,
   DocumentSummary,
@@ -6,7 +7,6 @@ import type {
   GoldItem,
   IndexProfile,
   Job,
-  JudgeLabel,
   Trace,
 } from "@/api/types";
 import { seedDocuments, seedGold, seedJudgeLabels, seedProfiles, seedRuns, seedTraces } from "./data";
@@ -16,13 +16,14 @@ export interface MockDb {
   failedSignIns: number;
   documents: DocumentSummary[];
   jobs: Job[];
-  conversations: ConversationDetail[];
+  conversations: (Omit<ConversationDetail, "messages"> & { messages: MessageOutPending[] })[];
   gold: GoldItem[];
-  judgeLabels: JudgeLabel[];
+  judgeLabels: JudgeLabelPending[];
   runs: EvalRun[];
   profiles: IndexProfile[];
   traces: Trace[];
-  feedback: { id: number; message_id: number; rating: number; comment?: string | null; add_to_gold: boolean }[];
+  /** One row per message (a later POST for the same message updates it). */
+  feedback: { id: number; message_id: number; rating: number | null; comment: string | null; add_to_gold: boolean; gold_item_id: number | null }[];
   nextId: number;
   /** Uploaded files by sha: name, relative path, collection. */
   uploads: Map<string, { name: string; relativePath: string; collection: string; bytes: number }>;

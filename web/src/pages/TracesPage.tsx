@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { Activity, ExternalLink } from "lucide-react";
 import { Link, useNavigate } from "react-router";
 import { api } from "@/api/client";
+import type { TraceSummaryPending } from "@/api/pending-contract";
 import { Page, PageHeader } from "@/components/layout/PageHeader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -41,36 +42,42 @@ export function TracesPage() {
           </EmptyState>
         ) : (
           <div className="relative overflow-x-auto">
-            <table className="w-full min-w-[36rem] text-[13px]">
+            <table className="w-full text-[13px]">
               <thead className="bg-surface-2 text-left text-xs text-muted-foreground">
                 <tr>
-                  <th className="py-2 pl-5 font-medium">When</th>
-                  <th className="py-2 font-medium">Outcome</th>
-                  <th className="py-2 text-right font-medium">First token</th>
-                  <th className="py-2 text-right font-medium">Total</th>
-                  <th className="py-2 text-right font-medium">Cost</th>
-                  <th className="py-2 pr-5 text-right font-medium">
-                    <span className="sr-only">Open</span>
-                  </th>
+                  <th className="py-2 pr-3 pl-4 font-medium sm:pl-5">Question</th>
+                  <th className="hidden py-2 pr-3 font-medium sm:table-cell">Outcome</th>
+                  <th className="hidden py-2 pr-3 text-right font-medium md:table-cell">First token</th>
+                  <th className="py-2 pr-3 text-right font-medium">Total</th>
+                  <th className="py-2 pr-4 text-right font-medium sm:pr-5">Cost</th>
                 </tr>
               </thead>
               <tbody className="tabular divide-y divide-border">
-                {q.data.map((t) => (
-                  <tr key={t.id} className="cursor-pointer hover:bg-surface-2" onClick={() => navigate(`/traces/${t.id}`)}>
-                    <td className="py-2.5 pl-5" title={formatDateTime(t.created_at)}>
-                      {relativeTime(t.created_at)}
+                {(q.data as TraceSummaryPending[]).map((t) => (
+                  <tr key={t.id} className="cursor-pointer hover:bg-surface-2" onClick={() => navigate(`/traces/${t.id}`)} data-testid="trace-row">
+                    {/* max-w-0 + w-full lets the question truncate while the numbers keep their width. */}
+                    <td className="w-full max-w-0 py-2.5 pr-3 pl-4 sm:pl-5">
+                      <Link
+                        to={`/traces/${t.id}`}
+                        className="block truncate font-medium hover:underline"
+                        title={t.question ?? undefined}
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        {t.question || <span className="text-muted-foreground">Question {t.id.slice(0, 8)}</span>}
+                      </Link>
+                      <span className="mt-0.5 flex items-center gap-1.5 text-xs text-muted-foreground" title={formatDateTime(t.created_at)}>
+                        {relativeTime(t.created_at)}
+                        <Badge tone={outcomeTone(t.outcome)} className="sm:hidden">
+                          {outcomeLabel(t.outcome)}
+                        </Badge>
+                      </span>
                     </td>
-                    <td className="py-2.5">
+                    <td className="hidden py-2.5 pr-3 sm:table-cell">
                       <Badge tone={outcomeTone(t.outcome)}>{outcomeLabel(t.outcome)}</Badge>
                     </td>
-                    <td className="py-2.5 text-right">{formatMs(t.ttft_ms)}</td>
-                    <td className="py-2.5 text-right">{formatMs(t.total_ms)}</td>
-                    <td className="py-2.5 text-right">{formatUsd(t.cost_usd)}</td>
-                    <td className="py-2.5 pr-5 text-right">
-                      <Link to={`/traces/${t.id}`} className="font-medium text-accent-foreground hover:underline" onClick={(e) => e.stopPropagation()}>
-                        Inspect<span className="sr-only"> trace from {formatDateTime(t.created_at)}</span>
-                      </Link>
-                    </td>
+                    <td className="hidden py-2.5 pr-3 text-right whitespace-nowrap md:table-cell">{formatMs(t.ttft_ms)}</td>
+                    <td className="py-2.5 pr-3 text-right whitespace-nowrap">{formatMs(t.total_ms)}</td>
+                    <td className="py-2.5 pr-4 text-right whitespace-nowrap sm:pr-5">{formatUsd(t.cost_usd)}</td>
                   </tr>
                 ))}
               </tbody>

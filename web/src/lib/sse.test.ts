@@ -39,4 +39,22 @@ describe("parseSSE", () => {
     const msgs = await collect(["event: x\ndata: 1"]);
     expect(msgs).toEqual([{ event: "x", data: "1", id: undefined }]);
   });
+
+  it('handles a "\\r\\n" separator split across two reads (sse-starlette uses CRLF)', async () => {
+    // Split right between the \r and \n: read naively, that \n would look like a blank line
+    // and dispatch "token" with no data, then "a" as a nameless message.
+    const msgs = await collect(["event: token\r", '\ndata: {"text":"a"}\r', "\n\r", '\nevent: token\r\ndata: {"text":"b"}\r\n\r\n']);
+    expect(msgs).toEqual([
+      { event: "token", data: '{"text":"a"}', id: undefined },
+      { event: "token", data: '{"text":"b"}', id: undefined },
+    ]);
+  });
+
+  it("treats a lone CR as a line end once more data shows it isn't half of CRLF", async () => {
+    const msgs = await collect(["data: x\r", "\rdata: y\n\n"]);
+    expect(msgs).toEqual([
+      { event: "message", data: "x", id: undefined },
+      { event: "message", data: "y", id: undefined },
+    ]);
+  });
 });

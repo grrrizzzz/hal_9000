@@ -2,12 +2,13 @@
  * Synthetic seed data for the mocks (rule K2: no house data, ever).
  * Everything here describes an imaginary house at "12 Example Lane".
  */
+import type { EvalQuestionResult, JudgeLabelPending } from "@/api/pending-contract";
 import type {
+  Citation,
   DocumentSummary,
   EvalRun,
   GoldItem,
   IndexProfile,
-  JudgeLabel,
   MetricCI,
   StageTiming,
   Trace,
@@ -191,7 +192,7 @@ export function seedDocuments(): DocumentSummary[] {
         id: 5,
         file_sha: SHA.permit,
         page_start: 1,
-        page_end: 1,
+        page_end: 4,
         title: "scanned-permit.pdf",
         doc_type: "permit",
         vendor: null,
@@ -292,14 +293,34 @@ export function seedGold(): GoldItem[] {
   ];
 }
 
-export function seedJudgeLabels(): JudgeLabel[] {
-  return [
+function cite(marker: string, chunkId: number, documentId: number, page: number, snippet: string): Citation {
+  const doc = seedDocuments().find((d) => d.document.id === documentId)!.document;
+  return {
+    marker,
+    chunk_id: chunkId,
+    document_id: documentId,
+    file_sha: doc.file_sha,
+    page,
+    title: doc.title,
+    doc_type: doc.doc_type ?? "other",
+    doc_date: doc.doc_date ?? null,
+    vendor: doc.vendor ?? null,
+    snippet,
+  };
+}
+
+export function seedJudgeLabels(): JudgeLabelPending[] {
+  const furnace = cite("S1", 12, 1, 2, "The furnace is a forced-air gas unit located in the garage. It was installed in 2009 and is near the end of its expected life.");
+  const invoice = cite("S1", 14, 2, 3, "INVOICE 1001 - Brightline Pest Co.\nTermite damage repair at the rear deck ledger.\nTotal due: $1,234.00\nCompleted July 14, 2023.");
+  const gas = cite("S1", 13, 1, 2, "A flexible gas connector is routed through the cabinet wall. Recommend evaluation by a licensed HVAC contractor.");
+  const labels: JudgeLabelPending[] = [
     {
       id: 1,
       gold_item_id: 1,
       eval_run_id: "j-001",
       question: "How old is the furnace according to the inspection?",
       answer: "The June 2023 inspection says the furnace was installed in 2009 and is near the end of its expected life [S1].",
+      citations: [furnace],
       human: null,
       judge: { correctness: "correct", faithful: true, citations_correct: true, abstention_correct: null },
     },
@@ -309,6 +330,7 @@ export function seedJudgeLabels(): JudgeLabel[] {
       eval_run_id: "j-001",
       question: "How much did the termite repair cost?",
       answer: "Invoice 1001 from Brightline Pest Co. totals $1,234.00 [S1].",
+      citations: [invoice],
       human: null,
       judge: { correctness: "correct", faithful: true, citations_correct: true, abstention_correct: null },
     },
@@ -318,6 +340,7 @@ export function seedJudgeLabels(): JudgeLabel[] {
       eval_run_id: "j-001",
       question: "Is anything wrong with the gas line near the kitchen?",
       answer: "The inspection found no issues with the gas line [S1].",
+      citations: [gas],
       human: { correctness: "wrong", faithful: false, citations_correct: false, abstention_correct: null },
       judge: { correctness: "wrong", faithful: false, citations_correct: true, abstention_correct: null },
     },
@@ -327,10 +350,35 @@ export function seedJudgeLabels(): JudgeLabel[] {
       eval_run_id: "j-001",
       question: "Does the house have a swimming pool heater?",
       answer: "I couldn't find that in the house documents.",
+      citations: [],
       human: null,
       judge: { correctness: "correct", faithful: true, citations_correct: true, abstention_correct: true },
     },
   ];
+  return labels;
+}
+
+/** Synthetic per-question results for a run (pending contract item 4). */
+export function seedRunResults(runId: string, n: number, recall2k: number): EvalQuestionResult[] {
+  let seed = [...runId].reduce((a, c) => a * 31 + c.charCodeAt(0), 7) >>> 0;
+  const r = () => ((seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+  const cats: EvalQuestionResult["category"][] = ["factoid", "money", "date", "list", "cross_document", "unanswerable"];
+  const subjects = ["furnace", "roof", "water heater", "termite repair", "gas connector", "deck ledger", "warranty", "inspection"];
+  return Array.from({ length: n }, (_, i) => {
+    const category = cats[i % cats.length];
+    const unans = category === "unanswerable";
+    const v = unans ? 0 : Math.max(0, Math.min(1, recall2k + (r() - 0.5) * 0.6));
+    return {
+      gold_item_id: 100 + i,
+      question: `Synthetic question ${i + 1} about the ${subjects[i % subjects.length]}?`,
+      category,
+      recall: unans ? ({} as Record<string, number>) : { "1000": +Math.max(0, v - 0.1).toFixed(3), "2000": +v.toFixed(3), "4000": +Math.min(1, v + 0.06).toFixed(3) },
+      full_support: !unans && v > 0.8,
+      first_hit_rank: unans || v < 0.2 ? null : 1 + Math.floor(r() * 5),
+      abstain_score: +(0.3 + r() * 0.4).toFixed(3),
+      abstained: unans ? r() > 0.2 : r() > 0.95,
+    };
+  });
 }
 
 export function seedProfiles(): IndexProfile[] {

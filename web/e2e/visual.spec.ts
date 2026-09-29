@@ -72,6 +72,17 @@ for (const width of [390, 1440]) {
           await page.waitForTimeout(400); // charts and fonts settle
           const [sw, cw] = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
           expect(sw, `${name} scrolls horizontally at ${width}px`).toBeLessThanOrEqual(cw);
+          // Chart tick labels must sit inside their chart (e.g. "Cross-doc" at 390 px).
+          const clipped = await page.evaluate(() =>
+            [...document.querySelectorAll<SVGTextElement>("text.recharts-cartesian-axis-tick-value")]
+              .filter((t) => {
+                const svg = t.closest("svg")!.getBoundingClientRect();
+                const r = t.getBoundingClientRect();
+                return r.width > 0 && (r.left < svg.left - 1 || r.right > svg.right + 1);
+              })
+              .map((t) => t.textContent),
+          );
+          expect(clipped, `${name}: clipped chart labels at ${width}px`).toEqual([]);
           await page.screenshot({ path: `e2e-screenshots/${name}-${width}-${scheme}.png`, fullPage: true });
           if (scheme === "light") expect(await unreachable(page), `${name} at ${width}px`).toEqual([]);
         }

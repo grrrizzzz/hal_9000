@@ -1,6 +1,7 @@
 import { AlertCircle, CheckCircle2, Copy, Loader2, RotateCw } from "lucide-react";
 import { useMemo, useRef, useState } from "react";
 import { Link } from "react-router";
+import { pendingApi } from "@/api/pending-contract";
 import type { Job, UploadResult } from "@/api/types";
 import { Page, PageHeader } from "@/components/layout/PageHeader";
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +13,7 @@ import { PreUploadSummary } from "@/components/upload/PreUploadSummary";
 import { STAGE_LABEL } from "@/lib/format";
 import { useJobs } from "@/lib/jobs";
 import { summarize } from "@/lib/upload/classify";
-import { runPool, UPLOAD_CONCURRENCY, uploadOne } from "@/lib/upload/queue";
+import { uploadOne, uploadQueue } from "@/lib/upload/queue";
 import type { PickedFile } from "@/lib/upload/walker";
 import { cn } from "@/lib/utils";
 
@@ -24,6 +25,8 @@ interface Row {
   uploaded: number;
   result?: UploadResult;
   error?: string;
+  /** The job as returned by a retry, until the job stream reports on it. */
+  retried?: Job;
 }
 
 type Status = { label: string; tone: "neutral" | "accent" | "success" | "warning" | "danger"; progress: number; done: boolean; failed: boolean };
@@ -46,16 +49,15 @@ function statusOf(row: Row, job: Job | undefined): Status {
 export function UploadPage() {
   const [staged, setStaged] = useState<PickedFile[]>([]);
   const [rows, setRows] = useState<Row[]>([]);
-  const [running, setRunning] = useState(false);
   const { jobs } = useJobs();
   const seq = useRef(0);
   const summary = useMemo(() => summarize(staged), [staged]);
 
   const patch = (id: number, p: Partial<Row>) => setRows((rs) => rs.map((r) => (r.id === id ? { ...r, ...p } : r)));
 
-  const send = async (batch: Row[]) => {
-    setRunning(true);
-    await runPool(batch, UPLOAD_CONCURRENCY, async (row) => {
+  // Every upload, from any batch or retry, goes through the one shared queue (three at a time).
+  const upload = (row: Row) =>
+    uploadQueue.run(async () => {
       patch(row.id, { phase: "uploading", uploaded: 0, error: undefined });
       try {
         const result = await uploadOne(row.file, row.relativePath, (f) => patch(row.id, { uploaded: f }));
@@ -64,17 +66,39 @@ export function UploadPage() {
         patch(row.id, { phase: "error", error: (e as Error).message });
       }
     });
-    setRunning(false);
-  };
 
   const start = () => {
     const batch: Row[] = summary.added.map((f) => ({ id: ++seq.current, file: f.file, relativePath: f.relativePath, phase: "waiting", uploaded: 0 }));
     setRows((rs) => [...batch, ...rs]);
     setStaged([]);
-    void send(batch);
+    batch.forEach((row) => void upload(row));
   };
 
-  const view = rows.map((r) => ({ row: r, s: statusOf(r, r.result?.job_id != null ? jobs.get(r.result.job_id) : undefined) }));
+  const retry = async (row: Row) => {
+    const jobId = row.result?.job_id;
+    if (row.phase === "sent" && jobId !== null && jobId !== undefined) {
+      // The file is stored; only its processing failed. Re-run the job.
+      try {
+        const job = await pendingApi.retryJob(jobId);
+        patch(row.id, { result: { ...row.result!, job_id: job.id ?? jobId }, retried: job });
+      } catch (e) {
+        patch(row.id, { phase: "error", error: (e as Error).message });
+      }
+    } else {
+      patch(row.id, { phase: "waiting", uploaded: 0, error: undefined, result: undefined });
+      void upload(row);
+    }
+  };
+
+  const jobOf = (r: Row): Job | undefined => {
+    const id = r.result?.job_id;
+    const live = id === null || id === undefined ? undefined : jobs.get(id);
+    if (!r.retried || !live) return live ?? r.retried;
+    // After a retry, the newer of the retry response and the stream's latest event wins.
+    return Date.parse(live.updated_at ?? "") >= Date.parse(r.retried.updated_at ?? "") ? live : r.retried;
+  };
+  const view = rows.map((r) => ({ row: r, s: statusOf(r, jobOf(r)) }));
+  const running = view.some((v) => v.row.phase === "uploading" || v.row.phase === "waiting");
   const indexed = view.filter((v) => v.s.label === "Indexed").length;
   const failed = view.filter((v) => v.s.failed).length;
   const inFlight = view.filter((v) => !v.s.done).length;
@@ -112,7 +136,7 @@ export function UploadPage() {
                       <span className="truncate">{s.label}</span>
                     </Badge>
                     {s.failed ? (
-                      <Button size="sm" variant="ghost" onClick={() => void send([row])} aria-label={`Retry ${row.relativePath}`}>
+                      <Button size="sm" variant="ghost" onClick={() => void retry(row)} aria-label={`Retry ${row.relativePath}`}>
                         <RotateCw /> Retry
                       </Button>
                     ) : null}

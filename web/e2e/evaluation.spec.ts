@@ -30,6 +30,11 @@ test("label an answer on the Judge calibration tab", async ({ page }) => {
   await expect(card).toBeVisible();
   const before = await page.getByTestId("judge-progress").textContent();
 
+  // The answer's [S1] is a citation chip that opens the cited page.
+  await card.getByRole("button", { name: /^Source 1:/ }).first().click();
+  await expect(page.getByTestId("doc-viewer").locator("mark[data-hl]").first()).toBeVisible({ timeout: 20_000 });
+  await page.keyboard.press("Escape");
+
   await card.getByRole("radio", { name: "Correct", exact: true }).click();
   await card.getByRole("radiogroup", { name: /faithful/ }).getByRole("radio", { name: "Yes" }).click();
   await card.getByRole("radiogroup", { name: /citations correct/ }).getByRole("radio", { name: "Yes" }).click();
@@ -49,6 +54,14 @@ test("sweep charts and the profile switch", async ({ page }) => {
   // Every chart has a table view.
   await page.getByTestId("chart-pareto").getByRole("radio", { name: "Table" }).click();
   await expect(page.getByTestId("chart-pareto").getByRole("table")).toBeVisible();
+
+  // A run opens with its per-question drill-down, paged.
+  await page.getByRole("button", { name: /Structure-aware · 512/ }).first().click();
+  const results = page.getByTestId("run-results");
+  await expect(results.getByText(/^1–20 of \d+$/)).toBeVisible();
+  await results.getByRole("button", { name: "Next questions" }).click();
+  await expect(results.getByText(/^21–40 of \d+$/)).toBeVisible();
+  await page.keyboard.press("Escape");
 
   await page.getByRole("tab", { name: "Index profile" }).click();
   await page.getByRole("button", { name: "Switch to this profile" }).first().click();

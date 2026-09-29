@@ -7,7 +7,11 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Gavel, XCircle } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { api } from "@/api/client";
-import type { JudgeLabel, RubricLabels } from "@/api/types";
+import type { JudgeLabelPending } from "@/api/pending-contract";
+import type { Citation, JudgeLabel, RubricLabels } from "@/api/types";
+import { CitationText } from "@/components/chat/CitationText";
+import { SourceList } from "@/components/chat/SourceList";
+import { ViewerDialog } from "@/components/viewer/ViewerDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
@@ -45,9 +49,10 @@ export function agreement(labels: JudgeLabel[]): { agree: number; total: number 
 
 export function JudgeCalibration() {
   const [run, setRun] = useState("");
+  const [viewer, setViewer] = useState<Citation | null>(null);
   const q = useQuery({ queryKey: ["judge-labels", run], queryFn: () => api.get("/api/eval/judge-labels", { query: run ? { run } : {} }) });
   const all = useQuery({ queryKey: ["judge-labels", ""], queryFn: () => api.get("/api/eval/judge-labels"), enabled: !!run });
-  const labels = useMemo(() => q.data ?? [], [q.data]);
+  const labels = useMemo(() => (q.data ?? []) as JudgeLabelPending[], [q.data]);
   const runs = [...new Set((run ? all.data : q.data)?.map((l) => l.eval_run_id).filter(Boolean) as string[])];
   const done = labels.filter((l) => l.human).length;
   const { agree, total } = agreement(labels);
@@ -105,11 +110,17 @@ export function JudgeCalibration() {
         <ol className="space-y-3">
           {labels.map((l, i) => (
             <li key={l.id}>
-              <LabelCard label={l} n={i + 1} />
+              <LabelCard label={l} n={i + 1} onOpen={setViewer} />
             </li>
           ))}
         </ol>
       )}
+      <ViewerDialog
+        target={viewer ? { fileSha: viewer.file_sha, page: viewer.page, chunkId: viewer.chunk_id, quotes: viewer.snippet ? [viewer.snippet] : [] } : null}
+        title={viewer ? `${viewer.marker} · ${viewer.title}` : ""}
+        description={viewer ? `Page ${viewer.page}` : ""}
+        onClose={() => setViewer(null)}
+      />
     </div>
   );
 }
@@ -119,7 +130,7 @@ const yesNo = [
   { value: "no", label: "No", tone: "danger" as const },
 ];
 
-function LabelCard({ label, n }: { label: JudgeLabel; n: number }) {
+function LabelCard({ label, n, onOpen }: { label: JudgeLabelPending; n: number; onOpen: (c: Citation) => void }) {
   const qc = useQueryClient();
   const [draft, setDraft] = useState<Partial<RubricLabels>>(label.human ?? {});
   const [editing, setEditing] = useState(!label.human);
@@ -137,11 +148,14 @@ function LabelCard({ label, n }: { label: JudgeLabel; n: number }) {
 
   return (
     <Card data-testid="judge-card" data-labelled={label.human ? "true" : "false"}>
-      <div className="grid gap-5 p-5 lg:grid-cols-[1fr_20rem]">
+      <div className="space-y-4 p-5">
         <div className="min-w-0 space-y-3">
           <p className="text-xs text-muted-foreground">Answer {n}</p>
           <h3 className="font-semibold">{label.question}</h3>
-          <div className="rounded-lg border border-border bg-surface-2 px-4 py-3 text-[15px] leading-relaxed whitespace-pre-wrap">{label.answer}</div>
+          <div className="rounded-lg border border-border bg-surface-2 px-4 py-3">
+            <CitationText text={label.answer} citations={label.citations ?? []} onOpen={onOpen} />
+            <SourceList sources={label.citations ?? []} onOpen={onOpen} />
+          </div>
           <details className="text-sm">
             <summary className="cursor-pointer text-[13px] font-medium text-muted-foreground hover:text-foreground">Reference answer and evidence</summary>
             {gold.isLoading ? (
@@ -161,41 +175,43 @@ function LabelCard({ label, n }: { label: JudgeLabel; n: number }) {
           </details>
         </div>
 
-        <div className="space-y-3 lg:border-l lg:border-border lg:pl-5">
+        <div className="border-t border-border pt-4">
           {editing ? (
             <form
-              className="space-y-3"
+              className="space-y-4"
               onSubmit={(e) => {
                 e.preventDefault();
                 if (complete) save.mutate({ abstention_correct: null, ...(draft as RubricLabels) });
               }}
             >
-              <Rubric label="Correct?">
-                <Segmented
-                  label={`Answer ${n}: correctness`}
-                  value={draft.correctness}
-                  onChange={(v) => setDraft((d) => ({ ...d, correctness: v }))}
-                  options={[
-                    { value: "correct", label: "Correct", tone: "success" },
-                    { value: "partial", label: "Partial", tone: "warning" },
-                    { value: "wrong", label: "Wrong", tone: "danger" },
-                  ]}
-                />
-              </Rubric>
-              <Rubric label="Faithful to the sources?">
-                <Segmented label={`Answer ${n}: faithful`} value={bool(draft.faithful)} onChange={(v) => setDraft((d) => ({ ...d, faithful: v === "yes" }))} options={yesNo} />
-              </Rubric>
-              <Rubric label="Citations correct?">
-                <Segmented label={`Answer ${n}: citations correct`} value={bool(draft.citations_correct)} onChange={(v) => setDraft((d) => ({ ...d, citations_correct: v === "yes" }))} options={yesNo} />
-              </Rubric>
-              <Rubric label="Abstention correct?">
-                <Segmented
-                  label={`Answer ${n}: abstention correct`}
-                  value={draft.abstention_correct === null || draft.abstention_correct === undefined ? "na" : bool(draft.abstention_correct)}
-                  onChange={(v) => setDraft((d) => ({ ...d, abstention_correct: v === "na" ? null : v === "yes" }))}
-                  options={[...yesNo, { value: "na", label: "N/A" }]}
-                />
-              </Rubric>
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+                <Rubric label="Correct?">
+                  <Segmented
+                    label={`Answer ${n}: correctness`}
+                    value={draft.correctness}
+                    onChange={(v) => setDraft((d) => ({ ...d, correctness: v }))}
+                    options={[
+                      { value: "correct", label: "Correct", tone: "success" },
+                      { value: "partial", label: "Partial", tone: "warning" },
+                      { value: "wrong", label: "Wrong", tone: "danger" },
+                    ]}
+                  />
+                </Rubric>
+                <Rubric label="Faithful to the sources?">
+                  <Segmented label={`Answer ${n}: faithful`} value={bool(draft.faithful)} onChange={(v) => setDraft((d) => ({ ...d, faithful: v === "yes" }))} options={yesNo} />
+                </Rubric>
+                <Rubric label="Citations correct?">
+                  <Segmented label={`Answer ${n}: citations correct`} value={bool(draft.citations_correct)} onChange={(v) => setDraft((d) => ({ ...d, citations_correct: v === "yes" }))} options={yesNo} />
+                </Rubric>
+                <Rubric label="Abstention correct?">
+                  <Segmented
+                    label={`Answer ${n}: abstention correct`}
+                    value={draft.abstention_correct === null || draft.abstention_correct === undefined ? "na" : bool(draft.abstention_correct)}
+                    onChange={(v) => setDraft((d) => ({ ...d, abstention_correct: v === "na" ? null : v === "yes" }))}
+                    options={[...yesNo, { value: "na", label: "N/A" }]}
+                  />
+                </Rubric>
+              </div>
               {save.isError ? (
                 <p role="alert" className="text-[13px] text-danger">
                   {(save.error as Error).message}
@@ -235,7 +251,7 @@ const show = (v: unknown) => (v === true ? "Yes" : v === false ? "No" : v === nu
 
 function Comparison({ human, judge, onEdit }: { human: RubricLabels; judge: RubricLabels | null | undefined; onEdit: () => void }) {
   return (
-    <div data-testid="judge-comparison">
+    <div data-testid="judge-comparison" className="max-w-xl">
       <table className="w-full text-[13px]">
         <thead>
           <tr className="text-left text-xs text-muted-foreground">

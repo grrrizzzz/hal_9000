@@ -109,4 +109,7 @@ test("the answer's i button opens the Query Inspector", async ({ page }) => {
   await expect(page).toHaveURL(/\/traces\/[0-9a-f]+$/);
   await expect(page.getByRole("heading", { name: QUESTIONS.plain })).toBeVisible();
   await expect(page.getByTestId("waterfall").getByText("generate")).toBeVisible();
+  // And the Traces list shows the question.
+  await page.getByRole("link", { name: "Traces" }).first().click();
+  await expect(page.getByRole("link", { name: QUESTIONS.plain }).first()).toBeVisible();
 });

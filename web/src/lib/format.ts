@@ -52,8 +52,11 @@ export function formatMs(ms: number | null | undefined): string {
 export function formatUsd(v: number | null | undefined): string {
   if (v === null || v === undefined) return "—";
   if (v === 0) return "$0";
-  if (v < 0.00005) return "<$0.0001";
-  if (v < 0.01) return `$${v.toFixed(v < 0.001 ? 5 : 4)}`;
+  if (v < 0.01) {
+    // Two significant figures, however small: $0.00012, $0.000033.
+    const decimals = Math.min(12, Math.max(2, 1 - Math.floor(Math.log10(v))));
+    return `$${Number(v.toPrecision(2)).toFixed(decimals).replace(/(\.\d*?[1-9])0+$/, "$1")}`;
+  }
   return `$${v.toFixed(2)}`;
 }
 
@@ -96,3 +99,9 @@ export const STAGE_LABEL: Record<string, string> = {
   index: "Indexing",
   regression: "Regression check",
 };
+
+/** "1 chunk", "2 chunks". */
+export const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** A sub-document's file page range: "p. 3" or "pp. 3–5". */
+export const pageRange = (start: number, end: number) => (start === end ? `p. ${start}` : `pp. ${start}–${end}`);

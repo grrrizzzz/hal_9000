@@ -11,7 +11,7 @@ import { Card } from "@/components/ui/card";
 import { ErrorState, Skeleton } from "@/components/ui/states";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { DocumentViewer, usePageView } from "@/components/viewer/DocumentViewer";
-import { docTypeLabel, formatBytes, formatDocDate } from "@/lib/format";
+import { docTypeLabel, formatBytes, formatDocDate, pageRange, plural } from "@/lib/format";
 
 export function DocumentPage() {
   const id = Number(useParams().id);
@@ -55,7 +55,7 @@ export function DocumentPage() {
         {[
           ["File", d.file.original_name],
           ["Collection", d.collection || "Unfiled"],
-          ["Pages", `${m.page_start}–${m.page_end} of the file`],
+          ["Pages", `${plural(d.pages, "page")} (file ${pageRange(m.page_start, m.page_end)})`],
           ["Size", formatBytes(d.file.bytes)],
           ["Chunks", String(d.chunks)],
           ["Without text layer", String(d.pages_without_text)],
@@ -132,7 +132,7 @@ function ExtractedText({ sha, page, first, last, onPage }: { sha: string; page: 
         </Button>
         {page < first || page > last ? <Badge tone="neutral">Outside this document</Badge> : null}
         {v && !v.has_text_layer ? <Badge tone="warning">No text layer</Badge> : null}
-        <span className="ml-auto text-xs text-muted-foreground">{v?.spans?.length ?? 0} chunks on this page</span>
+        <span className="ml-auto text-xs text-muted-foreground">{plural(v?.spans?.length ?? 0, "chunk")} on this page</span>
       </div>
       {view.isLoading ? (
         <Skeleton className="m-4 h-64" />

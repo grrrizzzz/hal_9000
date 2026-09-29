@@ -38,7 +38,7 @@ export function DialogContent({
           <div className="min-w-0">
             <D.Title className="truncate text-[15px] font-semibold tracking-tight">{title}</D.Title>
             {description ? (
-              <D.Description className="mt-0.5 truncate text-[13px] text-muted-foreground">{description}</D.Description>
+              <D.Description className="mt-0.5 line-clamp-2 text-[13px] text-muted-foreground">{description}</D.Description>
             ) : (
               <D.Description className="sr-only">Dialog</D.Description>
             )}

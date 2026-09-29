@@ -4,7 +4,8 @@ import { Dialog as D } from "radix-ui";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useMatch, useNavigate } from "react-router";
 import { api } from "@/api/client";
-import type { Citation, MessageOut, SearchFilters } from "@/api/types";
+import type { MessageOutPending } from "@/api/pending-contract";
+import type { Citation, SearchFilters } from "@/api/types";
 import { Composer } from "@/components/chat/Composer";
 import { ConversationList } from "@/components/chat/ConversationList";
 import { Filters } from "@/components/chat/Filters";
@@ -13,7 +14,7 @@ import { Logo } from "@/components/layout/Logo";
 import { Button } from "@/components/ui/button";
 import { ErrorState, Skeleton } from "@/components/ui/states";
 import { ViewerDialog } from "@/components/viewer/ViewerDialog";
-import { initialStreamState, streamChat, streamReducer, type StreamState } from "@/lib/chat-stream";
+import { initialStreamState, streamChat, streamReducer, type StreamAction, type StreamState } from "@/lib/chat-stream";
 import { docTypeLabel, formatDocDate } from "@/lib/format";
 
 const EXAMPLES = [
@@ -25,6 +26,8 @@ const EXAMPLES = [
 
 interface LocalTurn {
   key: number;
+  /** The conversation view the turn belongs to: "c:<id>", or "new:<n>" until the server assigns an id. */
+  view: string;
   question: string;
   state: StreamState;
 }
@@ -39,9 +42,24 @@ export function ChatPage() {
   const [viewer, setViewer] = useState<Citation | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [turns, setTurns] = useState<LocalTurn[]>([]);
-  const abort = useRef<AbortController | null>(null);
+  const [fresh, setFresh] = useState(0);
+  const controllers = useRef(new Map<number, AbortController>());
   const bottom = useRef<HTMLDivElement>(null);
-  const convoRef = useRef<number | null>(conversationId);
+
+  // "New chat" starts a new view; a stream still running elsewhere keeps going in its own conversation.
+  const freshState = (location.state as { fresh?: number } | null)?.fresh;
+  useEffect(() => {
+    if (freshState) setFresh(freshState);
+  }, [freshState]);
+  const view = conversationId !== null ? `c:${conversationId}` : `new:${fresh}`;
+  const viewRef = useRef(view);
+  useEffect(() => {
+    viewRef.current = view;
+  }, [view]);
+  useEffect(() => {
+    const all = controllers.current;
+    return () => all.forEach((c) => c.abort());
+  }, []);
 
   const convo = useQuery({
     queryKey: ["conversation", conversationId],
@@ -49,77 +67,63 @@ export function ChatPage() {
     enabled: conversationId !== null,
   });
 
-  // A different conversation (or "New chat") starts from a clean slate.
-  useEffect(() => {
-    if (convoRef.current !== conversationId) {
-      convoRef.current = conversationId;
-      const streaming = turns.some((t) => t.state.phase === "streaming");
-      if (!streaming) setTurns([]);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversationId]);
-  useEffect(() => {
-    if (location.state && (location.state as { fresh?: number }).fresh) {
-      abort.current?.abort();
-      setTurns([]);
-    }
-  }, [location.state]);
-  useEffect(() => () => abort.current?.abort(), []);
-
-  const busy = turns.some((t) => t.state.phase === "streaming");
-  const serverMessages: MessageOut[] = conversationId !== null ? (convo.data?.messages ?? []) : [];
+  const visibleTurns = turns.filter((t) => t.view === view);
+  const busy = visibleTurns.some((t) => t.state.phase === "streaming");
+  const serverMessages = (conversationId !== null ? (convo.data?.messages ?? []) : []) as MessageOutPending[];
   // Turns streamed on this page stay mounted (they carry the grounding result and
   // feedback state); the same messages coming back from the server are skipped.
   const localIds = new Set(turns.map((t) => t.state.answer?.message_id).filter((id): id is number => typeof id === "number"));
   const shownMessages = serverMessages.filter(
     (m, i) => !localIds.has(m.id) && !(m.role === "user" && serverMessages[i + 1] && localIds.has(serverMessages[i + 1].id)),
   );
-  const visibleTurns = turns;
 
-  const lastLength = turns.at(-1)?.state.text.length ?? 0;
+  const lastLength = visibleTurns.at(-1)?.state.text.length ?? 0;
   useEffect(() => {
     bottom.current?.scrollIntoView({ block: "end" });
-  }, [visibleTurns.length, lastLength, serverMessages.length]);
+  }, [visibleTurns.length, lastLength, shownMessages.length]);
 
   const ask = useCallback(
     async (question: string) => {
-      const key = Date.now();
+      const key = Date.now() + Math.random();
+      const startView = viewRef.current;
       const ctrl = new AbortController();
-      abort.current = ctrl;
-      const update = (fn: (s: StreamState) => StreamState) => setTurns((ts) => ts.map((t) => (t.key === key ? { ...t, state: fn(t.state) } : t)));
-      setTurns((ts) => [...ts, { key, question, state: streamReducer(initialStreamState, { type: "start" }) }]);
-      let newConversation: number | null = null;
+      controllers.current.set(key, ctrl);
+      const update = (fn: (t: LocalTurn) => LocalTurn) => setTurns((ts) => ts.map((t) => (t.key === key ? fn(t) : t)));
+      const dispatch = (a: StreamAction) => update((t) => ({ ...t, state: streamReducer(t.state, a) }));
+      setTurns((ts) => [...ts, { key, view: startView, question, state: streamReducer(initialStreamState, { type: "start" }) }]);
+      let assigned: number | null = null;
       try {
         const f = Object.fromEntries(Object.entries(filters).filter(([, v]) => v)) as SearchFilters;
         await streamChat(
-          { conversation_id: convoRef.current, message: question, filters: Object.keys(f).length ? f : null },
+          { conversation_id: conversationId, message: question, filters: Object.keys(f).length ? f : null },
           (event) => {
-            update((s) => streamReducer(s, { type: "event", event }));
-            if (event.event === "done" && event.answer.conversation_id && event.answer.conversation_id !== convoRef.current) {
-              newConversation = event.answer.conversation_id;
-            }
+            dispatch({ type: "event", event });
+            if (event.event === "done" && event.answer.conversation_id) assigned = event.answer.conversation_id;
           },
           ctrl.signal,
         );
-        update((s) => (s.phase === "streaming" ? streamReducer(s, { type: "error", message: "The answer stream ended early. Try asking again." }) : s));
+        update((t) => (t.state.phase === "streaming" ? { ...t, state: streamReducer(t.state, { type: "error", message: "The answer stream ended early. Try asking again." }) } : t));
       } catch (e) {
-        if ((e as Error).name === "AbortError") update((s) => streamReducer(s, { type: "error", message: "Stopped." }));
-        else update((s) => streamReducer(s, { type: "error", message: (e as Error).message }));
+        dispatch({ type: "error", message: (e as Error).name === "AbortError" ? "Stopped." : (e as Error).message });
       } finally {
+        controllers.current.delete(key);
         void qc.invalidateQueries({ queryKey: ["conversations"] });
         void qc.invalidateQueries({ queryKey: ["traces"] });
-        if (newConversation !== null) {
-          convoRef.current = newConversation;
-          navigate(`/c/${newConversation}`, { replace: conversationId === null });
-        } else if (convoRef.current !== null) {
-          void qc.invalidateQueries({ queryKey: ["conversation", convoRef.current] });
+        if (assigned !== null) {
+          void qc.invalidateQueries({ queryKey: ["conversation", assigned] });
+          if (startView.startsWith("new:")) {
+            // The turn now belongs to its new conversation. Follow it only if you're still looking at it.
+            update((t) => ({ ...t, view: `c:${assigned}` }));
+            if (viewRef.current === startView) navigate(`/c/${assigned}`, { replace: true });
+          }
         }
       }
     },
     [filters, qc, navigate, conversationId],
   );
 
-  const empty = !serverMessages.length && !visibleTurns.length && !(conversationId !== null && convo.isLoading);
+  const stop = () => visibleTurns.forEach((t) => controllers.current.get(t.key)?.abort());
+  const empty = !shownMessages.length && !visibleTurns.length && !(conversationId !== null && convo.isLoading);
 
   return (
     <div className="flex min-h-0 flex-1">
@@ -150,12 +154,12 @@ export function ChatPage() {
 
         <div className="min-h-0 flex-1 px-4 sm:px-6">
           <div className="mx-auto w-full max-w-3xl py-6">
-            {conversationId !== null && convo.isLoading && !turns.length ? (
+            {conversationId !== null && convo.isLoading && !visibleTurns.length ? (
               <div className="space-y-6">
                 <Skeleton className="ml-auto h-10 w-2/3" />
                 <Skeleton className="h-28" />
               </div>
-            ) : conversationId !== null && convo.isError && !turns.length ? (
+            ) : conversationId !== null && convo.isError && !visibleTurns.length ? (
               <ErrorState error={convo.error} onRetry={() => convo.refetch()} />
             ) : empty ? (
               <div className="flex flex-col items-center pt-[8vh] text-center">
@@ -193,6 +197,8 @@ export function ChatPage() {
                         messageId: m.id,
                         traceId: m.trace_id,
                         retrievalOnly: m.outcome === "retrieval_only",
+                        grounding: m.grounding ?? null,
+                        issues: m.issues ?? [],
                       }}
                     />
                   ),
@@ -211,7 +217,7 @@ export function ChatPage() {
 
         <div className="sticky bottom-0 bg-gradient-to-t from-background via-background to-background/0 px-4 pt-4 pb-4 sm:px-6">
           <div className="mx-auto w-full max-w-3xl">
-            <Composer onSend={(t) => void ask(t)} onStop={() => abort.current?.abort()} busy={busy}>
+            <Composer onSend={(t) => void ask(t)} onStop={stop} busy={busy}>
               <Filters value={filters} onChange={setFilters} />
             </Composer>
             <p className="mt-2 text-center text-[11px] text-muted-foreground">Check important figures against the source pages.</p>
@@ -222,7 +228,7 @@ export function ChatPage() {
       <ViewerDialog
         target={viewer ? { fileSha: viewer.file_sha, page: viewer.page, chunkId: viewer.chunk_id, quotes: viewer.snippet ? [viewer.snippet] : [] } : null}
         title={viewer ? `${viewer.marker} · ${viewer.title}` : ""}
-        description={viewer ? [docTypeLabel(viewer.doc_type), viewer.vendor, formatDocDate(viewer.doc_date), `page ${viewer.page}`].filter(Boolean).join(" · ") : ""}
+        description={viewer ? [`Page ${viewer.page}`, docTypeLabel(viewer.doc_type), viewer.vendor, formatDocDate(viewer.doc_date)].filter(Boolean).join(" · ") : ""}
         onClose={() => setViewer(null)}
       />
     </div>

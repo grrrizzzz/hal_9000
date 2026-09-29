@@ -41,12 +41,14 @@ export function JobsProvider({ children }: { children: ReactNode }) {
       });
 
     const run = async () => {
-      try {
-        upsert(await api.get("/api/jobs", { signal: ctrl.signal }));
-      } catch {
-        /* the stream below retries */
-      }
       while (!ctrl.signal.aborted) {
+        // (Re)load the full list on every connect: changes made while the stream
+        // was down are not replayed by it.
+        try {
+          upsert(await api.get("/api/jobs", { signal: ctrl.signal }));
+        } catch (e) {
+          if ((e as Error).name === "AbortError") return;
+        }
         try {
           const res = await fetch("/api/jobs/stream", { credentials: "same-origin", headers: { Accept: "text/event-stream" }, signal: ctrl.signal });
           if (res.status === 401) {

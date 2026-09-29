@@ -129,6 +129,32 @@ export async function request<P extends keyof paths, M extends Method>(
   return (text ? JSON.parse(text) : undefined) as ResponseOf<P, M>;
 }
 
+/**
+ * An untyped request for routes that aren't in openapi.json yet (see
+ * pending-contract.ts). Same error and 401 handling as `request`.
+ */
+export async function requestJson<T>(method: string, url: string, body?: unknown, signal?: AbortSignal): Promise<T> {
+  let res: Response;
+  try {
+    res = await fetch(url, {
+      method,
+      credentials: "same-origin",
+      headers: body !== undefined ? { "Content-Type": "application/json", Accept: "application/json" } : { Accept: "application/json" },
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+      signal,
+    });
+  } catch (e) {
+    if ((e as Error).name === "AbortError") throw e;
+    throw new ApiError(0, "Can't reach the house server. Check that it's running and you're on the home network.");
+  }
+  if (!res.ok) {
+    if (res.status === 401) notifyUnauthorized();
+    throw await readError(res);
+  }
+  const text = res.status === 204 ? "" : await res.text();
+  return (text ? JSON.parse(text) : undefined) as T;
+}
+
 export const api = {
   get: <P extends keyof paths>(path: P, opts?: RequestOptions<P, "get">) => request("get", path, opts),
   post: <P extends keyof paths>(path: P, opts?: RequestOptions<P, "post">) => request("post", path, opts),

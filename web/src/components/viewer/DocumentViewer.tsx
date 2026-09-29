@@ -68,6 +68,7 @@ export function DocumentViewer({
   useEffect(() => {
     setPage(target.page);
     setHighlights(null);
+    setZoom(1); // every document opens fitted to the width
   }, [target.fileSha, target.page, target.chunkId]);
 
   const view = usePageView(target.fileSha, page);
@@ -126,7 +127,15 @@ export function DocumentViewer({
               <Button size="icon-sm" variant="ghost" aria-label="Zoom out" disabled={zoom <= 1} onClick={() => setZoom((z) => Math.max(1, z - 0.5))}>
                 <ZoomOut />
               </Button>
-              <span className="tabular w-10 text-center text-xs text-muted-foreground">{Math.round(zoom * 100)}%</span>
+              <button
+                type="button"
+                className="tabular min-w-16 rounded px-1 text-center text-xs text-muted-foreground hover:text-foreground disabled:hover:text-muted-foreground"
+                onClick={() => setZoom(1)}
+                disabled={zoom === 1}
+                aria-label="Fit page to width"
+              >
+                {zoom === 1 ? "Fit width" : `${Math.round(zoom * 100)}%`}
+              </button>
               <Button size="icon-sm" variant="ghost" aria-label="Zoom in" disabled={zoom >= 3} onClick={() => setZoom((z) => Math.min(3, z + 0.5))}>
                 <ZoomIn />
               </Button>
@@ -146,7 +155,7 @@ export function DocumentViewer({
           ) : null}
         </div>
       </div>
-      <div ref={area} className="min-h-0 flex-1 overflow-auto bg-surface-2 p-3 sm:p-5">
+      <div ref={area} className="min-h-0 flex-1 overflow-auto bg-surface-2 p-1 sm:p-5">
         {file.loading ? (
           <Skeleton className="mx-auto aspect-[8.5/11] w-full max-w-3xl" />
         ) : isPdf ? (

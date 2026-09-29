@@ -71,7 +71,7 @@ export default function PdfPage({ sha, page, needles, onPageCount, onHighlights,
               if (!ranges) return;
               const marks = box.current?.querySelectorAll("mark[data-hl]") ?? [];
               onHighlights?.(marks.length);
-              marks[0]?.scrollIntoView({ block: "center", behavior: "smooth" });
+              marks[0]?.scrollIntoView({ block: "center", inline: "center", behavior: "smooth" });
             }}
           />
         ) : null}

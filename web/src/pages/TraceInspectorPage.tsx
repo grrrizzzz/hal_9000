@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ErrorState, Skeleton } from "@/components/ui/states";
-import { formatDateTime, formatMs, formatUsd, outcomeLabel, outcomeTone, STAGE_LABEL } from "@/lib/format";
+import { formatDateTime, formatMs, formatUsd, outcomeLabel, outcomeTone, plural, STAGE_LABEL } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { GRAFANA_URL } from "./TracesPage";
 
@@ -44,8 +44,8 @@ function Inspector({ t }: { t: Trace }) {
   const stats: [string, string][] = [
     ["Total", formatMs(t.total_ms)],
     ["First token", formatMs(t.ttft_ms)],
-    ["Context", `${t.context_tokens ?? 0} tokens`],
-    ["Prompt", `${promptTokens} tokens`],
+    ["Context", plural(t.context_tokens ?? 0, "token")],
+    ["Prompt", plural(promptTokens, "token")],
     ["Cost", formatUsd(t.cost_usd)],
   ];
   return (

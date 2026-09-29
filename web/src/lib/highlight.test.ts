@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { highlightRanges, locate, normalize, renderItem, textRanges } from "./highlight";
+import { highlightRanges, locate, locateAll, normalize, renderItem, textRanges } from "./highlight";
 
 describe("highlight matching", () => {
   it("matches cleaned text against a letter-spaced heading split into items", () => {
@@ -39,5 +39,29 @@ describe("highlight matching", () => {
     const text = "Line one.\nThe  water heater is 50 gallon.\nEnd.";
     const [r] = textRanges(text, ["the water heater is 50 gallon"]);
     expect(text.slice(r[0], r[1])).toBe("The  water heater is 50 gallon");
+  });
+
+  it("highlights every aligned block when the chunk isn't contiguous on the page", () => {
+    const items = [
+      "SYNTHETIC HOME INSPECTION REPORT",
+      "The furnace is a forced-air gas unit located in the garage.",
+      "Page 2 of 3 · Sample Inspections Co. · envelope 0000-1111",
+      "A flexible gas connector is routed through the cabinet wall.",
+      "Recommend evaluation by a licensed HVAC contractor.",
+    ];
+    // Cleaning removed the running footer, so the chunk joins items 1 and 3.
+    const chunk = "The furnace is a forced-air gas unit located in the garage. A flexible gas connector is routed through the cabinet wall.";
+    const ranges = highlightRanges(items, [chunk]);
+    expect([...ranges.keys()].sort()).toEqual([1, 3]);
+    expect(ranges.get(1)?.[0][0]).toBe(0);
+    expect(ranges.get(3)?.[0][0]).toBe(0);
+    expect(locateAll(normalize(items.join(" ")), normalize(chunk))).toHaveLength(2);
+  });
+
+  it("ignores short incidental matches of common words", () => {
+    const items = ["The garage has a door.", "Something else entirely about the roof covering here."];
+    const chunk = "The furnace is a forced-air gas unit located in the garage and the roof covering is new";
+    const ranges = highlightRanges(items, [chunk]);
+    expect(ranges.has(0)).toBe(false);
   });
 });
