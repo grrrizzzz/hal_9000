@@ -152,17 +152,16 @@ class _Chunker:
         while s < b:
             ts = ix.token_at(s)
             te = ts + limit
-            lo = max(s + 1, ix.token_start(te - tail))  # the window's final 10%
+            lo = max(s + 1, ix.token_start(max(ts, min(te, ix.n_tokens) - tail)))  # final 10%
             window_end = ix.token_start(te)
 
             def snap(s2: int, end: int, lo: int = lo) -> int:
                 """The last sentence end in ``[lo, end]``, else line end, else word end."""
-                for points in (ix.sentence_ends, ix.line_ends):
+                for points in (ix.sentence_ends, ix.line_ends, ix.word_ends):
                     found = ix.last_in(points, max(lo, s2 + 1), end)
                     if found is not None:
                         return found
-                found = ix.last_in(ix.word_ends, s2 + 1, end)
-                return end if found is None else found
+                return end
 
             e = b if window_end >= b else snap(s, window_end)
             e = self._shrink(s, e, limit, snap)
@@ -347,13 +346,17 @@ class _Chunker:
     # --------------------------------------------------------- parent_child
     def _parent_child(self, size: int, overlap: int, parent_size: int) -> list[ChunkDraft]:
         items = self._units(self.tree, parent_size, 0, group=0)
-        packed: list[Item] = []
-        for a, b, g in items:  # pack sibling units into parents up to parent_size
-            if packed and packed[-1][2] == g and self._fits(packed[-1][0], b, parent_size):
-                packed[-1] = (packed[-1][0], b, g)
+        runs: list[list[Item]] = []
+        for item in items:  # sibling units, packed by the cheap count; checked below
+            run = runs[-1] if runs else None
+            if run and run[0][2] == item[2] and self.ix.approx(run[0][0], item[1]) <= parent_size:
+                run.append(item)
             else:
-                packed.append((a, b, g))
-        parents = self._merge_tiny([(a, b) for a, b, _ in packed], parent_size)
+                runs.append([item])
+        packed: list[Span] = []
+        for run in runs:
+            packed += self._emit([(a, b) for a, b, _ in run], _WORD, parent_size)
+        parents = self._merge_tiny(packed, parent_size)
         drafts: list[ChunkDraft] = []
         for pa, pb in parents:
             parent_key = len(drafts)

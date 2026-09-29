@@ -127,7 +127,9 @@ def test_fixed_snaps_backward_within_the_final_tenth(case) -> None:
 def test_fixed_overlap_equals_the_configured_value_within_one_sentence(case) -> None:
     inp, kw = case
     drafts = _run("fixed", inp, kw)
-    tolerance = _longest_sentence_tokens(inp.text)
+    # The acceptance bound is one sentence; fixed windows actually land within a word.
+    words = max((count_tokens(w) for w in re.findall(r"\S+|\s+", inp.text)), default=0)
+    tolerance = min(_longest_sentence_tokens(inp.text), words + 3)
     for a, b in zip(drafts, drafts[1:]):
         assert a.char_start < b.char_start
         shared = (

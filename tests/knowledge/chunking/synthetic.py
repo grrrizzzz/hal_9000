@@ -144,60 +144,69 @@ def inspection_doc(seed: int = 7, oversized_paragraphs: int = 24) -> SyntheticDo
 
 
 # ----------------------------------------------------------------- strategies
-_word = st.sampled_from(WORDS)
+# Document-like text is built from a drawn seed and block count: Hypothesis
+# composite draws per word made generation dominate the suite's run time. The
+# block count still shrinks, and a failing example prints the seed.
 
 
-@st.composite
-def _sentence_st(draw) -> str:
-    words = draw(st.lists(_word, min_size=1, max_size=20))
-    end = draw(st.sampled_from([".", ".", ".", "!", "?", ":", ""]))
+def _rsentence(rng: random.Random) -> str:
+    words = [rng.choice(WORDS) for _ in range(rng.randint(1, 20))]
+    end = rng.choice([".", ".", ".", "!", "?", ":", ""])
     return words[0].capitalize() + "".join(" " + w for w in words[1:]) + end
 
 
-@st.composite
-def _paragraph(draw) -> str:
-    sentences = draw(st.lists(_sentence_st(), min_size=1, max_size=8))
-    joiners = draw(st.lists(st.sampled_from([" ", " ", "\n"]), min_size=len(sentences)))
-    return "".join(s + j for s, j in zip(sentences, joiners)).rstrip()
+def _rparagraph(rng: random.Random) -> str:
+    parts = [_rsentence(rng) + rng.choice([" ", " ", "\n"]) for _ in range(rng.randint(1, 8))]
+    return "".join(parts).rstrip()
 
 
-@st.composite
-def _numbered(draw) -> str:
-    depth = draw(st.integers(1, 3))
-    number = ".".join(str(draw(st.integers(1, 20))) for _ in range(depth))
-    title = " ".join(w.capitalize() for w in draw(st.lists(_word, min_size=1, max_size=6)))
-    if depth == 1:
-        title = title.upper()
-    return f"{number} {title}"
+def _rnumbered(rng: random.Random) -> str:
+    depth = rng.randint(1, 3)
+    number = ".".join(str(rng.randint(1, 20)) for _ in range(depth))
+    title = " ".join(rng.choice(WORDS).capitalize() for _ in range(rng.randint(1, 6)))
+    return f"{number} {title.upper() if depth == 1 else title}"
 
 
-@st.composite
-def _finding(draw) -> str:
-    return f"{draw(_numbered())}\n{draw(_paragraph())}\nRecommendation: {draw(_sentence_st())}"
+def _rfinding(rng: random.Random) -> str:
+    gap = rng.choice(["\n", "\n\n"])
+    return f"{_rnumbered(rng)}\n{_rparagraph(rng)}{gap}Recommendation: {_rsentence(rng)}"
 
 
-_caps = st.lists(_word, min_size=1, max_size=5).map(lambda ws: " ".join(ws).upper())
-_markdown = st.tuples(st.integers(1, 4), st.lists(_word, min_size=1, max_size=5)).map(
-    lambda t: "#" * t[0] + " " + " ".join(t[1]).capitalize()
-)
-_bullets = st.lists(_sentence_st(), min_size=1, max_size=6).map(
-    lambda items: "\n".join(f"- {i}" for i in items)
-)
-
-_block = st.one_of(
-    _paragraph(), _paragraph(), _finding(), _finding(), _numbered(), _caps, _markdown, _bullets
-)
+def _rcaps(rng: random.Random) -> str:
+    return " ".join(rng.choice(WORDS) for _ in range(rng.randint(1, 5))).upper()
 
 
-@st.composite
-def doc_texts(draw, max_blocks: int = 30) -> str:
+def _rmarkdown(rng: random.Random) -> str:
+    words = " ".join(rng.choice(WORDS) for _ in range(rng.randint(1, 5)))
+    return "#" * rng.randint(1, 4) + " " + words.capitalize()
+
+
+def _rbullets(rng: random.Random) -> str:
+    return "\n".join(f"- {_rsentence(rng)}" for _ in range(rng.randint(1, 6)))
+
+
+_BLOCKS = [
+    _rparagraph,
+    _rparagraph,
+    _rfinding,
+    _rfinding,
+    _rnumbered,
+    _rcaps,
+    _rmarkdown,
+    _rbullets,
+]
+
+
+def random_doc(seed: int, blocks: int) -> str:
     """Document-like text: headings, findings, paragraphs and lists; sentences stay short."""
-    blocks = draw(st.lists(_block, min_size=1, max_size=max_blocks))
-    seps = draw(
-        st.lists(st.sampled_from(["\n", "\n\n", "\n\n\n", " \n\n", "\n \n"]), min_size=len(blocks))
-    )
-    lead = draw(st.sampled_from(["", "", "\n", "  "]))
-    return lead + "".join(b + s for b, s in zip(blocks, seps))
+    rng = random.Random(seed)
+    seps = ["\n", "\n\n", "\n\n\n", " \n\n", "\n \n"]
+    body = "".join(rng.choice(_BLOCKS)(rng) + rng.choice(seps) for _ in range(blocks))
+    return rng.choice(["", "", "\n", "  "]) + body
+
+
+def doc_texts(max_blocks: int = 30) -> st.SearchStrategy[str]:
+    return st.builds(random_doc, st.integers(0, 2**32 - 1), st.integers(1, max_blocks))
 
 
 _no_surrogates = st.characters(blacklist_categories=("Cs",))
