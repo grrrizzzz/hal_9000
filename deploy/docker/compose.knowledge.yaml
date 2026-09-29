@@ -15,6 +15,7 @@
 #   KB_UID=1000   KB_GID=1000         the owner of ./data (`id -u`, `id -g`)
 #   KB_WITH_DOCLING=0  KB_WITH_RERANK=none                  image build options
 #   GRAFANA_ADMIN_PASSWORD                                   required
+#   KB_IMAGE_TAG=local  (set in the shell for one command, not in .env)
 # hal-kb also receives the whole .env (KB_PASSCODE, OPENAI_API_KEY, caps, ...).
 
 name: hal9000-knowledge
@@ -35,7 +36,9 @@ services:
         WITH_RERANK: ${KB_WITH_RERANK:-none}
         APP_UID: ${KB_UID:-1000}
         APP_GID: ${KB_GID:-1000}
-    image: hal9000/hal-kb:local
+    # KB_IMAGE_TAG (shell only, for one command) names a variant image, e.g. a
+    # reranker build for S6, without replacing :local (deploy/README.md)
+    image: hal9000/hal-kb:${KB_IMAGE_TAG:-local}
     container_name: hal-kb
     user: "${KB_UID:-1000}:${KB_GID:-1000}"
     env_file:

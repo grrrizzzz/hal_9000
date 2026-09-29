@@ -67,7 +67,18 @@ repository's `data/` folder.
 | `KB_PORT`, `PROMETHEUS_PORT`, `GRAFANA_PORT` | if taken | host ports (8910, 9090, 3001) |
 | `KB_WITH_DOCLING` | no | `1` builds Docling and its layout and table models into the image (PyTorch: gigabytes; only if the evaluation chose it) |
 | `KB_WITH_RERANK` | no | `none`, `minilm` or `bge-base`: the cross-encoder chosen at G-K2, downloaded at build time |
-| `KB_MONTHLY_CAP_USD`, `KB_EVAL_CAP_USD`, `KB_CHAT_TIER`, ... | no | as on the Mac |
+| `KB_MONTHLY_CAP_USD`, `KB_CHAT_TIER`, ... | no | as on the Mac |
+| `KB_EVAL_CAP_USD` | for S6 | counted against each machine's own ledger: on the Pi, set it to what the Mac's sweep left (runbook §5.1) |
+
+Passwords and the passcode: letters, digits, `-` and `_` only (quotes,
+spaces, `#` and `$` are read differently by Compose, the shell and `.env`
+parsers).
+
+`KB_IMAGE_TAG` is not an `.env` setting: set it in the shell for one command
+to build or run a variant image under its own tag, without replacing
+`hal9000/hal-kb:local`. S6 uses it for reranker builds:
+`KB_WITH_RERANK=minilm KB_IMAGE_TAG=rerank-minilm $C build hal-kb`, then
+`KB_IMAGE_TAG=rerank-minilm $C run --rm --no-deps hal-kb hal9000 kb ...`.
 | `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` | no | only for Grafana's optional Telegram alerts |
 
 The Compose file sets `HAL_DATA_DIR`, `KB_DATA_DIR` (`/app/data`) and
@@ -109,7 +120,8 @@ tests out of the build context):
 2. **build**: `python:3.12-slim` installs `uv` from PyPI and runs
    `uv sync --frozen --no-dev --group knowledge` (plus `knowledge-docling` and
    `knowledge-rerank` when chosen) into `/app/.venv`. It removes the
-   third-party test suites, then fails the build if sqlite-vec can't run its
+   third-party test suites, byte-compiles `/app/src` (the runtime user can't
+   write `__pycache__`), then fails the build if sqlite-vec can't run its
    cosine KNN (`scripts/kb_sqlite_vec_check.py`, gate G-K0b), if the vendored
    `tiktoken` encodings are missing, or if the service doesn't import. With a
    reranker it downloads the model from Hugging Face and scores one pair; with
@@ -176,10 +188,11 @@ Nightly at 03:17, keeping two weeks, from your user's crontab (`crontab -e`):
 ```
 
 `data/backups` is on the same SD card as the library, so copy it off the Pi
-now and then (to the Mac, from the Mac):
+now and then (to the Mac, from the Mac; `PI` is the Pi's SSH login, e.g.
+`PI=mike@192.168.1.50`):
 
 ```sh
-rsync -av pi@<pi-address>:hal_9000/data/backups/ ~/hal-kb-backups/
+rsync -av "$PI:hal_9000/data/backups/" ~/hal-kb-backups/
 ```
 
 ### Restore
@@ -196,8 +209,9 @@ stop `hal-kb` first:
 cd ~/hal_9000
 C="docker compose --env-file .env -f deploy/docker/compose.knowledge.yaml"
 ls data/backups/                                   # pick one
+BACKUP=data/backups/knowledge-20261003T031700Z     # its real name
 $C stop hal-kb
-$C run --rm --no-deps hal-kb hal9000 kb restore data/backups/knowledge-<time> --force
+$C run --rm --no-deps hal-kb hal9000 kb restore "$BACKUP" --force
 $C up -d hal-kb
 curl -s http://localhost:8910/health
 $C exec hal-kb hal9000 kb stats

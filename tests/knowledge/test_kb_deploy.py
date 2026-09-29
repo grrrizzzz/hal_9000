@@ -144,8 +144,8 @@ def test_hal_kb_is_built_from_the_repo_with_dockerfile_kb(services):
     assert _resolve(build["context"]) == REPO
     assert (REPO / build["dockerfile"]).resolve() == DOCKERFILE
     assert set(build["args"]) >= {"WITH_DOCLING", "WITH_RERANK", "APP_UID", "APP_GID"}
-    image = services["hal-kb"]["image"]
-    assert ":" in image and not image.endswith(":latest")
+    # :local by default; KB_IMAGE_TAG names a variant (S6 rerankers) without replacing it
+    assert services["hal-kb"]["image"] == "hal9000/hal-kb:${KB_IMAGE_TAG:-local}"
 
 
 def test_hal_kb_reads_env_file_and_mounts_data_read_write(services):

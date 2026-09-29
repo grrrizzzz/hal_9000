@@ -36,14 +36,23 @@ cd ~/hal_9000
 C="docker compose --env-file .env -f deploy/docker/compose.knowledge.yaml"
 ```
 
-On the Mac, set the Pi's SSH login once per terminal session (for the copy
-steps):
+**Values you fill in are shell variables.** Set each one once per terminal
+session, replacing the example value after `=` (with nothing else around it:
+zsh on the Mac reads `<` and `>` as redirections, so never type them). The
+commands then use `$SWEEP`, `$NAME` and so on as they are.
 
-```bash
-PI=<you>@<pi-address>        # e.g. mike@192.168.1.50
-```
+| Variable | Where | What | Set it like |
+|---|---|---|---|
+| `PI` | Mac | the Pi's SSH login | `PI=mike@192.168.1.50` |
+| `SWEEP` | Mac and Pi | the sweep ID `kb eval sweep` printed (§3.1) | `SWEEP=20261002T0915-a1b2` |
+| `SHA` | Pi | the inspection bundle's SHA-256 (§5) | `SHA=0f3c...` (all 64 characters) |
+| `PROFILE` | Pi | a profile name, from the orchestrator (§4.7) | `PROFILE=pdfium.structure-768.hdr.te3s-1536` |
+| `NAME` | Pi | the configuration you choose at G-K2 (§6) | `NAME=s4-07` |
+| `BACKUP` | Pi | a backup folder (§8) | `BACKUP=data/backups/knowledge-20261003T031700Z` |
 
-`RUN` or `SWEEP` below means the sweep ID that `kb eval sweep` printed.
+Passwords and the passcode: use only letters, digits, `-` and `_`. Quotes,
+spaces, `#` and `$` are read differently by Compose, the shell and `.env`
+parsers.
 
 ---
 
@@ -57,7 +66,7 @@ uv sync --all-groups
 ```
 
 `.env` needs `OPENAI_API_KEY` and `KB_PASSCODE` (the household passcode for
-the web page).
+the web page: letters, digits, `-` and `_` only).
 
 ### 2.2 Put the inspection bundle in the inbox
 
@@ -75,8 +84,10 @@ into git.)
 uv run hal9000 kb check
 ```
 
-Pass: `ok` on every line and `All checks passed.` (before the first ingest,
-the index profile line says there is no active profile yet).
+Pass: `ok` on every line and `All checks passed.` Before the first ingest the
+index profile line reads `no active profile yet; default for the first ingest:
+pdfium.structure-768.hdr.te3s-1536`: the plan's baseline, set in
+`config/knowledge.yaml` until G-K2 replaces it.
 
 ### 2.4 Ingest (about a cent)
 
@@ -84,10 +95,19 @@ the index profile line says there is no active profile yet).
 uv run hal9000 kb ingest data/knowledge/inbox/Home_Inspection.pdf
 ```
 
-It prints an estimate and asks before spending. It also builds and activates
-the default index profile from `config/knowledge.yaml`, so the real retriever
-exists for the next steps. Pass: the file is `indexed` with no failures, and
-`uv run hal9000 kb profile list` shows one profile `ready` and active.
+It prints an estimate (embeddings and segmentation) and asks before
+spending. Because the library has no active profile yet, the ingestion also
+builds the default profile from `config/knowledge.yaml` and activates it, so
+the real retriever exists for the next steps. Pass: `added
+Home_Inspection.pdf: ...`, then `1 added, 0 duplicate, 0 skipped, 0 failed.`
+with the cost. Then:
+
+```bash
+uv run hal9000 kb check
+```
+
+Pass: the index profile line now reads `active profile
+pdfium.structure-768.hdr.te3s-1536; ...`.
 
 ### 2.5 The house test (no cost)
 
@@ -104,10 +124,12 @@ noise in chunks).
 uv run hal9000 kb gold generate --yes
 ```
 
-Pass: a summary of about 120 drafts by category, with any quota shortfall
-listed. Unanswerable drafts are checked against the index `kb ingest` built;
-don't add `--allow-keyword-check`. If it says there is no index, go back to
-§2.4 and check `kb profile list`.
+It prints the plan (documents, pages, generation tasks, unanswerable drafts
+to check) and the estimate, then generates. Pass: a summary of about 120
+drafts by category, with any quota shortfall listed. Unanswerable drafts are
+checked against the profile §2.4 activated; don't add
+`--allow-keyword-check`. If it stops for want of an index, §2.4's `kb check`
+line didn't show the active profile: send the orchestrator both outputs.
 
 ### 2.7 Review (about 45 minutes, can be split)
 
@@ -135,17 +157,17 @@ uv run hal9000 kb eval sweep --stages S1a,S1b,S2,S3,S4 --yes
 ```
 
 It prints each stage's estimate before running it and the sweep ID at the
-start: note it as `SWEEP`. It stops at `KB_EVAL_CAP_USD` and keeps its partial
+start: set it with `SWEEP=...` (§1). It stops at `KB_EVAL_CAP_USD` and keeps its partial
 results (exit code 4). If it is interrupted, resume it:
 
 ```bash
-uv run hal9000 kb eval sweep --stages S1a,S1b,S2,S3,S4 --resume SWEEP --yes
+uv run hal9000 kb eval sweep --stages S1a,S1b,S2,S3,S4 --resume "$SWEEP" --yes
 ```
 
 ### 3.2 Answers for judge calibration (a few cents)
 
 ```bash
-uv run hal9000 kb eval judge-prep SWEEP --yes
+uv run hal9000 kb eval judge-prep "$SWEEP" --yes
 ```
 
 ### 3.3 Label the 20 answers (about 15 minutes)
@@ -159,7 +181,7 @@ uv run hal9000 kb serve
 ### 3.4 S5 (unattended)
 
 ```bash
-uv run hal9000 kb eval sweep --stages S5 --resume SWEEP --yes
+uv run hal9000 kb eval sweep --stages S5 --resume "$SWEEP" --yes
 ```
 
 It refuses to start until the judge agrees with at least 85% of your labels.
@@ -169,10 +191,11 @@ one revision).
 ### 3.5 Export and share
 
 ```bash
-uv run hal9000 kb eval export SWEEP
+uv run hal9000 kb eval export "$SWEEP"
+ls "data/knowledge/eval/runs/$SWEEP/export.json"
 ```
 
-It writes `data/knowledge/eval/runs/SWEEP/export.json`. Share that file. The
+Share that file. The
 orchestrator summarises the results and names the finalists for S6.
 
 ---
@@ -189,18 +212,24 @@ uname -m                                  # aarch64
 docker version --format '{{.Server.Version}}'
 docker compose version                    # v2.24 or newer
 id -nG | grep -qw docker && echo "in the docker group"
-free -h                                   # the stack is limited to 3 GB in all
+free -m | awk '/^Mem:/ {print ($7 >= 3072 ? "memory ok: " : "memory LOW: ") $7 " MB available"}'
 df -h ~                                   # 5 GB free for images and build cache
+jq --version
 ss -ltnp | grep -E ':(8910|9090|3001)\b' || echo "ports free"
 curl -sI https://registry-1.docker.io/v2/ | head -1   # any HTTP status: Docker Hub reachable
 curl -sI https://pypi.org/simple/ | head -1
 curl -sI https://registry.npmjs.org/ | head -1
+curl -sI https://grafana.com/api/plugins/frser-sqlite-datasource | head -1   # Grafana's plugin, fetched at its first start
 ```
 
-Pass: `aarch64`, a Docker version, Compose v2.24+, "in the docker group",
-"ports free", and an HTTP status line from each of the three registries.
+Pass: `aarch64`; a Docker version; Compose v2.24+; "in the docker group";
+"memory ok" (at least 3 GB available with Home Assistant running: the three
+containers are limited to 3 GB in all); 5 GB free on disk; a `jq` version;
+"ports free"; and an HTTP status line from each of the four sites.
 
 - No `docker compose`: install Docker's `docker-compose-plugin` package.
+- No `jq` (`deploy/grafana/VERIFY.md` uses it): `sudo apt-get install -y jq`.
+- "memory LOW": stop what else is running on the Pi, or tell the orchestrator.
 - Not in the docker group: `sudo usermod -aG docker $USER`, then log out and in.
 - A port is taken: choose another and set `KB_PORT`, `PROMETHEUS_PORT` or
   `GRAFANA_PORT` in `.env` in step 4.3.
@@ -234,11 +263,13 @@ read -rsp "Grafana admin password: " GP; echo
 printf '\n# Pi: knowledge stack (deploy/README.md)\nKB_UID=%s\nKB_GID=%s\nGRAFANA_ADMIN_PASSWORD=%s\n' \
   "$(id -u)" "$(id -g)" "$GP" >> .env
 unset GP
-grep -oE '^(OPENAI_API_KEY|KB_PASSCODE|GRAFANA_ADMIN_PASSWORD|KB_UID|KB_GID)=.' .env | cut -d= -f1
+grep -oE '^(OPENAI_API_KEY|KB_PASSCODE|GRAFANA_ADMIN_PASSWORD|KB_UID|KB_GID)=[^[:space:]#]' .env | cut -d= -f1
 ```
 
-Pass: the last command lists all five names (it prints no values). `.env`
-stays on the Pi and the Mac only; it is git-ignored.
+Use only letters, digits, `-` and `_` in the Grafana password. Pass: the last
+command lists all five names (it prints no values; a name missing from the
+list has an empty value). `.env` stays on the Pi and the Mac only; it is
+git-ignored.
 
 ### 4.4 Build (Pi, 10–20 minutes the first time)
 
@@ -269,8 +300,9 @@ ls data/knowledge.db*
 ```
 
 Pass: `(0, 0, 0)`, and only `data/knowledge.db` is listed (a leftover
-`-wal` of 0 bytes is fine). A first number of 1 means something still has the
-database open.
+`-wal` of 0 bytes is fine). A `knowledge.db-shm` file, or a first number of 1,
+means something still has the database open: find it (`lsof data/knowledge.db`),
+stop it, and run the two commands again.
 
 Still on the Mac, copy the database, the originals and the evaluation data
 (not `session.key`: the Pi makes its own, so everyone signs in again):
@@ -293,11 +325,11 @@ find data ! -user "$(id -u)" | head
 Pass: `knowledge.db` has your uid, and `find` prints nothing.
 
 (Alternative, checksummed end to end: `uv run hal9000 kb backup` on the Mac
-writes `data/backups/knowledge-<UTC time>/` (`knowledge.db`,
-`library.tar.gz`, `manifest.json`); copy that folder with
-`rsync -av data/backups/knowledge-<UTC time> "$PI:hal_9000/data/backups/"`,
-then restore it on the Pi as in §8, without `--force` since the Pi's library
-is empty.)
+writes a folder `data/backups/knowledge-` plus the UTC time, holding
+`knowledge.db`, `library.tar.gz` and `manifest.json`; copy it with
+`rsync -av data/backups/knowledge-2026... "$PI:hal_9000/data/backups/"` (the
+folder's real name), then restore it on the Pi as in §8, without `--force`
+since the Pi's library is empty.)
 
 ### 4.6 Start (Pi)
 
@@ -322,13 +354,14 @@ Pass: `/health` returns JSON with `"status"`; `kb check` ends with
 `All checks passed.`; `kb stats` shows the same document and chunk counts as
 `uv run hal9000 kb stats` on the Mac.
 
-Before G-K2, `/health` may say `"status":"degraded"` with
-`"active_profile":null`: no profile serves the chat yet. For the smoke test,
-activate the leading configuration's profile for now (the orchestrator names
-it from the S5 results; G-K2 sets the final one):
+`/health` should show `"status":"ok"` and the active profile that came
+across with the library (the baseline from §2.4, unless the sweep changed it).
+If it says `"active_profile":null`, activate the profile the orchestrator
+names for now (G-K2 sets the final one):
 
 ```sh
-$C exec hal-kb hal9000 kb profile activate <PROFILE>
+PROFILE=pdfium.structure-768.hdr.te3s-1536    # or the name the orchestrator gives
+$C exec hal-kb hal9000 kb profile activate "$PROFILE"
 ```
 
 Then one question from the terminal, inside the container:
@@ -388,15 +421,15 @@ reranker (optional; about 10 minutes each, needs huggingface.co):
 
 ```sh
 for r in minilm bge-base; do
-  docker build -f deploy/docker/Dockerfile.kb --build-arg WITH_RERANK=$r \
-    --build-arg APP_UID="$(id -u)" --build-arg APP_GID="$(id -g)" -t hal9000/hal-kb:$r .
-  echo "$r: $(size hal9000/hal-kb:$r) MB"
+  KB_WITH_RERANK=$r KB_IMAGE_TAG=rerank-$r $C build hal-kb
+  echo "$r: $(size hal9000/hal-kb:rerank-$r) MB"
 done
 ```
 
-These extra images don't change the running stack (it uses `:local`). Keep
-the one S6 needs, if any (§5), and remove the rest:
-`docker image rm hal9000/hal-kb:minilm hal9000/hal-kb:bge-base`.
+`KB_IMAGE_TAG` gives each variant its own tag (`hal9000/hal-kb:rerank-minilm`,
+`hal9000/hal-kb:rerank-bge-base`), so the running stack's `:local` is not
+replaced. Keep the ones S6 needs (§5); remove the rest with
+`docker image rm hal9000/hal-kb:rerank-minilm` (or `-bge-base`).
 
 ### 4.10 Nightly backups (Pi)
 
@@ -413,55 +446,102 @@ ls data/backups/
 ## 5. S6: latency on the Pi
 
 Needs §4 done. The finalists' profiles came across with the library; the
-orchestrator gives you their names (`A,B,C` below) and the sweep ID.
+orchestrator gives you their names, which reranker each uses, and the sweep
+ID (set `SWEEP`, §1).
 
-**If a finalist uses a reranker**, the image must include that model (nothing
-is downloaded at run time). Set `KB_WITH_RERANK=minilm` (or `bge-base`) in
-`.env`, run `$C up -d --build`, and run S6 for that finalist; set it back
-afterwards if G-K2 doesn't choose it.
+### 5.1 The evaluation cap on the Pi
+
+`KB_EVAL_CAP_USD` is counted against each machine's own ledger, and the Mac's
+sweep spend isn't in the Pi's. So give the Pi only what is left. On the Mac:
+
+```bash
+uv run hal9000 kb stats
+```
+
+The spend line shows `$X of $Y (evaluation)`. On the Pi, set the cap to
+Y − X (for example 3.60), then apply it:
+
+```sh
+sed -i '/^KB_EVAL_CAP_USD=/d' .env
+echo "KB_EVAL_CAP_USD=3.60" >> .env          # your Y - X
+$C up -d
+```
+
+### 5.2 The bundle's SHA-256
 
 The scratch-ingest test times a fresh ingestion of the bundle with an empty
-cache. It needs the bundle's SHA-256; on the Mac:
+cache. On the Mac:
 
 ```bash
 shasum -a 256 data/knowledge/inbox/Home_Inspection.pdf | cut -c1-64
 ```
 
-On the Pi, check it is there (`ls data/knowledge/files/<SHA>`), keep the Pi
-otherwise idle (no uploads), and run:
+On the Pi, set `SHA` to that value (§1) and check the file is there:
 
 ```sh
-$C exec hal-kb hal9000 kb eval latency --profiles A,B,C --n 200 --end-to-end 30 --ingest-test <SHA>
+ls -l "data/knowledge/files/$SHA"
 ```
 
-It prints an estimate (the live end-to-end questions and the scratch ingest's
+### 5.3 One latency run per image
+
+Nothing is downloaded at run time, so a finalist with a reranker must run in
+an image that has that model. Group the finalists by reranker and run
+`kb eval latency` once per group, in that group's image: `local` for no
+reranker, `rerank-minilm` or `rerank-bge-base` otherwise. Build the reranker
+images you need first, each under its own tag so `:local` is untouched (skip
+any §4.9 already built):
+
+```sh
+KB_WITH_RERANK=minilm KB_IMAGE_TAG=rerank-minilm $C build hal-kb
+KB_WITH_RERANK=bge-base KB_IMAGE_TAG=rerank-bge-base $C build hal-kb
+```
+
+Keep the Pi otherwise idle (no uploads) and run each group, with its own
+finalists after `--profiles` (comma-separated, no spaces). For example, two
+finalists without a reranker and one with minilm:
+
+```sh
+KB_IMAGE_TAG=local $C run --rm --no-deps hal-kb \
+  hal9000 kb eval latency --profiles pdfium.structure-768.hdr.te3s-1536,pdfium.structure-512.hdr.te3s-1536 \
+  --n 200 --end-to-end 30 --ingest-test "$SHA"
+KB_IMAGE_TAG=rerank-minilm $C run --rm --no-deps hal-kb \
+  hal9000 kb eval latency --profiles pdfium.structure-1024.hdr.te3s-1536 \
+  --n 200 --end-to-end 30 --ingest-test "$SHA"
+```
+
+(Use the orchestrator's names; the ones above are only the shape.) Each run
+prints an estimate (the live end-to-end questions and the scratch ingest's
 embeddings, metered as `knowledge-eval`) and asks before spending. Pass: a
-`Stored <run id> (<profile>, host ...)` line per profile and the spend. Exit
-code 4 means it stopped at the evaluation cap with partial results.
+`Stored ... (profile, host ...)` line per profile and the spend. Exit code 4
+means it stopped at the evaluation cap with partial results.
 
-Write the report (it goes to `docs/KNOWLEDGE_EVAL_REPORT.md` in the checkout,
-aggregates only) and the export:
+### 5.4 Report and export
+
+The report goes to `docs/KNOWLEDGE_EVAL_REPORT.md` in the Pi's checkout
+(aggregates only); the export to the data folder:
 
 ```sh
-$C run --rm --no-deps -v "$PWD/docs:/app/docs" hal-kb hal9000 kb eval report SWEEP
-$C exec hal-kb hal9000 kb eval export SWEEP
+$C run --rm --no-deps -v "$PWD/docs:/app/docs" hal-kb hal9000 kb eval report "$SWEEP"
+$C exec hal-kb hal9000 kb eval export "$SWEEP"
 ```
 
-Copy both to the Mac and share them:
+Copy both to the Mac and share them (on the Mac):
 
 ```bash
-scp "$PI:hal_9000/docs/KNOWLEDGE_EVAL_REPORT.md" "$PI:hal_9000/data/knowledge/eval/runs/SWEEP/export.json" ~/Downloads/
+scp "$PI:hal_9000/docs/KNOWLEDGE_EVAL_REPORT.md" "$PI:hal_9000/data/knowledge/eval/runs/$SWEEP/export.json" ~/Downloads/
 ```
+
+Nothing is committed on the Pi; §6 commits the final report from the Mac.
 
 ---
 
-## 6. G-K2: choose the configuration (Pi)
+## 6. G-K2: choose the configuration (Pi, then the Mac)
 
 The orchestrator presents the report's recommendation and the alternatives.
-Pick one (`NAME`, as the report prints it), then on the Pi:
+Pick one and set `NAME` to it, as the report prints it (§1). On the Pi:
 
 ```sh
-$C exec hal-kb hal9000 kb eval choose SWEEP --config NAME
+$C exec hal-kb hal9000 kb eval choose "$SWEEP" --config "$NAME"
 ```
 
 It builds the profile first if it isn't built (it shows the embedding cost and
@@ -469,16 +549,18 @@ asks), activates it, stores its abstain threshold, and writes the choice
 (profile, reranker, query transform and chat tier) to `config/knowledge.yaml`.
 
 Then score the chosen configuration once on the held-back test split (answers
-are judged; it prints an estimate and asks):
+are judged; it prints an estimate and asks), and rewrite the report with it:
 
 ```sh
-$C exec hal-kb hal9000 kb eval test SWEEP --config NAME
-$C run --rm --no-deps -v "$PWD/docs:/app/docs" hal-kb hal9000 kb eval report SWEEP
+$C exec hal-kb hal9000 kb eval test "$SWEEP" --config "$NAME"
+$C run --rm --no-deps -v "$PWD/docs:/app/docs" hal-kb hal9000 kb eval report "$SWEEP"
 ```
 
 The report now has the test-split scores against the plan §1 targets. This is
 a one-time measurement: don't re-run it to chase a better number (it refuses
-without `--force`, which is logged). Share the report with the orchestrator.
+without `--force`, which is logged).
+
+Apply the choice on the Pi:
 
 1. `KB_CHAT_TIER` in `.env` overrides the chat tier `choose` wrote: delete
    that line from `.env` unless you mean to override it.
@@ -487,13 +569,29 @@ without `--force`, which is logged). Share the report with the orchestrator.
 3. Apply: `$C up -d --build` (it only rebuilds if `KB_WITH_RERANK` changed).
 4. Check: `curl -s http://localhost:8910/health; echo` shows `"status":"ok"`
    and the chosen profile.
-5. Commit the choice, on the Pi or by copying the file to the Mac:
 
-   ```sh
-   git diff config/knowledge.yaml
-   git add config/knowledge.yaml && git commit -m "G-K2: choose NAME"
-   git push
-   ```
+Commit from the Mac, never on the Pi. On the Mac:
+
+```bash
+git pull
+scp "$PI:hal_9000/config/knowledge.yaml" config/knowledge.yaml
+scp "$PI:hal_9000/docs/KNOWLEDGE_EVAL_REPORT.md" docs/KNOWLEDGE_EVAL_REPORT.md
+git diff --stat
+git add config/knowledge.yaml docs/KNOWLEDGE_EVAL_REPORT.md
+git commit -m "G-K2: choose $NAME"
+git push
+```
+
+Then put the Pi's checkout back in step with git (the Pi's report file is
+untracked there, and would block the pull):
+
+```sh
+rm docs/KNOWLEDGE_EVAL_REPORT.md
+git checkout -- config/knowledge.yaml
+git pull
+git status --short                            # prints nothing
+$C up -d
+```
 
 Tell the orchestrator which configuration you chose; it records the decision
 in `docs/KNOWLEDGE_BUILD_STATUS.md`. From now on the Pi's library is the one
@@ -518,7 +616,7 @@ for a summary in the terminal.
 $C ps                                             # all three healthy?
 $C logs --tail 100 hal-kb
 $C exec hal-kb hal9000 kb ask "question"          # one question, with sources
-$C exec hal-kb hal9000 kb ingest data/knowledge/inbox/<file>   # after copying a file there
+$C exec hal-kb hal9000 kb ingest data/knowledge/inbox   # after copying files there
 $C exec hal-kb hal9000 kb eval regression         # recall on the approved question set, retrieval only
 ```
 
@@ -536,7 +634,7 @@ $C exec hal-kb hal9000 kb eval regression         # recall on the approved quest
 | Log: `attempt to write a readonly database` or `Permission denied` under `/app/data` | `data/` isn't owned by `KB_UID:KB_GID`. `sudo chown -R "$(id -u):$(id -g)" data`, check `KB_UID`/`KB_GID` in `.env`, then `$C up -d`. |
 | Grafana's SQLite panels (traces, jobs, regression, sweep) show an error, the Prometheus ones don't | Expected while `hal-kb` is stopped: Grafana reads `knowledge.db` through a read-only mount, which works only while `hal-kb` holds the database open. `$C up -d hal-kb`; the panels recover on their next refresh. |
 | Grafana's SQLite panels say `unable to open database file` while `hal-kb` is running | Grafana (uid 472) can't read `data/`. `chmod o+rx data && chmod o+r data/knowledge.db*`. |
-| Grafana rejects the admin password | The password is set on Grafana's first start only. Reset it: `$C exec grafana grafana cli admin reset-admin-password '<new>'`, and put the new one in `.env`. |
+| Grafana rejects the admin password | The password is set on Grafana's first start only. Pick a new one (letters, digits, `-` and `_` only), put it on the `GRAFANA_ADMIN_PASSWORD=` line in `.env`, then: `read -rsp "New Grafana password: " GP; echo; $C exec grafana grafana cli admin reset-admin-password "$GP"; unset GP`. |
 | Prometheus target `down` | `hal-kb` isn't healthy: `$C logs --tail 100 hal-kb`. |
 | `hal-kb` was killed during a big upload (`docker inspect hal-kb --format '{{.State.OOMKilled}}'` says `true`) | It hit its 2 GB limit. Upload large documents one at a time; tell the orchestrator if it repeats. |
 | A setting changed in `.env` has no effect | `restart` keeps the old environment. Use `$C up -d`. |
@@ -558,9 +656,10 @@ with `--force` moves the current library aside to
 `data/knowledge-replaced-<time>/` rather than deleting it:
 
 ```sh
-ls data/backups/
+ls data/backups/                               # pick one, then set BACKUP (§1)
+BACKUP=data/backups/knowledge-20261003T031700Z
 $C stop hal-kb
-$C run --rm --no-deps hal-kb hal9000 kb restore data/backups/knowledge-<time> --force
+$C run --rm --no-deps hal-kb hal9000 kb restore "$BACKUP" --force
 $C up -d hal-kb
 curl -s http://localhost:8910/health; echo
 $C exec hal-kb hal9000 kb stats
