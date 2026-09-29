@@ -70,6 +70,10 @@ FOLLOW_UP = "And when was it installed?"
 NOTE = b"Synthetic gutter note.\n\nThe gutters were cleaned in spring 2024 by Example Gutters.\n"
 BROKEN_PDF = b"%PDF-1.7\n" + b"\x00 not a real pdf body \x00" * 40
 
+#: What Go's time.RFC3339 parses (fractional seconds allowed): frser-sqlite-datasource's
+#: time columns are these strings or unix seconds.
+RFC3339 = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?(Z|[+-]\d\d:\d\d)")
+
 #: Columns Grafana must never read (plan §9.3, §14): question and document text,
 #: the trace body, names that can identify the house.
 FORBIDDEN_COLUMNS = {
@@ -579,6 +583,11 @@ def test_every_sqlite_panel_returns_rows_from_the_live_database(live: Live, wher
     assert result.reads, where
     for table, column in result.reads:
         assert column not in FORBIDDEN_COLUMNS, f"{where} reads {table}.{column}"
+    if "time" in result.columns:  # the plugin's time columns: epoch seconds or RFC 3339
+        i = result.columns.index("time")
+        for row in result.rows:
+            value = row[i]
+            assert isinstance(value, int) or RFC3339.fullmatch(value), (where, value)
 
 
 def test_the_traces_table_lists_the_session_without_text_and_links_to_the_inspector(live: Live):
