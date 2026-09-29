@@ -13,6 +13,8 @@ from hal9000.knowledge.chunking.header import build_header
 from hal9000.knowledge.chunking.inputs import PAGE_JOINER, ChunkDraft, ChunkInput, Unit
 from hal9000.knowledge.chunking.profiles import (
     EMBED_ALIASES,
+    FAKE_EMBED_DIMENSIONS,
+    FAKE_EMBED_MODEL,
     make_profile,
     overlap_tokens,
     parse_profile_name,
@@ -23,6 +25,8 @@ from hal9000.knowledge.chunking.units import detect_units
 __all__ = [
     "CHUNKERS",
     "EMBED_ALIASES",
+    "FAKE_EMBED_DIMENSIONS",
+    "FAKE_EMBED_MODEL",
     "MIN_SIZE",
     "PAGE_JOINER",
     "ChunkDraft",

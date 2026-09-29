@@ -21,8 +21,14 @@ import re
 
 from hal9000.knowledge.contracts import IndexProfile
 
+#: The smallest chunk size *N*: one code point is at most 4 tokens, so every
+#: window advances. The chunkers enforce it too.
+MIN_SIZE = 8
+
 __all__ = [
     "EMBED_ALIASES",
+    "FAKE_EMBED_DIMENSIONS",
+    "FAKE_EMBED_MODEL",
     "make_profile",
     "overlap_tokens",
     "parse_profile_name",
@@ -33,7 +39,11 @@ __all__ = [
 EMBED_ALIASES: dict[str, str] = {
     "te3s": "openai/text-embedding-3-small",
     "te3l": "openai/text-embedding-3-large",
+    "fake": "fake/embed-64",  # KWP3's offline FakeEmbedder; tokens count as cl100k_base
 }
+#: The fake embedder's model and vector size (``pdfium.structure-768.hdr.fake-64``).
+FAKE_EMBED_MODEL = EMBED_ALIASES["fake"]
+FAKE_EMBED_DIMENSIONS = 64
 
 _PARSER = re.compile(r"[a-z0-9_]+")
 _NAME = re.compile(
@@ -60,8 +70,18 @@ def _overlap_label(size: int, overlap: int) -> str:
     return f"-o{overlap}t"
 
 
+def _check_sizes(profile: IndexProfile) -> None:
+    if profile.size < MIN_SIZE:
+        raise ValueError(f"size must be at least {MIN_SIZE} tokens, got {profile.size}")
+    if profile.parent_size is not None and profile.parent_size < profile.size:
+        raise ValueError(
+            f"parent_size ({profile.parent_size}) must be at least the size ({profile.size})"
+        )
+
+
 def profile_name(profile: IndexProfile) -> str:
     """The canonical name of ``profile``'s fields (its ``name`` field is ignored)."""
+    _check_sizes(profile)
     if not _PARSER.fullmatch(profile.parser):
         raise ValueError(f"parser {profile.parser!r} can't be named: use [a-z0-9_]+")
     alias = next((a for a, m in EMBED_ALIASES.items() if m == profile.embed_model), None)
@@ -113,6 +133,10 @@ def parse_profile_name(name: str) -> IndexProfile:
 
 
 def make_profile(**fields) -> IndexProfile:
-    """An ``IndexProfile`` from its fields, named canonically."""
+    """An ``IndexProfile`` from its fields, named canonically.
+
+    Raises ``ValueError`` for anything the chunkers would refuse later: a size
+    under 8 tokens, a parent smaller than its children, overlap ≥ size.
+    """
     draft = IndexProfile(name="-", **fields)
     return draft.model_copy(update={"name": profile_name(draft)})

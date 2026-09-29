@@ -8,12 +8,17 @@ from hypothesis import strategies as st
 
 from hal9000.knowledge.chunking import (
     EMBED_ALIASES,
+    FAKE_EMBED_DIMENSIONS,
+    FAKE_EMBED_MODEL,
+    ChunkInput,
+    chunk_document,
     make_profile,
     overlap_tokens,
     parse_profile_name,
     profile_name,
 )
 from hal9000.knowledge.contracts import IndexProfile
+from hal9000.knowledge.tokens import count_tokens, encoding_for_model
 
 
 def test_plan_example_parses_to_its_fields() -> None:
@@ -91,6 +96,8 @@ def test_make_profile_names_itself() -> None:
         "PDFIUM.structure-768.hdr.te3s-1536",
         "pdfium.structure-768.header.te3s-1536",
         "pdfium.structure-768.hdr.te3s-1536.extra",
+        "pdfium.fixed-4.hdr.te3s-1536",  # size below 8 tokens
+        "pdfium.parent_child-256-p128.hdr.te3s-1536",  # parent smaller than its children
     ],
 )
 def test_bad_names_are_rejected(name: str) -> None:
@@ -113,7 +120,7 @@ def test_unnameable_profiles_are_rejected() -> None:
 @st.composite
 def profiles(draw) -> IndexProfile:
     chunker = draw(st.sampled_from(["fixed", "recursive", "structure", "parent_child"]))
-    size = draw(st.integers(1, 5000))
+    size = draw(st.integers(8, 5000))
     overlap = draw(
         st.one_of(
             st.just(0),
@@ -126,7 +133,7 @@ def profiles(draw) -> IndexProfile:
         chunker=chunker,
         size=size,
         overlap=overlap,
-        parent_size=draw(st.integers(1, 5000)) if chunker == "parent_child" else None,
+        parent_size=draw(st.integers(size, 6000)) if chunker == "parent_child" else None,
         header=draw(st.booleans()),
         embed_model=draw(st.sampled_from(sorted(EMBED_ALIASES.values()))),
         dimensions=draw(st.integers(1, 4096)),
@@ -152,3 +159,33 @@ def test_parse_accepts_only_canonical_names(name: str) -> None:
     except ValueError:
         return
     assert profile_name(p) == name
+
+
+@pytest.mark.parametrize(
+    ("fields", "match"),
+    [
+        (dict(chunker="fixed", size=7), "size"),
+        (dict(chunker="parent_child", size=512, parent_size=256), "parent_size"),
+        (dict(chunker="fixed", size=64, overlap=64), "overlap"),
+    ],
+)
+def test_make_profile_rejects_sizes_the_chunkers_would_refuse(fields: dict, match: str) -> None:
+    with pytest.raises(ValueError, match=match):
+        make_profile(parser="pdfium", embed_model=EMBED_ALIASES["te3s"], dimensions=8, **fields)
+
+
+def test_fake_embedder_alias_counts_tokens_like_the_embedding_models() -> None:
+    p = make_profile(
+        parser="pdfium",
+        chunker="structure",
+        size=768,
+        embed_model=FAKE_EMBED_MODEL,
+        dimensions=FAKE_EMBED_DIMENSIONS,
+    )
+    assert p.name == "pdfium.structure-768.hdr.fake-64"
+    assert parse_profile_name(p.name) == p
+    assert encoding_for_model(FAKE_EMBED_MODEL) == "cl100k_base"
+    assert encoding_for_model(EMBED_ALIASES["te3s"]) == "cl100k_base"
+    text = "Überprüfung der Warmwasserbereitung. " * 40
+    (d, *_) = chunk_document(ChunkInput(document_id=1, text=text), p)
+    assert d.tokens == count_tokens(d.text, "cl100k_base") != count_tokens(d.text, "o200k_base")

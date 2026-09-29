@@ -30,7 +30,12 @@ def encoding(name: str = EMBEDDING_ENCODING) -> tiktoken.Encoding:
 
 
 def encoding_for_model(model: str) -> str:
-    """The encoding name for a LiteLLM model string (``openai/text-embedding-3-small``)."""
+    """The encoding name for a LiteLLM model string (``openai/text-embedding-3-small``).
+
+    ``fake/*`` models (the offline test embedder) count like the embedding models.
+    """
+    if model.startswith("fake/"):
+        return EMBEDDING_ENCODING
     name = model.split("/", 1)[-1]
     legacy_gpt4 = name.startswith("gpt-4") and not name.startswith(("gpt-4o", "gpt-4.1"))
     if name.startswith(("text-embedding-", "gpt-3.5")) or legacy_gpt4:

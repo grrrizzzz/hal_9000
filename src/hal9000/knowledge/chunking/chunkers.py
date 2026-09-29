@@ -30,6 +30,7 @@ from typing import get_args
 
 from hal9000.knowledge.chunking.header import build_header
 from hal9000.knowledge.chunking.inputs import ChunkDraft, ChunkInput, Role
+from hal9000.knowledge.chunking.profiles import MIN_SIZE
 from hal9000.knowledge.chunking.text import TextIndex, text_index
 from hal9000.knowledge.chunking.units import Node, build_tree, detect_units
 from hal9000.knowledge.contracts import ChunkerName, IndexProfile
@@ -39,8 +40,6 @@ from hal9000.knowledge.tokens import EMBEDDING_ENCODING, count_tokens, encoding_
 __all__ = ["CHUNKERS", "MIN_SIZE", "chunk", "chunk_document"]
 
 CHUNKERS: tuple[str, ...] = get_args(ChunkerName)
-#: The smallest *N*: one character is at most 4 tokens, so a window always advances.
-MIN_SIZE = 8
 
 Span = tuple[int, int]
 Item = tuple[int, int, int]  # a span and the unit it came from
