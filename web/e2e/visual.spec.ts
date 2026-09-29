@@ -64,7 +64,11 @@ for (const width of [390, 1440]) {
         for (const [name, path] of PAGES) {
           await page.goto(path);
           // (not "networkidle": the job stream stays open) — wait for skeletons to go.
-          await page.waitForFunction(() => !document.querySelector(".animate-pulse"), undefined, { timeout: 20_000 });
+          await page.waitForFunction(
+            () => !!document.querySelector("main h1, main textarea") && !document.querySelector('.animate-pulse, [role="status"] > .animate-spin'),
+            undefined,
+            { timeout: 20_000 },
+          );
           await page.waitForTimeout(400); // charts and fonts settle
           const [sw, cw] = await page.evaluate(() => [document.documentElement.scrollWidth, document.documentElement.clientWidth]);
           expect(sw, `${name} scrolls horizontally at ${width}px`).toBeLessThanOrEqual(cw);

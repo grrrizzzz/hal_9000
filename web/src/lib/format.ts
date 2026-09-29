@@ -52,7 +52,8 @@ export function formatMs(ms: number | null | undefined): string {
 export function formatUsd(v: number | null | undefined): string {
   if (v === null || v === undefined) return "—";
   if (v === 0) return "$0";
-  if (v < 0.01) return `$${v.toFixed(v < 0.0001 ? 6 : 4)}`;
+  if (v < 0.00005) return "<$0.0001";
+  if (v < 0.01) return `$${v.toFixed(v < 0.001 ? 5 : 4)}`;
   return `$${v.toFixed(2)}`;
 }
 
