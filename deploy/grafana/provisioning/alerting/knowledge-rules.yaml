@@ -1,0 +1,195 @@
+# Alert rules for the house knowledge base (plan §9.3). Contact point: Grafana's
+# default unless deploy/grafana/optional/telegram.yaml is provisioned too.
+# Recall is stored as a fraction, so '5 points' is a drop of 0.05 (x100 below).
+apiVersion: 1
+groups:
+- orgId: 1
+  name: knowledge
+  folder: Knowledge
+  interval: 1m
+  rules:
+  - uid: kb-error-rate
+    title: 'Knowledge: error rate over 10%'
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: kb-prometheus
+      model:
+        refId: A
+        expr: sum(rate(kb_questions_total{outcome="error"}[5m])) / sum(rate(kb_questions_total[5m]))
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: dropNN
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0.1
+    noDataState: OK
+    execErrState: Error
+    for: 15m
+    annotations:
+      summary: More than 10% of questions ended in an error for 15 minutes.
+    labels:
+      service: hal-kb
+    isPaused: false
+  - uid: kb-latency-p95
+    title: 'Knowledge: answer p95 over 15 s'
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 900
+        to: 0
+      datasourceUid: kb-prometheus
+      model:
+        refId: A
+        expr: histogram_quantile(0.95, sum by (le) (rate(kb_answer_seconds_bucket[10m])))
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: dropNN
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 15
+    noDataState: OK
+    execErrState: Error
+    for: 30m
+    annotations:
+      summary: End-to-end answer latency p95 has been over 15 s for 30 minutes.
+    labels:
+      service: hal-kb
+    isPaused: false
+  - uid: kb-month-spend
+    title: 'Knowledge: month-to-date spend over 80% of the cap'
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: kb-prometheus
+      model:
+        refId: A
+        expr: kb_month_spend_usd / kb_month_cap_usd
+        instant: true
+        range: false
+        intervalMs: 1000
+        maxDataPoints: 43200
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: dropNN
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 0.8
+    noDataState: OK
+    execErrState: Error
+    for: 1m
+    annotations:
+      summary: The knowledge chat has spent over 80% of KB_MONTHLY_CAP_USD this month; at 100% it becomes
+        retrieval-only.
+    labels:
+      service: hal-kb
+    isPaused: false
+  - uid: kb-regression-drop
+    title: 'Knowledge: regression recall down after an ingestion'
+    condition: C
+    data:
+    - refId: A
+      relativeTimeRange:
+        from: 600
+        to: 0
+      datasourceUid: kb-sqlite
+      model:
+        refId: A
+        queryText: "WITH ranked AS (\n  SELECT profile_id, recall_2k, trigger,\n         ROW_NUMBER()\
+          \ OVER (PARTITION BY profile_id ORDER BY at DESC, id DESC) AS n\n  FROM regression_runs\n  WHERE\
+          \ recall_2k IS NOT NULL\n)\nSELECT COALESCE(MAX(100.0 * (prev.recall_2k - last.recall_2k)),\
+          \ 0) AS drop_points\nFROM ranked AS last\nJOIN ranked AS prev ON prev.profile_id IS last.profile_id\
+          \ AND prev.n = 2\nWHERE last.n = 1 AND last.trigger = 'ingest'"
+        rawQueryText: "WITH ranked AS (\n  SELECT profile_id, recall_2k, trigger,\n         ROW_NUMBER()\
+          \ OVER (PARTITION BY profile_id ORDER BY at DESC, id DESC) AS n\n  FROM regression_runs\n  WHERE\
+          \ recall_2k IS NOT NULL\n)\nSELECT COALESCE(MAX(100.0 * (prev.recall_2k - last.recall_2k)),\
+          \ 0) AS drop_points\nFROM ranked AS last\nJOIN ranked AS prev ON prev.profile_id IS last.profile_id\
+          \ AND prev.n = 2\nWHERE last.n = 1 AND last.trigger = 'ingest'"
+        queryType: table
+        timeColumns: []
+    - refId: B
+      datasourceUid: __expr__
+      model:
+        refId: B
+        type: reduce
+        expression: A
+        reducer: last
+        settings:
+          mode: dropNN
+    - refId: C
+      datasourceUid: __expr__
+      model:
+        refId: C
+        type: threshold
+        expression: B
+        conditions:
+        - evaluator:
+            type: gt
+            params:
+            - 5
+    noDataState: OK
+    execErrState: Error
+    for: 0s
+    annotations:
+      summary: The post-ingest regression recall @ 2k fell by more than 5 points against the previous
+        run of the same profile.
+    labels:
+      service: hal-kb
+    isPaused: false

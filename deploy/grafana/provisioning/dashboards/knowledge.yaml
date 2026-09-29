@@ -1,0 +1,15 @@
+# The three knowledge dashboards (plan §9.3), loaded from deploy/grafana/dashboards.
+apiVersion: 1
+
+providers:
+  - name: knowledge
+    orgId: 1
+    folder: Knowledge
+    folderUid: kb
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 60
+    options:
+      path: /etc/grafana/dashboards
+      foldersFromFilesStructure: false
