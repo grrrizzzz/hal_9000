@@ -1,0 +1,822 @@
+{
+  "solar": {
+    "tags": [
+      "source",
+      "analysis",
+      "memory_read",
+      "memory_write",
+      "notify",
+      "delegate",
+      "report"
+    ],
+    "tools": [
+      {
+        "name": "get_home_energy",
+        "function": "hal9000.solar.tools.solar_tools.get_home_energy",
+        "terminal": false,
+        "description": "Read today's solar production, grid import and grid export from Home Assistant.\n\nCall this first. It returns production so far today (kWh), the peak hour,\ngrid import/export, household use, and data-quality flags. If\n``sensor_fault`` is true the solar sensor is reading impossibly low: report\nthe sensor problem and do not run triage. Missing data is never zero\nproduction.\n\nArgs:\n    date: The run date, YYYY-MM-DD (given in your briefing).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "date": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "date"
+          ]
+        }
+      },
+      {
+        "name": "get_weather",
+        "function": "hal9000.solar.tools.solar_tools.get_weather",
+        "terminal": false,
+        "description": "Read today's sunlight on the panels and cloud cover from Open-Meteo.\n\nCall this second. It returns insolation on the plane of the array\n(kWh/m2), what a clear sky would have given, and a sky description. If it\nfails, performance can't be judged: say so in the report.\n\nArgs:\n    date: The run date, YYYY-MM-DD.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "date": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "date"
+          ]
+        }
+      },
+      {
+        "name": "assess_performance",
+        "function": "hal9000.solar.tools.solar_tools.assess_performance",
+        "terminal": false,
+        "description": "Compare today's production with what today's weather should have produced.\n\nNeeds get_home_energy and get_weather first. Returns expected kWh, the\nperformance percentage and a band: normal, low, severe, zero, unassessed,\nsensor_fault or no_data. The band decides what happens next.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "compute_savings",
+        "function": "hal9000.solar.tools.solar_tools.compute_savings",
+        "terminal": false,
+        "description": "Value today's production at the time-of-use rate in force for each hour.\n\nNever compute savings yourself. Returns the total in dollars and a split by\nTOU period. If rates aren't configured for this date you get an error that\nsays so: deliver the report without savings and mention it.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "check_net_position",
+        "function": "hal9000.solar.tools.solar_tools.check_net_position",
+        "terminal": false,
+        "description": "Check that the household is still a net importer in every TOU period.\n\nUses yesterday's complete day and the last 30 days. The savings model\ndepends on every period staying net import over a billing cycle. If a\nperiod is trending toward export, mention it as a warning.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "get_hourly_anomaly_profile",
+        "function": "hal9000.solar.tools.solar_tools.get_hourly_anomaly_profile",
+        "terminal": false,
+        "description": "Show where in the day production departed from expectation.\n\nCall this when the band is low, severe or zero. Returns a profile (late\nstart, early cutoff, midday dropout, uniform shortfall, flat zero, or\nnormal) and actual vs expected kWh per hour.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "get_recent_history",
+        "function": "hal9000.solar.tools.solar_tools.get_recent_history",
+        "terminal": false,
+        "description": "Recent nightly records, to tell a one-day blip from a trend.\n\nArgs:\n    days: How many days back to look (1-60). Default 7.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "days": {
+              "type": "integer"
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "run_fault_triage",
+        "function": "hal9000.solar.tools.solar_tools.run_fault_triage",
+        "terminal": false,
+        "description": "Ask the fault-triage specialist to find the cause of a shortfall.\n\nCall this only when the band is severe or zero, or low with no explanation\nfrom the anomaly profile and history. The specialist already sees\neverything you have fetched, so just state why you are calling. It returns\na verdict (inverter_suspected, weather_explained, shading,\ndegradation_trend, sensor_fault or inconclusive) and figures you may speak.\nInconclusive is an acceptable answer: report the shortfall without a cause.\n\nArgs:\n    reason: One sentence on why triage is needed.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "reason"
+          ]
+        }
+      },
+      {
+        "name": "check_alert_state",
+        "function": "hal9000.solar.tools.solar_tools.check_alert_state",
+        "terminal": false,
+        "description": "Look up an alert before raising it: is it already open, and at what severity?\n\nArgs:\n    alert_key: A short stable key such as \"production_low\", \"inverter_suspected\",\n        \"sensor_fault\" or \"net_position\".",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "alert_key": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "alert_key"
+          ]
+        }
+      },
+      {
+        "name": "record_alert",
+        "function": "hal9000.solar.tools.solar_tools.record_alert",
+        "terminal": false,
+        "description": "Raise an alert. New or escalated alerts are sent to Telegram; repeats are not.\n\nNumbers in the text must come from tool results. At most 3 Telegram\nmessages go out per run.\n\nArgs:\n    alert_key: Stable key (same key tomorrow means the same problem).\n    severity: \"info\", \"warn\" or \"critical\".\n    text: One or two sentences for the household.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "alert_key": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "alert_key",
+            "severity",
+            "text"
+          ]
+        }
+      },
+      {
+        "name": "send_telegram",
+        "function": "hal9000.solar.tools.solar_tools.send_telegram",
+        "terminal": false,
+        "description": "Send a short Telegram message that is not an alert. Use sparingly.\n\nNumbers must come from tool results. At most 3 Telegram messages per run.\n\nArgs:\n    message: The text to send.\n    severity: \"info\", \"warn\" or \"critical\".",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string"
+            },
+            "severity": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "message"
+          ]
+        }
+      },
+      {
+        "name": "write_nightly_record",
+        "function": "hal9000.solar.tools.solar_tools.write_nightly_record",
+        "terminal": false,
+        "description": "Save tonight's record so tomorrow's run has trend context.\n\nTakes no arguments: the record is built from tool results. Call it once,\nbefore deliver_report.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "deliver_report",
+        "function": "hal9000.solar.tools.solar_tools.deliver_report",
+        "terminal": false,
+        "description": "Deliver the spoken evening report. This finishes the run.\n\nKeep it under about 45 seconds of speech (four or five short sentences).\nSpeak every number exactly as a tool returned it, for example \"8.2\nkilowatt-hours\" or \"$1.37\". If a number isn't backed by a tool result the\nreport is rejected and you get one chance to correct it; a second rejection\nsends the standard template instead.\n\nArgs:\n    narrative: The report text, as it should be spoken.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "narrative": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "narrative"
+          ]
+        }
+      }
+    ],
+    "model_tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_home_energy",
+          "description": "Read today's solar production, grid import and grid export from Home Assistant.\n\nCall this first. It returns production so far today (kWh), the peak hour,\ngrid import/export, household use, and data-quality flags. If\n``sensor_fault`` is true the solar sensor is reading impossibly low: report\nthe sensor problem and do not run triage. Missing data is never zero\nproduction.\n\nArgs:\n    date: The run date, YYYY-MM-DD (given in your briefing).",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "date": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "date"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "get_weather",
+          "description": "Read today's sunlight on the panels and cloud cover from Open-Meteo.\n\nCall this second. It returns insolation on the plane of the array\n(kWh/m2), what a clear sky would have given, and a sky description. If it\nfails, performance can't be judged: say so in the report.\n\nArgs:\n    date: The run date, YYYY-MM-DD.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "date": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "date"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "assess_performance",
+          "description": "Compare today's production with what today's weather should have produced.\n\nNeeds get_home_energy and get_weather first. Returns expected kWh, the\nperformance percentage and a band: normal, low, severe, zero, unassessed,\nsensor_fault or no_data. The band decides what happens next.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "compute_savings",
+          "description": "Value today's production at the time-of-use rate in force for each hour.\n\nNever compute savings yourself. Returns the total in dollars and a split by\nTOU period. If rates aren't configured for this date you get an error that\nsays so: deliver the report without savings and mention it.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "check_net_position",
+          "description": "Check that the household is still a net importer in every TOU period.\n\nUses yesterday's complete day and the last 30 days. The savings model\ndepends on every period staying net import over a billing cycle. If a\nperiod is trending toward export, mention it as a warning.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "get_hourly_anomaly_profile",
+          "description": "Show where in the day production departed from expectation.\n\nCall this when the band is low, severe or zero. Returns a profile (late\nstart, early cutoff, midday dropout, uniform shortfall, flat zero, or\nnormal) and actual vs expected kWh per hour.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "get_recent_history",
+          "description": "Recent nightly records, to tell a one-day blip from a trend.\n\nArgs:\n    days: How many days back to look (1-60). Default 7.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "days": {
+                "type": "integer"
+              }
+            },
+            "required": []
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "run_fault_triage",
+          "description": "Ask the fault-triage specialist to find the cause of a shortfall.\n\nCall this only when the band is severe or zero, or low with no explanation\nfrom the anomaly profile and history. The specialist already sees\neverything you have fetched, so just state why you are calling. It returns\na verdict (inverter_suspected, weather_explained, shading,\ndegradation_trend, sensor_fault or inconclusive) and figures you may speak.\nInconclusive is an acceptable answer: report the shortfall without a cause.\n\nArgs:\n    reason: One sentence on why triage is needed.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "reason": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "reason"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "check_alert_state",
+          "description": "Look up an alert before raising it: is it already open, and at what severity?\n\nArgs:\n    alert_key: A short stable key such as \"production_low\", \"inverter_suspected\",\n        \"sensor_fault\" or \"net_position\".",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "alert_key": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "alert_key"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "record_alert",
+          "description": "Raise an alert. New or escalated alerts are sent to Telegram; repeats are not.\n\nNumbers in the text must come from tool results. At most 3 Telegram\nmessages go out per run.\n\nArgs:\n    alert_key: Stable key (same key tomorrow means the same problem).\n    severity: \"info\", \"warn\" or \"critical\".\n    text: One or two sentences for the household.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "alert_key": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "alert_key",
+              "severity",
+              "text"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "send_telegram",
+          "description": "Send a short Telegram message that is not an alert. Use sparingly.\n\nNumbers must come from tool results. At most 3 Telegram messages per run.\n\nArgs:\n    message: The text to send.\n    severity: \"info\", \"warn\" or \"critical\".",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "message": {
+                "type": "string"
+              },
+              "severity": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "message"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "write_nightly_record",
+          "description": "Save tonight's record so tomorrow's run has trend context.\n\nTakes no arguments: the record is built from tool results. Call it once,\nbefore deliver_report.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "deliver_report",
+          "description": "Deliver the spoken evening report. This finishes the run.\n\nKeep it under about 45 seconds of speech (four or five short sentences).\nSpeak every number exactly as a tool returned it, for example \"8.2\nkilowatt-hours\" or \"$1.37\". If a number isn't backed by a tool result the\nreport is rejected and you get one chance to correct it; a second rejection\nsends the standard template instead.\n\nArgs:\n    narrative: The report text, as it should be spoken.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "narrative": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "narrative"
+            ]
+          }
+        }
+      }
+    ]
+  },
+  "triage": {
+    "tags": [
+      "triage",
+      "telemetry",
+      "weather",
+      "memory_read",
+      "verdict",
+      "inverter_diagnostics"
+    ],
+    "tools": [
+      {
+        "name": "get_recent_history",
+        "function": "hal9000.solar.tools.solar_tools.get_recent_history",
+        "terminal": false,
+        "description": "Recent nightly records, to tell a one-day blip from a trend.\n\nArgs:\n    days: How many days back to look (1-60). Default 7.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "days": {
+              "type": "integer"
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "read_handover",
+        "function": "hal9000.solar.tools.triage_tools.read_handover",
+        "terminal": false,
+        "description": "Start here: what the solar agent has already established, and why you were called.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "get_intraday_curve",
+        "function": "hal9000.solar.tools.triage_tools.get_intraday_curve",
+        "terminal": false,
+        "description": "Today's solar power through the day, to spot dropouts, cutoffs or flat-lining.\n\nArgs:\n    resolution_min: 5, 15 or 60 minutes per point.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "resolution_min": {
+              "type": "integer"
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "get_sensor_history",
+        "function": "hal9000.solar.tools.triage_tools.get_sensor_history",
+        "terminal": false,
+        "description": "Daily totals for one of the energy sensors over recent days (from Home Assistant).\n\nArgs:\n    sensor: \"solar\", \"grid_import\" or \"grid_export\".\n    days: How many days back (1-60).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "sensor": {
+              "type": "string"
+            },
+            "days": {
+              "type": "integer"
+            }
+          },
+          "required": [
+            "sensor"
+          ]
+        }
+      },
+      {
+        "name": "get_irradiance_curve",
+        "function": "hal9000.solar.tools.triage_tools.get_irradiance_curve",
+        "terminal": false,
+        "description": "Hour-by-hour sunlight on the panels today versus a clear sky, with cloud cover.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "compare_to_clearsky",
+        "function": "hal9000.solar.tools.triage_tools.compare_to_clearsky",
+        "terminal": false,
+        "description": "Actual production per hour against what a clear sky would have given.\n\nHours where actual matches clear-sky but earlier or later hours are near\nzero point to shading or an inverter cutoff; uniformly low hours with\ncloud point to weather.",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      },
+      {
+        "name": "find_similar_days",
+        "function": "hal9000.solar.tools.triage_tools.find_similar_days",
+        "terminal": false,
+        "description": "Past days with similar sunlight, and how the array did on them.\n\nIf similar days produced far more, today's shortfall is not the weather.\n\nArgs:\n    n: How many similar days to return (1-10).",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "n": {
+              "type": "integer"
+            }
+          },
+          "required": []
+        }
+      },
+      {
+        "name": "submit_verdict",
+        "function": "hal9000.solar.tools.triage_tools.submit_verdict",
+        "terminal": false,
+        "description": "Finish triage with your conclusion. This ends your investigation.\n\nChoose \"inconclusive\" rather than guessing. Every evidence item names the\ntool it came from. ``figure_keys`` lists figures the parent may speak; only\nkeys your tools actually returned are accepted.",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "verdict": {
+              "type": "string",
+              "enum": [
+                "inverter_suspected",
+                "weather_explained",
+                "shading",
+                "degradation_trend",
+                "sensor_fault",
+                "inconclusive"
+              ],
+              "description": "Your conclusion about the cause."
+            },
+            "confidence": {
+              "type": "string",
+              "enum": [
+                "high",
+                "medium",
+                "low"
+              ]
+            },
+            "evidence": {
+              "type": "array",
+              "description": "At least one observation, each citing the tool it came from.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "observation": {
+                    "type": "string"
+                  },
+                  "source_tool": {
+                    "type": "string"
+                  },
+                  "supports": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "observation",
+                  "source_tool",
+                  "supports"
+                ]
+              }
+            },
+            "recommended_alert": {
+              "type": "object",
+              "properties": {
+                "severity": {
+                  "type": "string",
+                  "enum": [
+                    "info",
+                    "warn",
+                    "critical"
+                  ]
+                },
+                "text": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "severity",
+                "text"
+              ]
+            },
+            "figure_keys": {
+              "type": "array",
+              "description": "Keys of figures (from tool results) the parent may speak. Only keys that tools actually returned are accepted.",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "verdict",
+            "confidence",
+            "evidence",
+            "recommended_alert"
+          ]
+        }
+      }
+    ],
+    "model_tools": [
+      {
+        "type": "function",
+        "function": {
+          "name": "get_recent_history",
+          "description": "Recent nightly records, to tell a one-day blip from a trend.\n\nArgs:\n    days: How many days back to look (1-60). Default 7.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "days": {
+                "type": "integer"
+              }
+            },
+            "required": []
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "read_handover",
+          "description": "Start here: what the solar agent has already established, and why you were called.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "get_intraday_curve",
+          "description": "Today's solar power through the day, to spot dropouts, cutoffs or flat-lining.\n\nArgs:\n    resolution_min: 5, 15 or 60 minutes per point.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "resolution_min": {
+                "type": "integer"
+              }
+            },
+            "required": []
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "get_sensor_history",
+          "description": "Daily totals for one of the energy sensors over recent days (from Home Assistant).\n\nArgs:\n    sensor: \"solar\", \"grid_import\" or \"grid_export\".\n    days: How many days back (1-60).",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "sensor": {
+                "type": "string"
+              },
+              "days": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "sensor"
+            ]
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "get_irradiance_curve",
+          "description": "Hour-by-hour sunlight on the panels today versus a clear sky, with cloud cover.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "compare_to_clearsky",
+          "description": "Actual production per hour against what a clear sky would have given.\n\nHours where actual matches clear-sky but earlier or later hours are near\nzero point to shading or an inverter cutoff; uniformly low hours with\ncloud point to weather.",
+          "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "find_similar_days",
+          "description": "Past days with similar sunlight, and how the array did on them.\n\nIf similar days produced far more, today's shortfall is not the weather.\n\nArgs:\n    n: How many similar days to return (1-10).",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer"
+              }
+            },
+            "required": []
+          }
+        }
+      },
+      {
+        "type": "function",
+        "function": {
+          "name": "submit_verdict",
+          "description": "Finish triage with your conclusion. This ends your investigation.\n\nChoose \"inconclusive\" rather than guessing. Every evidence item names the\ntool it came from. ``figure_keys`` lists figures the parent may speak; only\nkeys your tools actually returned are accepted.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "verdict": {
+                "type": "string",
+                "enum": [
+                  "inverter_suspected",
+                  "weather_explained",
+                  "shading",
+                  "degradation_trend",
+                  "sensor_fault",
+                  "inconclusive"
+                ],
+                "description": "Your conclusion about the cause."
+              },
+              "confidence": {
+                "type": "string",
+                "enum": [
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "evidence": {
+                "type": "array",
+                "description": "At least one observation, each citing the tool it came from.",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "observation": {
+                      "type": "string"
+                    },
+                    "source_tool": {
+                      "type": "string"
+                    },
+                    "supports": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "observation",
+                    "source_tool",
+                    "supports"
+                  ]
+                }
+              },
+              "recommended_alert": {
+                "type": "object",
+                "properties": {
+                  "severity": {
+                    "type": "string",
+                    "enum": [
+                      "info",
+                      "warn",
+                      "critical"
+                    ]
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "severity",
+                  "text"
+                ]
+              },
+              "figure_keys": {
+                "type": "array",
+                "description": "Keys of figures (from tool results) the parent may speak. Only keys that tools actually returned are accepted.",
+                "items": {
+                  "type": "string"
+                }
+              }
+            },
+            "required": [
+              "verdict",
+              "confidence",
+              "evidence",
+              "recommended_alert"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

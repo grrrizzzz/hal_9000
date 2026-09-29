@@ -15,7 +15,7 @@ module                  commands                            owner
 ``cli/serve.py``        ``serve``                           KWP6
 ``cli/ask.py``          ``ask``                             KWP6
 ``cli/ops.py``          ``profile list|activate``,          KWP10
-                        ``backup``, ``stats``
+                        ``backup``, ``restore``, ``stats``
 ======================  ==================================  ======
 
 Every module exposes ``run(args) -> int``; ``args.kb_command`` names the
@@ -153,7 +153,19 @@ def register(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     activate.add_argument("name", metavar="NAME")
 
     backup = _command(cmds, "backup", "ops", "online backup of knowledge.db and files", "backup")
-    backup.add_argument("--to", metavar="DIR")
+    backup.add_argument("--to", metavar="DIR", help="parent folder (default: data/backups)")
+    restore = _command(
+        cmds, "restore", "ops", "restore a backup into an empty data directory", "restore"
+    )
+    restore.add_argument("source", metavar="FROM", help="a folder written by `kb backup`")
+    restore.add_argument(
+        "--into", metavar="DIR", help="the data directory to restore into (default: KB_DATA_DIR)"
+    )
+    restore.add_argument(
+        "--force",
+        action="store_true",
+        help="replace an existing library (it is moved aside, not deleted)",
+    )
     _command(cmds, "stats", "ops", "library and index statistics", "stats")
     return kb
 
