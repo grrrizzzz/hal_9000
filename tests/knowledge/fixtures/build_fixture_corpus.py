@@ -29,6 +29,15 @@ Files:
   invoice number), a 2-page roofing proposal whose second page has a
   "Roofing Services Overview" heading but no letterhead, and a pest-control
   completion notice.
+- ``mixed_bundle.pdf``: 22 pages and 10 documents in the shapes a real closing
+  bundle takes: a 2-page form numbered "(FORM PAGE 1 OF 2)"; a 4-page
+  inspection whose letterhead line ends in "Page k of 4", with "Moderate" and
+  "Recommendation" labels that also sit at a fixed bottom position; an invoice
+  and two estimates from one vendor with "Invoice #… Page k of N" footers; two
+  pest reports numbered only by a bare "k of N" at the end of a form row; a
+  completion notice with a long title; a letter-style invoice whose top lines
+  are a letterhead (address, licence, phone, date); and an invoice whose
+  contact block is at the bottom. A DocuSign line runs along pp. 3-17.
 - ``heat_pump_guide.docx``: a title and three top-level headings.
 - ``irrigation_notes.html``: a title and three second-level sections, plus
   script and style that must not leak into the text.
@@ -427,6 +436,157 @@ def draw_unnumbered(canvas) -> None:
         canvas.showPage()
 
 
+MIXED_STARTS = (1, 3, 7, 10, 12, 14, 18, 19, 21, 22)
+MIXED_TYPES = (
+    "disclosure_form", "inspection_report", "invoice", "estimate", "estimate",
+    "pest_report", "completion_notice", "pest_report", "invoice", "invoice",
+)  # fmt: skip
+MIXED_ENVELOPE = "Docusign Envelope ID: 3C9A51E2-6B7D-4F80-9A1B-2C3D4E5F6A7B"
+MIXED_WDO_LABELS = "BLDG NO. STREET CITY ZIP INSPECTION DATE NUMBER OF PAGES"
+_OSPREY = ("Osprey Plumbing & Drain", "License #000321 | Port Alder, CA 90000")
+
+
+def _lines_page(canvas, top: list[str], bottom: list[str] = ()) -> None:
+    """Draw ``top`` from the top down, then ``bottom`` upward from the foot (drawn last)."""
+    page = _Page(canvas, top=750)
+    for text in top:
+        page.line(text, lead=14)
+    canvas.setFont(BODY_FONT, 8)
+    for index, text in enumerate(bottom):  # in reading order, so the stream order matches
+        canvas.drawString(LEFT, 28 + 12 * (len(bottom) - 1 - index), text)
+    canvas.showPage()
+
+
+def _mixed_pages() -> list[tuple[list[str], list[str]]]:
+    env = [MIXED_ENVELOPE]
+    pages: list[tuple[list[str], list[str]]] = []
+    # D1: a two-page disclosure form
+    for k in (1, 2):
+        pages.append(
+            (
+                [
+                    "RECEIPT FOR REPORTS",
+                    f"(FORM RR PAGE {k} OF 2)",
+                    "The buyer acknowledges receipt of the reports listed below.",
+                    *(f"Report line {k}.{n}: received and reviewed." for n in range(1, 5)),
+                ],
+                ["Form RR, a fictional disclosure form"],
+            )
+        )
+    # D2: a four-page inspection, letterhead line carries the page number
+    for k in range(1, 5):
+        top = [
+            f"Harbor Point Home Inspections Page {k} of 4",
+            "(555) 010-0300",
+            "office@harborpoint.example",
+        ]
+        if k == 1:
+            top.append("PROPERTY INSPECTION REPORT")
+        body = [
+            f"{k}.1 Finding about the roof, part {k}",
+            "Moderate",
+            f"The flashing at corner {k} is loose.",
+            "Recommendation",
+            "Have a roofer reseal it.",
+            f"{k}.2 Finding about the gutters, part {k}",
+            "Moderate",
+            f"Gutter run {k} sags.",
+            "Recommendation",
+            "Rehang the gutter.",
+        ]
+        pages.append((top + body, env))
+    # D3-D5: one vendor's invoice and two estimates, numbered in the footer
+    for kind, number, count, date_line in (
+        ("INVOICE", "40010001", 3, "May 2, 2025"),
+        ("ESTIMATE", "40010002", 2, "May 2, 2025"),
+        ("ESTIMATE", "40010003", 2, "May 2, 2025"),
+    ):
+        for k in range(1, count + 1):
+            top = [kind, number, f"{kind} DATE", date_line, *_OSPREY] if k == 1 else []
+            top += [f"{kind.title()} line {k}.{n}: pipe work item {n}" for n in range(1, 4)]
+            pages.append((top, [f"{kind.title()} #{number} Page {k} of {count}", *env]))
+    # D6: a four-page pest report, numbered only by "k of 4" in a form row
+    values = "12 GULL LN PORT ALDER 90000 04/02/2025"
+    for k in range(1, 5):
+        if k == 1:
+            top = [
+                "Inspector / Licence No. 000456",
+                "Sandpiper Pest Control, Inc.",
+                "WOOD DESTROYING PESTS AND ORGANISMS INSPECTION REPORT",
+                "Findings are listed by section below.",
+            ]
+            bottom = [MIXED_WDO_LABELS, f"{values} {k} of 4", *env]
+        else:
+            top = [MIXED_WDO_LABELS, f"{values} {k} of 4", f"Section {k}: subarea findings"]
+            bottom = ["Form: WDO-7 -- Report #: 70001", *env]
+        pages.append((top + [f"Item {k}A: evidence of drywood termites at the eave."], bottom))
+    # D7: a completion notice with a long title
+    pages.append(
+        (
+            [
+                "Standardized Notice of Work Completed; Items Pending",
+                "Report #: 70001",
+                "Items 1A and 2A were completed on April 20, 2025.",
+            ],
+            ["Sandpiper Pest Control, Inc.", "(555) 010-0400 - Phone"],
+        )
+    )
+    # D8: a two-page reinspection, "k of 2" in the form row
+    values = "12 GULL LN PORT ALDER 90000 05/01/2025"
+    for k in (1, 2):
+        top = (
+            [
+                "Inspector / Licence No. 000456",
+                "Sandpiper Pest Control, Inc.",
+                "WOOD DESTROYING PESTS AND ORGANISMS REINSPECTION REPORT",
+            ]
+            if k == 1
+            else [MIXED_WDO_LABELS, f"{values} {k} of 2"]
+        )
+        bottom = [MIXED_WDO_LABELS, f"{values} {k} of 2"] if k == 1 else ["Report #: 70002"]
+        pages.append((top + [f"Reinspection note {k}: no further activity."], bottom))
+    # D9: a letter-style invoice: the top lines are a letterhead
+    pages.append(
+        (
+            [
+                "Marisol Vega Finish Carpentry",
+                "88 Kelp Ave.",
+                "Port Alder, CA. 90000",
+                "Lic # 000111",
+                "(555) 010-0444",
+                "June 3, 2025",
+                "Re: 12 Gull Ln",
+                "Repaired the eave boards noted in the pest report.",
+                "Total: $900",
+            ],
+            [],
+        )
+    )
+    # D10: an invoice whose contact block is at the bottom
+    pages.append(
+        (
+            [
+                "Pay online",
+                "ITEM QTY AMOUNT",
+                "Thermostat, programmable 1 $180.00",
+                "Invoice # GA-17-2",
+                "Total: $180.00",
+            ],
+            [
+                "Gull Air Heating",
+                "Questions? Call (555) 010-0555 billing@gullair.example",
+                "License #000222",
+            ],
+        )
+    )
+    return pages
+
+
+def draw_mixed(canvas) -> None:
+    for top, bottom in _mixed_pages():
+        _lines_page(canvas, top, bottom)
+
+
 def _pdf(path: Path, *drawers) -> None:
     from reportlab.pdfgen import canvas as rl_canvas
 
@@ -610,6 +770,7 @@ FILE_NAMES = (
     "invoice.pdf",
     "bundle.pdf",
     "unnumbered_bundle.pdf",
+    "mixed_bundle.pdf",
     "heat_pump_guide.docx",
     "irrigation_notes.html",
     "garage_door.md",
@@ -625,6 +786,7 @@ def build(out_dir: Path = FILES_DIR) -> list[Path]:
     _pdf(out_dir / "invoice.pdf", draw_invoice)
     _pdf(out_dir / "bundle.pdf", draw_inspection, draw_estimate, draw_invoice)
     _pdf(out_dir / "unnumbered_bundle.pdf", draw_unnumbered)
+    _pdf(out_dir / "mixed_bundle.pdf", draw_mixed)
     write_docx(out_dir / "heat_pump_guide.docx")
     (out_dir / "irrigation_notes.html").write_text(HTML_SOURCE, encoding="utf-8")
     (out_dir / "garage_door.md").write_text(MARKDOWN_SOURCE, encoding="utf-8")

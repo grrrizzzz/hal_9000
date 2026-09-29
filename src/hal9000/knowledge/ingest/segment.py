@@ -72,7 +72,22 @@ Generate = Callable[[Prompt, str], str]
 
 # ------------------------------------------------------------------ signals
 _MARKER = re.compile(r"\bpage\s*(\d{1,4})\s*(?:of|/)\s*(\d{1,4})\b", re.IGNORECASE)
+# "... 04/02/2025 2 of 7" closing a line near an edge: a form's "number of pages" cell
+_BARE_MARKER = re.compile(r"(?<![\w/.,-])(\d{1,3})\s+of\s+(\d{1,3})\W{0,2}$", re.IGNORECASE)
 _TOP_LINES = 6
+_CONTACT_TOP = 8
+_CONTACT_BOTTOM = 5
+_PHONE = re.compile(r"(?<!\d)(?:\+?1[ .-]?)?\(?(\d{3})\)?[ .-]?(\d{3})[ .-](\d{4})(?!\d)")
+_LICENCE = re.compile(
+    r"(?i)\b(?:lic(?:ense|ence)?\.?\s*(?:no\.?|number|#)|lic\s*#|licen[cs]e\s+[a-z]?\d)"
+)
+_WEB = re.compile(r"(?i)[\w.+-]+@[\w-]+\.[\w.]+|\bwww\.[\w-]+\.\w+|https?://")
+_CITY_ZIP = re.compile(r"\b[A-Z][A-Za-z .]+,\s*[A-Z]{2}\.?\s+\d{5}(?:-\d{4})?\b")
+# form field-label rows ("STREET CITY ZIP  DATE  NUMBER OF PAGES") are not company names
+_FIELD_LABELS = re.compile(
+    r"(?i)\b(date|number|no\.|street|city|zip|pages?|ordered|inspected by|description|qty|"
+    r"price|amount|total|customer|address)\b"
+)
 
 #: Form headers: phrase (upper case, letters and spaces) → doc_type. Longest first.
 _FORMS: tuple[tuple[str, str], ...] = tuple(
@@ -175,7 +190,7 @@ def _form(line: str) -> tuple[str, str] | None:
     if not words or len(words) > 60:
         return None
     for phrase, doc_type in _FORMS:
-        if re.search(rf"\b{phrase}\b", words) and len(words) <= len(phrase) + 25:
+        if re.search(rf"\b{phrase}\b", words) and len(words) <= len(phrase) + 30:
             return phrase, doc_type
     return None
 
@@ -188,8 +203,10 @@ def _vendor(line: str, position: int) -> str | None:
     counts only on the first two lines, so a heading such as "Plumbing Services
     Overview" further down never looks like a new letterhead.
     """
-    first = line.split("|")[0].strip(" -–:\t")
+    first = _MARKER.sub("", line.split("|")[0]).strip(" -–:\t")
     if not first or len(first) > 70 or not _COMPANY.search(first):
+        return None
+    if _FIELD_LABELS.search(first):
         return None
     if position >= _LETTERHEAD_LINES and not _LEGAL.search(first):
         return None
@@ -216,6 +233,12 @@ class PageSignals:
     vendor: str | None = None
     references: tuple[tuple[str, str], ...] = ()
     first_line: str = ""
+    #: phone numbers in the top and bottom lines: a letterhead's or footer's contact block
+    contacts: frozenset[str] = frozenset()
+    #: the top lines look like a business letterhead (≥ 2 of phone, licence, web, City, ST ZIP)
+    letterhead: bool = False
+    #: the first date in the top lines (a letter's or form's own date)
+    top_date: date | None = None
 
 
 def page_signals(page: ParsedPage) -> PageSignals:
@@ -228,6 +251,18 @@ def page_signals(page: ParsedPage) -> PageSignals:
         number, total = int(match.group(1)), int(match.group(2))
         if 1 <= number <= total:
             marker = (number, total)  # the last one wins: footers come last
+    if marker is None:
+        for line in [*lines[:_TOP_LINES], *lines[-_CONTACT_BOTTOM:]]:
+            bare = _BARE_MARKER.search(line)
+            if bare and 1 <= int(bare.group(1)) <= int(bare.group(2)):
+                marker = (int(bare.group(1)), int(bare.group(2)))
+    head = lines[:_CONTACT_TOP]
+    edges = [*head, *lines[-_CONTACT_BOTTOM:]]
+    contacts = frozenset("".join(m.groups()) for line in edges for m in _PHONE.finditer(line))
+    head_text = "\n".join(head)
+    letterhead = (
+        sum(bool(pattern.search(head_text)) for pattern in (_PHONE, _LICENCE, _WEB, _CITY_ZIP)) >= 2
+    )
     top = [repair_letter_spacing(line.lstrip("#").strip()) for line in lines[:_TOP_LINES]]
     form_line = next((line for line in top if _form(line)), None)
     form = _form(form_line) if form_line else None
@@ -250,6 +285,9 @@ def page_signals(page: ParsedPage) -> PageSignals:
         vendor=vendor,
         references=references,
         first_line=first_line,
+        contacts=contacts,
+        letterhead=letterhead,
+        top_date=find_date("\n".join(lines[:_TOP_LINES])),
     )
 
 
@@ -273,12 +311,16 @@ class _Current:
     form: str | None = None
     vendor: str | None = None
     references: dict[str, str] = field(default_factory=dict)
+    contacts: set[str] = field(default_factory=set)
+    top_date: date | None = None
 
     def absorb(self, signals: PageSignals) -> None:
         if signals.marker:
             self.marker = signals.marker
         self.form = self.form or signals.form
         self.vendor = self.vendor or signals.vendor
+        self.contacts |= signals.contacts
+        self.top_date = self.top_date or signals.top_date
         for kind, value in signals.references:
             self.references.setdefault(kind, value)
 
@@ -315,8 +357,13 @@ def _boundary_reason(signals: PageSignals, current: _Current) -> str | None:
         and normalize_line(signals.vendor) != normalize_line(current.vendor)
     ):
         return f"vendor changes to {signals.vendor}"
-    if current.marker is not None and marker is None and (signals.form or signals.vendor):
+    finished = current.marker is not None and marker is None
+    if finished and (signals.form or signals.vendor or signals.letterhead):
         return "letterhead after a finished numbered document"
+    if signals.contacts and current.contacts and signals.contacts.isdisjoint(current.contacts):
+        return "contact details change"
+    if signals.top_date and current.top_date and signals.top_date != current.top_date:
+        return f"date changes to {signals.top_date.isoformat()}"
     return None
 
 

@@ -66,7 +66,9 @@ def test_heuristic_labels_on_the_bundle():
         assert got.meta_source == "auto" and got.file_sha == SHA
 
 
-@pytest.mark.parametrize("file", corpus.ALL_FILES, ids=lambda f: f.name)
+@pytest.mark.parametrize(
+    "file", [f for f in corpus.ALL_FILES if f is not corpus.MIXED], ids=lambda f: f.name
+)
 def test_each_fixture_file_segments_to_its_documents(file):
     result = parsed(file)
     segmented = segment_file(
@@ -453,3 +455,98 @@ def test_segment_is_timed_as_the_segment_stage():
     with start_trace(Trace()) as trace:
         segment_file(_pages("x"), file_sha=SHA)
     assert [timing.stage for timing in trace.stages] == ["segment"]
+
+
+# ------------------------------------- closing-bundle patterns (mixed_bundle.pdf)
+def test_heuristics_split_the_mixed_bundle_exactly():
+    pages = parsed(corpus.MIXED).pages
+    assert [b.page for b in propose_boundaries(pages)] == [
+        d.page_start for d in corpus.MIXED.documents
+    ]
+    documents = heuristic_documents(pages, file_sha=SHA)
+    assert _ranges(documents) == _expected_ranges(corpus.MIXED)
+    typed = [d.doc_type for d in documents[: len(corpus.MIXED_TYPED)]]
+    assert typed == [d.doc_type for d in corpus.MIXED_TYPED]
+
+
+@pytest.mark.parametrize(
+    ("text", "marker"),
+    [
+        ("Header\nBody\n12 GULL LN PORT ALDER 90000 04/02/2025 2 of 7", (2, 7)),
+        ("LABELS NUMBER OF PAGES\n12 GULL LN 04/02/2025 1 of 3\nbody", (1, 3)),
+        ("Estimate #77 Page 2 of 4\nbody", (2, 4)),
+        ("(FORM RR PAGE 1 OF 2)\nbody", (1, 2)),
+    ],
+)
+def test_page_markers_with_and_without_the_word_page(text, marker):
+    assert page_signals(ParsedPage(page=1, text=text)).marker == marker
+
+
+def test_a_bare_k_of_n_in_the_middle_of_a_page_is_not_a_marker():
+    body = "\n".join(f"line {n}" for n in range(12))
+    text = f"top\n{body[:40]}\nWe replaced 2 of 7 valves\n{body}\nbottom"
+    assert page_signals(ParsedPage(page=1, text=text)).marker is None
+    assert page_signals(ParsedPage(page=1, text="Covered 12/2 of 3 areas")).marker is None
+
+
+def test_a_field_label_row_is_not_a_vendor():
+    signals = page_signals(
+        ParsedPage(page=1, text="BLDG NO. STREET CITY ZIP INSPECTION DATE NUMBER OF PAGES\nrow")
+    )
+    assert signals.vendor is None
+
+
+def test_a_vendor_line_loses_its_page_number():
+    signals = page_signals(ParsedPage(page=1, text="Harbor Point Home Inspections Page 3 of 9\nx"))
+    assert signals.vendor == "Harbor Point Home Inspections"
+    assert signals.marker == (3, 9)
+
+
+def test_a_long_form_title_is_still_a_form_header():
+    signals = page_signals(
+        ParsedPage(page=1, text="Standardized Notice of Work Completed; Items Pending\nx")
+    )
+    assert signals.form == "completion_notice"
+
+
+def test_letterhead_top_lines_are_recognised():
+    letter = "Marisol Vega Finish Carpentry\n88 Kelp Ave.\nPort Alder, CA. 90000\nLic # 000111\n(555) 010-0444\nJune 3, 2025"
+    signals = page_signals(ParsedPage(page=1, text=letter))
+    assert signals.letterhead is True
+    assert signals.contacts == frozenset({"5550100444"})
+    assert signals.top_date == date(2025, 6, 3)
+    plain = page_signals(ParsedPage(page=1, text="Findings continue here.\nMore findings."))
+    assert plain.letterhead is False and plain.contacts == frozenset()
+
+
+def test_a_letterhead_after_a_finished_numbered_document_starts_a_new_one():
+    pages = _pages(
+        "Report\nbody\nrow 1 of 2",
+        "row 2 of 2\nbody",
+        "A Person Carpentry\n88 Kelp Ave.\nPort Alder, CA 90000\nLic # 000111\nnote",
+    )
+    boundaries = propose_boundaries(pages)
+    assert [(b.page, b.reason) for b in boundaries][-1] == (
+        3,
+        "letterhead after a finished numbered document",
+    )
+
+
+def test_unnumbered_pages_split_when_the_contact_block_changes():
+    pages = _pages(
+        "note one\nCall (555) 010-0444",
+        "note one continued\nCall (555) 010-0444",
+        "items\nQuestions? Call (555) 010-0555",
+    )
+    assert [(b.page, b.reason) for b in propose_boundaries(pages)] == [
+        (1, "start of file"),
+        (3, "contact details change"),
+    ]
+
+
+def test_unnumbered_pages_split_when_the_top_date_changes():
+    pages = _pages("June 3, 2025\nLetter one", "Letter one, page two", "July 9, 2025\nLetter two")
+    assert [(b.page, b.reason) for b in propose_boundaries(pages)] == [
+        (1, "start of file"),
+        (3, "date changes to 2025-07-09"),
+    ]

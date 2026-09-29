@@ -36,6 +36,8 @@ __all__ = [
     "INSPECTION",
     "INVOICE",
     "LETTER_SPACED",
+    "MIXED",
+    "MIXED_TYPED",
     "MARKDOWN",
     "PDF_FILES",
     "QAFact",
@@ -159,6 +161,18 @@ UNNUMBERED = CorpusFile(
                          date.fromisoformat(_b.UNNUMBERED_DATES[3]), "Notice Of Work Completed"),
     ),
 )  # fmt: skip
+MIXED = CorpusFile(
+    "mixed_bundle.pdf",
+    22,
+    tuple(
+        ExpectedDocument(start, end, doc_type, None, None, "")
+        for start, end, doc_type in zip(
+            _b.MIXED_STARTS,
+            [*(n - 1 for n in _b.MIXED_STARTS[1:]), 22],
+            _b.MIXED_TYPES,
+        )
+    ),
+)
 DOCX = CorpusFile(
     "heat_pump_guide.docx",
     3,
@@ -193,12 +207,15 @@ ALL_FILES: tuple[CorpusFile, ...] = (
     INVOICE,
     BUNDLE,
     UNNUMBERED,
+    MIXED,
     DOCX,
     HTML,
     MARKDOWN,
     TEXT,
 )
-PDF_FILES: tuple[CorpusFile, ...] = (INSPECTION, ESTIMATE, INVOICE, BUNDLE, UNNUMBERED)
+PDF_FILES: tuple[CorpusFile, ...] = (INSPECTION, ESTIMATE, INVOICE, BUNDLE, UNNUMBERED, MIXED)
+#: mixed_bundle.pdf's documents with a form header the heuristics can type (not the letters)
+MIXED_TYPED = MIXED.documents[:8]
 
 FINDINGS: tuple[ExpectedFinding, ...] = tuple(
     ExpectedFinding(f.id, f.heading, f.severity, f.recommendation, f.page) for f in _b.FINDINGS
