@@ -27,7 +27,8 @@ __all__ = ["EvalSpend", "confirm", "open_spend"]
 @dataclass
 class EvalSpend:
     meter: Meter
-    max_cost: float
+    #: the command's --max-cost; None for commands without one (the eval cap bounds them)
+    max_cost: float | None
     eval_cap: float
 
     @property
@@ -40,7 +41,7 @@ class EvalSpend:
 
     def refusal(self, estimate_usd: float) -> str | None:
         """Why a run estimated at ``estimate_usd`` must not start, or None."""
-        if estimate_usd > self.max_cost:
+        if self.max_cost is not None and estimate_usd > self.max_cost:
             return (
                 f"the estimate ${estimate_usd:.2f} exceeds --max-cost ${self.max_cost:.2f}; "
                 "raise --max-cost to run it"
@@ -63,8 +64,11 @@ class EvalSpend:
         self.meter.db.close()
 
 
-def open_spend(settings: KnowledgeSettings, *, max_cost: float, label: str) -> EvalSpend:
-    """A meter for one evaluation command, writing to the shared ledger in ``hal9000.db``."""
+def open_spend(settings: KnowledgeSettings, *, max_cost: float | None, label: str) -> EvalSpend:
+    """A meter for one evaluation command, writing to the shared ledger in ``hal9000.db``.
+
+    The run's hard cap is ``max_cost``, or ``KB_EVAL_CAP_USD`` when None.
+    """
     from hal9000.storage.db import Database
 
     hal = hal_config.settings()
@@ -72,8 +76,8 @@ def open_spend(settings: KnowledgeSettings, *, max_cost: float, label: str) -> E
     meter = Meter(
         database,
         f"kb-eval-{label}-{uuid.uuid4().hex[:8]}",
-        soft_cap=max_cost,
-        hard_cap=max_cost,
+        soft_cap=settings.eval_cap_usd if max_cost is None else max_cost,
+        hard_cap=settings.eval_cap_usd if max_cost is None else max_cost,
         tz=hal.tz,
         monthly_caps=monthly_caps(settings),
     )

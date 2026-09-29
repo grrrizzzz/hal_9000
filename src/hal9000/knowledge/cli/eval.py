@@ -101,7 +101,7 @@ def _judge_prep(args, conn, current) -> int:
     estimate = estimate_judge_prep(len(todo), cfg, current.chat_tier, current.judge_tier)
     print(f"Judge calibration: {len(todo)} dev answers with the configuration of {run.id}.")
     print(f"Estimate: {estimate.describe()}.")
-    spend = open_spend(current, max_cost=current.eval_cap_usd, label="judge-prep")
+    spend = open_spend(current, max_cost=None, label="judge-prep")
     try:
         refusal = spend.refusal(estimate.usd)
         if refusal:
@@ -163,7 +163,7 @@ def _regression(args, conn, current) -> int:
         f"~{tokens:,} query-embedding tokens with {current.embed_model}, "
         f"about ${usd:.4f} (cached queries cost nothing)."
     )
-    spend = open_spend(current, max_cost=current.eval_cap_usd, label="regression")
+    spend = open_spend(current, max_cost=None, label="regression")
     try:
         refusal = spend.refusal(usd)
         if refusal:

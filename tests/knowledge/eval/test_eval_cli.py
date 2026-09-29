@@ -281,3 +281,20 @@ def test_eval_judge_prep(env, tmp_path, fixture_docs, monkeypatch, capsys):
 def test_sweep_and_latency_are_part_b(capsys):
     assert main(["kb", "eval", "sweep", "--stages", "S1a", "--yes"]) == 2
     assert "KWP5 part B" in capsys.readouterr().err
+
+
+def test_judge_prep_and_regression_respect_the_eval_cap(
+    env, tmp_path, fixture_docs, monkeypatch, capsys
+):
+    eval_dir = tmp_path / "data" / "knowledge" / "eval"
+    run = fixture_run(env, fixture_docs, eval_dir, config={"profile": "p1"}, stage="S4")
+    _approve_facts(env)
+    monkeypatch.setenv("KB_EVAL_CAP_USD", "0")
+    assert main(["kb", "eval", "judge-prep", run.id, "--yes"]) == 3
+    assert main(["kb", "eval", "regression", "--yes"]) == 3
+    assert capsys.readouterr().err.count("KB_EVAL_CAP_USD") == 2
+    monkeypatch.setenv("KB_EVAL_CAP_USD", "10")
+    monkeypatch.setattr("sys.stdin", io.StringIO(""))
+    assert main(["kb", "eval", "judge-prep", run.id]) == 3
+    assert main(["kb", "eval", "regression"]) == 3
+    assert capsys.readouterr().out.count("pass --yes") == 2
