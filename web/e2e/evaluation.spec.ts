@@ -55,3 +55,29 @@ test("sweep charts and the profile switch", async ({ page }) => {
   await page.getByRole("button", { name: "Switch and re-index" }).click();
   await expect(page.getByText(/Re-indexing in the background|Re-index finished/)).toBeVisible();
 });
+
+test("re-select evidence by highlighting text on the page", async ({ page }) => {
+  const card = page.getByTestId("review-card");
+  await expect(card).toBeVisible();
+  await card.getByRole("button", { name: "Re-select" }).first().click();
+
+  const viewer = page.getByTestId("doc-viewer");
+  const span = viewer.locator(".textLayer span", { hasText: "flexible gas connector" });
+  await expect(span).toBeVisible({ timeout: 20_000 });
+  const use = page.getByRole("button", { name: "Use selection as evidence" });
+  await expect(use).toBeDisabled();
+
+  // Select the line in the pdf.js text layer, as a drag-select would.
+  await span.evaluate((el) => {
+    const range = document.createRange();
+    range.selectNodeContents(el);
+    const sel = window.getSelection()!;
+    sel.removeAllRanges();
+    sel.addRange(range);
+  });
+  await expect(use).toBeEnabled();
+  await use.click();
+
+  await expect(page.getByTestId("review-flash")).toContainText("Evidence updated");
+  await expect(card.locator("blockquote").first()).toHaveText("A flexible gas connector is routed through the cabinet wall.");
+});
