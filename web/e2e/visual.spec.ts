@@ -83,6 +83,17 @@ for (const width of [390, 1440]) {
               .map((t) => t.textContent),
           );
           expect(clipped, `${name}: clipped chart labels at ${width}px`).toEqual([]);
+          // Every tab is fully on screen (no tab hidden past the edge of a scrolling strip).
+          const offscreenTabs = await page.evaluate(() =>
+            [...document.querySelectorAll<HTMLElement>('[role="tab"]')]
+              .filter((t) => {
+                const r = t.getBoundingClientRect();
+                const strip = t.parentElement!.getBoundingClientRect();
+                return r.width > 0 && (r.left < 0 || r.right > window.innerWidth || r.left < strip.left - 1 || r.right > strip.right + 1);
+              })
+              .map((t) => t.textContent),
+          );
+          expect(offscreenTabs, `${name}: tabs out of view at ${width}px`).toEqual([]);
           await page.screenshot({ path: `e2e-screenshots/${name}-${width}-${scheme}.png`, fullPage: true });
           if (scheme === "light") expect(await unreachable(page), `${name} at ${width}px`).toEqual([]);
         }
