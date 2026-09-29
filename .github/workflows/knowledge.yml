@@ -1,0 +1,106 @@
+name: Knowledge
+
+# The house knowledge base's gates (docs/KNOWLEDGE_BUILD_HANDOFF.md §3):
+# - python: lint, format, the sqlite-vec check, OpenAPI drift and the full
+#   offline suite (with the coverage gate from pyproject.toml);
+# - denylist: no house data in any tracked file (secret KB_DENYLIST);
+# - web: the UI's lint, typecheck, tests and generated-types drift, once web/
+#   has a package.json (KWP7).
+#
+# Docling and fastembed (knowledge-docling, knowledge-rerank) are left out:
+# their tests are marked `models` and run on Mike's Mac, and PyTorch alone is
+# gigabytes. `live` tests skip here because no OpenAI key is configured.
+on:
+  push:
+    branches: [main, solar-agent, knowledge]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.11"
+      LITELLM_LOCAL_MODEL_COST_MAP: "True"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Sync dependencies (all groups but the heavy model ones)
+        run: uv sync --all-groups --no-group knowledge-docling --no-group knowledge-rerank
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: sqlite-vec loads and KNN matches brute force (gate G-K0b check)
+        run: uv run python scripts/kb_sqlite_vec_check.py
+
+      - name: OpenAPI contract is up to date
+        run: uv run python scripts/kb_export_openapi.py --check
+
+      - name: Test
+        run: uv run pytest -rs
+
+  denylist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: No house data in tracked files
+        env:
+          KB_DENYLIST: ${{ secrets.KB_DENYLIST }}
+        run: python scripts/kb_denylist_check.py
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      # hashFiles() is not available in a job-level `if` (the repository is not
+      # checked out yet), so each step carries the gate instead.
+      - name: No web/ yet
+        if: hashFiles('web/package.json') == ''
+        working-directory: .
+        run: echo "web/package.json does not exist yet (KWP7); skipping the web gates."
+
+      - uses: actions/setup-node@v4
+        if: hashFiles('web/package.json') != ''
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        if: hashFiles('web/package.json') != ''
+        run: npm ci
+
+      - name: Lint
+        if: hashFiles('web/package.json') != ''
+        run: npm run lint
+
+      - name: Typecheck
+        if: hashFiles('web/package.json') != ''
+        run: npm run typecheck
+
+      - name: Test
+        if: hashFiles('web/package.json') != ''
+        run: npm test
+
+      - name: Generated API types match openapi.json
+        if: hashFiles('web/package.json') != ''
+        run: |
+          npx openapi-typescript src/api/openapi.json -o src/api/schema.d.ts
+          git diff --exit-code -- src/api/schema.d.ts

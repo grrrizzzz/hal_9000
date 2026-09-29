@@ -1,0 +1,14 @@
+# Local hooks. Install once with `pre-commit install` (or `uvx pre-commit install`).
+#
+# kb-denylist: no house data in git (plan §14, rule K2). Reads KB_DENYLIST from
+# .env (strings separated by |) and fails if any tracked file contains one.
+# It prints file and line and the entry's number, never the string itself.
+repos:
+  - repo: local
+    hooks:
+      - id: kb-denylist
+        name: house-data denylist (KB_DENYLIST in .env)
+        entry: python3 scripts/kb_denylist_check.py
+        language: system
+        pass_filenames: false
+        always_run: true
