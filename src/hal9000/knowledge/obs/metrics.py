@@ -390,9 +390,15 @@ def record_ingest_pages(*, with_text_layer: int = 0, without_text_layer: int = 0
 
 
 def set_month_budget(spend_usd: float, cap_usd: float) -> None:
-    """Set month-to-date spend and the cap (e.g. after each metered call)."""
-    MONTH_SPEND_USD.set(_nonneg(spend_usd, "spend_usd"))
-    MONTH_CAP_USD.set(_nonneg(cap_usd, "cap_usd"))
+    """Set month-to-date spend and the cap (e.g. after each metered call).
+
+    Replaces anything bound with :func:`bind_month_budget`.
+    """
+    spend = _nonneg(spend_usd, "spend_usd")
+    cap = _nonneg(cap_usd, "cap_usd")
+    # set_function, not set(): a function bound earlier would otherwise keep winning
+    MONTH_SPEND_USD.set_function(lambda: spend)
+    MONTH_CAP_USD.set_function(lambda: cap)
 
 
 def bind_month_budget(spend: Callable[[], float], cap: float | Callable[[], float]) -> None:
