@@ -4144,6 +4144,18 @@
             "type": "boolean",
             "title": "Abstained",
             "default": false
+          },
+          "degraded": {
+            "anyOf": [
+              {
+                "type": "string",
+                "const": "embedding_unavailable"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Degraded"
           }
         },
         "additionalProperties": false,
@@ -4274,6 +4286,78 @@
               }
             ],
             "title": "Parent Id"
+          },
+          "file_sha": {
+            "type": "string",
+            "title": "File Sha",
+            "default": ""
+          },
+          "title": {
+            "type": "string",
+            "title": "Title",
+            "default": ""
+          },
+          "doc_type": {
+            "type": "string",
+            "enum": [
+              "inspection_report",
+              "estimate",
+              "invoice",
+              "pest_report",
+              "completion_notice",
+              "disclosure_form",
+              "manual",
+              "warranty",
+              "permit",
+              "other"
+            ],
+            "title": "Doc Type",
+            "default": "other"
+          },
+          "vendor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vendor"
+          },
+          "doc_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Doc Date"
+          },
+          "collection": {
+            "type": "string",
+            "title": "Collection",
+            "default": ""
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Prompt Tokens",
+            "default": 0
+          },
+          "fused_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fused Score"
           }
         },
         "additionalProperties": false,
