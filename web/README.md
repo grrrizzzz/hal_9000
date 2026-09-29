@@ -23,9 +23,12 @@ Plan: `docs/KNOWLEDGE_PLAN.md` §10–11. Handoff: `docs/KNOWLEDGE_BUILD_HANDOFF
 `assets/`). KWP6 mounts it at `/`:
 
 - serve `web/dist/assets/*` and the root files as static files;
-- for any other non-`/api`, non-`/health`, non-`/metrics` GET, return
-  `web/dist/index.html` (history-API fallback), because the UI uses real paths
-  such as `/traces/<id>` (linked from Grafana) and `/c/<conversation id>`.
+- for any other non-`/api`, non-`/health`, non-`/metrics` GET whose path has
+  no file extension and isn't under `/assets/`, return `web/dist/index.html`
+  (history-API fallback), because the UI uses real paths such as
+  `/traces/<id>` (linked from Grafana) and `/c/<conversation id>`;
+- a missing file (`/assets/old-hash.js`, `/favicon.ico`) is a 404, so a stale
+  tab gets a clear failure instead of HTML parsed as JavaScript.
 
 `dist/` and `node_modules/` are git-ignored. Nothing from `src/mocks/` is in the
 build: MSW is imported only when `import.meta.env.DEV && VITE_MOCK === "1"`, and

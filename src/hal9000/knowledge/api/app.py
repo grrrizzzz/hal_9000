@@ -17,7 +17,8 @@ without services builds the same routes for the OpenAPI export; they answer
 - **Files**: PDFs inline with HTTP ``Range``; anything else only as a
   sandboxed download (``attachment``, ``nosniff``, ``CSP: sandbox``).
 - **The UI**: ``web/dist`` is served at ``/`` with a history-API fallback to
-  ``index.html`` for every other non-``/api`` GET.
+  ``index.html`` for every other extension-less GET outside ``/api`` and
+  ``/assets``; a missing file is a ``404``.
 
 Operation IDs are the handler names (``list_documents``), so the generated
 TypeScript client has stable, readable names.
@@ -934,7 +935,13 @@ def _ops_router(db_path: Path | None) -> APIRouter:
 
 
 def _static(app: FastAPI, dist: Path) -> None:
-    """``web/dist`` at ``/``: real files, else ``index.html`` (the UI's history routes)."""
+    """``web/dist`` at ``/``: real files, else ``index.html`` (the UI's history routes).
+
+    Only extension-less paths outside ``/assets`` fall back to ``index.html``. A
+    missing file (an old hashed bundle asked for by a stale tab, ``/favicon.ico``)
+    is a 404: served as ``index.html`` it would fail as JS or CSS with a
+    confusing error.
+    """
     root = dist.resolve()
     index = root / "index.html"
     reserved = ("api", "health", "metrics")
@@ -948,7 +955,7 @@ def _static(app: FastAPI, dist: Path) -> None:
         if path and target.is_file() and target.is_relative_to(root):
             cache = "public, max-age=31536000, immutable" if first == "assets" else "no-cache"
             return FileResponse(target, headers={"Cache-Control": cache})
-        if not index.is_file():
+        if first == "assets" or PurePosixPath(path).suffix or not index.is_file():
             raise HTTPException(status_code=404, detail="Not Found")
         return FileResponse(index, headers={"Cache-Control": "no-cache"})
 

@@ -623,6 +623,29 @@ def test_the_ui_is_served_with_a_history_fallback(api: Api, tmp_path):
     assert client.get("/health").headers["content-type"] == "application/json"
 
 
+def test_missing_files_are_404_and_only_extensionless_paths_fall_back(api: Api, tmp_path):
+    """A stale tab asking for an old hashed bundle must get a 404, not index.html as JS."""
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>HAL</title>")
+    client = client_for(create_app(api.services, web_dist=dist))
+    for missing in (
+        "/assets/x.js",
+        "/assets/index-0ld.css",
+        "/assets/fonts",
+        "/favicon.ico",
+        "/c/robots.txt",
+    ):
+        response = client.get(missing)
+        assert response.status_code == 404, missing
+        assert "<!doctype html>" not in response.text, missing
+    for route in ("/traces/abc", "/library/12", "/evaluation"):
+        response = client.get(route)
+        assert response.status_code == 200, route
+        assert response.text.startswith("<!doctype html>"), route
+        assert response.headers["cache-control"] == "no-cache"
+
+
 # ------------------------------------------------------------------ services
 def test_the_real_services_are_metered_and_report_the_cap(tmp_path, monkeypatch):
     from hal9000.knowledge.api.services import _meter, build_services
