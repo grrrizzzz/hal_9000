@@ -31,7 +31,7 @@ jobs:
           enable-cache: true
 
       - name: Sync dependencies (all groups but the heavy model ones)
-        run: uv sync --all-groups --no-group knowledge-docling --no-group knowledge-rerank
+        run: uv sync --locked --all-groups --no-group knowledge-docling --no-group knowledge-rerank
 
       - name: Lint
         run: uv run ruff check .
@@ -120,7 +120,7 @@ jobs:
       - name: Sync Python dependencies (for kb serve --fake)
         if: hashFiles('web/package.json') != ''
         working-directory: .
-        run: uv sync --all-groups --no-group knowledge-docling --no-group knowledge-rerank
+        run: uv sync --locked --all-groups --no-group knowledge-docling --no-group knowledge-rerank
 
       - name: Install Chromium for Playwright
         if: hashFiles('web/package.json') != ''

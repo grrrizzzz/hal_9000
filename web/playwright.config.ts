@@ -35,7 +35,7 @@ const mockServer = {
 
 /** `kb serve --fake`: a fresh temp library seeded with the synthetic corpus, serving web/dist. */
 const realServer = {
-  command: `uv run hal9000 kb serve --fake --host 127.0.0.1 --port ${realPort}`,
+  command: `uv run --locked hal9000 kb serve --fake --host 127.0.0.1 --port ${realPort}`,
   cwd: "..",
   url: `${baseURL}/health`,
   // Always a fresh server: the suite changes its state (uploads, approvals, the active profile).
