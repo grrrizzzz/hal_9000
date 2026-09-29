@@ -432,3 +432,20 @@ def test_prometheus_scrapes_hal_kb():
     job = jobs["hal-kb"]
     assert job["metrics_path"] == "/metrics"
     assert job["static_configs"][0]["targets"] == ["hal-kb:8910"]
+
+
+def test_the_pi_verification_steps_match_the_provisioning():
+    """deploy/grafana/VERIFY.md names the pinned plugin, the datasources, dashboards and rules."""
+    text = (GRAFANA / "VERIFY.md").read_text()
+    ini = configparser.ConfigParser(inline_comment_prefixes=(";", "#"))
+    ini.read(GRAFANA / "grafana.ini")
+    version = ini.get("plugins", "preinstall_sync").split("@")[1]
+    assert f"`{version}`" in text
+    assert f"localhost:{ini.get('server', 'http_port')}" in text
+    for uid in (PROM_UID, SQL_UID):
+        assert f"uid/{uid}/health" in text
+    for path in DASHBOARDS:
+        assert f"`{_load(path)['title']}`" in text
+    assert "folderUIDs=kb" in text and "d/kb-live?var-kb_url=" in text
+    assert len(_rules()) == 4 and "four rules" in text
+    assert "promtool" in text and "./data:/data:ro" in text
