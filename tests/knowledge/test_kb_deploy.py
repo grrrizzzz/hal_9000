@@ -318,3 +318,27 @@ def test_dockerignore_keeps_house_data_and_build_junk_out():
     }
     for required in (".env", "data/", ".git", ".venv", "**/node_modules", "tests/", "web/dist"):
         assert required in patterns, required
+
+
+def test_env_example_documents_the_deployment_keys():
+    text = (REPO / ".env.example").read_text()
+    for name in (
+        "KB_PASSCODE",
+        "KB_UID",
+        "KB_GID",
+        "GRAFANA_ADMIN_PASSWORD",
+        "PROMETHEUS_PORT",
+        "GRAFANA_PORT",
+        "KB_PORT",
+        "KB_WITH_DOCLING",
+        "KB_WITH_RERANK",
+        "KB_MONTHLY_CAP_USD",
+        "KB_EVAL_CAP_USD",
+        "KB_DENYLIST",
+    ):
+        line = next((ln for ln in text.splitlines() if re.match(rf"#? ?{name}=", ln)), None)
+        assert line is not None, name
+        assert "#" in line.split("=", 1)[1] or line.startswith("#"), f"{name}: no comment"
+    # placeholders only: the secrets have no value
+    for name in ("GRAFANA_ADMIN_PASSWORD", "KB_PASSCODE"):
+        assert re.search(rf"^{name}=\s*(#|$)", text, re.M), name
