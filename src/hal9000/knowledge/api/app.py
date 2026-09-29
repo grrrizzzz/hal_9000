@@ -1,4 +1,23 @@
-"""FastAPI app factory with every plan §11 route as a ``501`` stub (KWP0).
+"""The knowledge-base HTTP API (plan §11) and the web UI's static files.
+
+``create_app(services)`` serves every plan §11 route (and the approved
+additions: ``GET /api/eval/runs/{id}/results``, ``POST /api/jobs/{id}/retry``)
+over :class:`~hal9000.knowledge.api.services.Services`. ``create_app()``
+without services builds the same routes for the OpenAPI export; they answer
+``503`` until services are attached.
+
+- **Auth** (plan §14): every ``/api`` route except ``POST /api/session``
+  needs the signed session cookie (``401`` otherwise). ``/health`` and
+  ``/metrics`` are unauthenticated (LAN only) and carry no question text.
+- **Streams**: ``POST /api/chat`` and ``GET /api/jobs/stream`` are server-sent
+  events (sse-starlette). Each question runs on its own thread inside a copy
+  of the request's context (the trace and usage sink are context variables);
+  when the client goes away the thread is told to cancel, which closes the
+  upstream stream and records the estimated usage (outcome ``cancelled``).
+- **Files**: PDFs inline with HTTP ``Range``; anything else only as a
+  sandboxed download (``attachment``, ``nosniff``, ``CSP: sandbox``).
+- **The UI**: ``web/dist`` is served at ``/`` with a history-API fallback to
+  ``index.html`` for every other non-``/api`` GET.
 
 Operation IDs are the handler names (``list_documents``), so the generated
 TypeScript client has stable, readable names.
@@ -6,13 +25,34 @@ TypeScript client has stable, readable names.
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
+import logging
+import sqlite3
+import threading
+from collections.abc import AsyncIterator, Iterator
 from datetime import date
-from typing import Annotated, NoReturn
+from pathlib import Path, PurePosixPath
+from typing import Annotated, Any
 
-from fastapi import APIRouter, FastAPI, File, Form, HTTPException, Path, Query, UploadFile
+from fastapi import (
+    APIRouter,
+    Depends,
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+)
+from fastapi import (
+    Path as PathParam,
+)
+from fastapi.responses import FileResponse
 from fastapi.routing import APIRoute
 
 from hal9000 import __version__
+from hal9000.knowledge.api.security import RequestGuard
+from hal9000.knowledge.auth import COOKIE, Session
 from hal9000.knowledge.contracts import (
     ChatEventEnvelope,
     ChatRequest,
@@ -24,6 +64,7 @@ from hal9000.knowledge.contracts import (
     DocumentPatch,
     DocumentSummary,
     ErrorResponse,
+    EvalResultsPage,
     EvalRun,
     FeedbackRequest,
     FeedbackResponse,
@@ -37,22 +78,30 @@ from hal9000.knowledge.contracts import (
     ProfileActivate,
     ProfileState,
     RetrievalResult,
+    SearchFilters,
     SessionRequest,
     SessionResponse,
     Trace,
     TraceSummary,
     UploadResponse,
+    UploadResult,
 )
 
-__all__ = ["ROUTES", "create_app"]
+__all__ = ["ROUTES", "WEB_DIST", "create_app"]
 
-#: Every plan §11 route as (method, path). A test checks the app serves exactly these.
+log = logging.getLogger(__name__)
+
+#: ``web/dist`` in this checkout (``npm run build``).
+WEB_DIST = Path(__file__).resolve().parents[4] / "web" / "dist"
+
+#: Every served API route as (method, path). A test checks the app serves exactly these.
 ROUTES: tuple[tuple[str, str], ...] = (
     ("POST", "/api/session"),
     ("DELETE", "/api/session"),
     ("POST", "/api/uploads"),
     ("GET", "/api/jobs"),
     ("GET", "/api/jobs/stream"),
+    ("POST", "/api/jobs/{id}/retry"),
     ("GET", "/api/documents"),
     ("GET", "/api/documents/{id}"),
     ("PATCH", "/api/documents/{id}"),
@@ -75,6 +124,7 @@ ROUTES: tuple[tuple[str, str], ...] = (
     ("PUT", "/api/eval/judge-labels/{id}"),
     ("GET", "/api/eval/runs"),
     ("GET", "/api/eval/runs/{id}"),
+    ("GET", "/api/eval/runs/{id}/results"),
     ("GET", "/api/profile"),
     ("PUT", "/api/profile"),
     ("GET", "/api/traces"),
@@ -85,81 +135,331 @@ ROUTES: tuple[tuple[str, str], ...] = (
 
 _ERRORS = {
     401: {"model": ErrorResponse, "description": "Not signed in"},
-    501: {"model": ErrorResponse, "description": "Not implemented yet (KWP6)"},
 }
 _SSE = {"content": {"text/event-stream": {"schema": {"type": "string"}}}}
-Sha = Annotated[str, Path(pattern=r"^[0-9a-f]{64}$")]
+Sha = Annotated[str, PathParam(pattern=r"^[0-9a-f]{64}$")]
+_END = object()
+#: ``POST /api/uploads``'s form, as FastAPI documented it when it parsed the form itself.
+_UPLOAD_FORM = {
+    "properties": {
+        "files": {
+            "items": {"type": "string", "contentMediaType": "application/octet-stream"},
+            "type": "array",
+            "title": "Files",
+            "description": "the files",
+        },
+        "relative_path": {
+            "items": {"type": "string"},
+            "type": "array",
+            "title": "Relative Path",
+            "description": "each file's path within its chosen folder, in order",
+        },
+    },
+    "type": "object",
+    "required": ["files", "relative_path"],
+    "title": "Body_create_uploads",
+}
+_VALIDATION_ERROR = {
+    "description": "Validation Error",
+    "content": {
+        "application/json": {"schema": {"$ref": "#/components/schemas/HTTPValidationError"}}
+    },
+}
 
 
-def _stub() -> NoReturn:
-    raise HTTPException(status_code=501, detail="not implemented yet (KWP6)")
+# ------------------------------------------------------------ dependencies
+def services_of(request: Request):
+    services = getattr(request.app.state, "services", None)
+    if services is None:
+        raise HTTPException(status_code=503, detail="the knowledge service is not configured")
+    return services
+
+
+def require_session(request: Request) -> Session:
+    """The signed-in session (checked by :class:`RequestGuard` before the body), or ``401``."""
+    services = services_of(request)
+    found = request.scope.get("state", {}).get("kb_session")
+    if found is not None:
+        return found
+    session = services.auth.session(request.cookies.get(COOKIE))
+    if session is None or not services.sessions.valid(session):
+        raise HTTPException(status_code=401, detail="Not signed in")
+    return session
+
+
+def database(request: Request) -> Iterator[sqlite3.Connection]:
+    conn = services_of(request).connect()
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+Services = Annotated[Any, Depends(services_of)]
+Db = Annotated[sqlite3.Connection, Depends(database)]
+Signed = Annotated[Session, Depends(require_session)]
+
+
+def _not_found(what: str) -> HTTPException:
+    return HTTPException(status_code=404, detail=f"{what} not found")
 
 
 def _operation_id(route: APIRoute) -> str:
     return route.name
 
 
-def _api_router() -> APIRouter:
+def _put(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, item: object) -> None:
+    try:
+        loop.call_soon_threadsafe(queue.put_nowait, item)
+    except RuntimeError:  # the loop closed: nobody is listening any more
+        pass
+
+
+# ------------------------------------------------------------------ routers
+def _session_router() -> APIRouter:
     r = APIRouter(prefix="/api", responses=_ERRORS)
 
-    # -- session (plan §14) ------------------------------------------------------
-    @r.post("/session", response_model=SessionResponse, tags=["session"])
-    def create_session(body: SessionRequest) -> SessionResponse:
-        """Exchange the household passcode for a signed session cookie."""
-        _stub()
+    @r.post(
+        "/session",
+        response_model=SessionResponse,
+        tags=["session"],
+        responses={429: {"model": ErrorResponse, "description": "Too many attempts"}},
+    )
+    def create_session(
+        body: SessionRequest, request: Request, response: Response, services: Services
+    ) -> SessionResponse:
+        """Exchange the household passcode for a signed session cookie (30 days).
+
+        At most 10 attempts a minute per address are evaluated; each is counted
+        before the passcode is checked, and a success clears the count.
+        """
+        from hal9000.knowledge.auth import TooManyAttempts
+
+        auth = services.auth
+        client = request.client.host if request.client else "unknown"
+        try:
+            accepted = auth.sign_in(client, body.passcode)
+        except TooManyAttempts as error:
+            raise HTTPException(
+                status_code=429,
+                detail="Too many attempts. Wait a minute and try again.",
+                headers={"Retry-After": str(error.retry_after)},
+            ) from None
+        if not accepted:
+            raise HTTPException(status_code=401, detail="That passcode isn't right.")
+        token, session, expires = auth.issue()
+        services.sessions.create(session, expires)
+        response.set_cookie(
+            COOKIE,
+            token,
+            max_age=auth.max_age_s,
+            httponly=True,
+            samesite="strict",
+            secure=request.url.scheme == "https",
+            path="/",
+        )
+        return SessionResponse(ok=True, expires_at=expires)
+
+    return r
+
+
+def _api_router() -> APIRouter:
+    r = APIRouter(prefix="/api", responses=_ERRORS, dependencies=[Depends(require_session)])
 
     @r.delete("/session", status_code=204, tags=["session"])
-    def delete_session() -> None:
-        """Sign out."""
-        _stub()
+    def delete_session(
+        response: Response, session: Signed, services: Services, everywhere: bool = False
+    ) -> None:
+        """Sign out: this session is revoked on the server; ``everywhere`` revokes every session."""
+        if everywhere:
+            services.sessions.revoke_all()
+        else:
+            services.sessions.revoke(session)
+        response.delete_cookie(COOKIE, path="/", httponly=True, samesite="strict")
 
     # -- uploads and jobs (plan §5) ---------------------------------------------
-    @r.post("/uploads", response_model=UploadResponse, tags=["library"])
-    def create_uploads(
-        files: Annotated[list[UploadFile], File(description="the files")],
-        relative_path: Annotated[
-            list[str], Form(description="each file's path within its chosen folder, in order")
-        ],
-    ) -> UploadResponse:
-        """Upload many files; folder paths become collections. Returns job IDs."""
-        _stub()
+    @r.post(
+        "/uploads",
+        response_model=UploadResponse,
+        tags=["library"],
+        responses={413: {"model": ErrorResponse, "description": "The body is too large"}},
+    )
+    async def create_uploads(request: Request, services: Services) -> UploadResponse:
+        """Upload many files; folder paths become collections. Returns job IDs.
+
+        Multipart ``files`` with one ``relative_path`` each, in order. The body
+        is parsed as it streams in; each file is written once, to the upload
+        spool, and stops being written at ``ingest.max_upload_bytes``.
+        """
+        from starlette.concurrency import run_in_threadpool
+
+        from hal9000.knowledge.api.library import display_collection
+        from hal9000.knowledge.api.uploads import parse_upload_form
+        from hal9000.knowledge.ingest.pipeline import ALLOWED_TYPES, _type_and_size
+
+        if services.ingest is None:
+            raise HTTPException(status_code=503, detail="ingestion is not available")
+        max_bytes = services.max_upload_bytes()
+        form = await parse_upload_form(
+            request.headers.get("content-type", ""),
+            request.stream(),
+            spool=services.settings.data_dir / "knowledge" / "tmp",
+            max_bytes=max_bytes,
+            allowed_suffixes=frozenset(ALLOWED_TYPES),
+        )
+        try:
+            if not form.files or len(form.files) != len(form.relative_paths):
+                raise HTTPException(
+                    status_code=422, detail="send one relative_path for every file, in order"
+                )
+
+            def submit_all() -> list[UploadResult]:
+                results: list[UploadResult] = []
+                conn = services.connect()
+                try:
+                    for part, rel in zip(form.files, form.relative_paths):
+                        name = rel or part.filename or "upload"
+                        refused = _type_and_size(name, part.size, max_bytes)
+                        if part.path is None or refused is not None:
+                            refused = refused or _type_and_size(name, max_bytes + 1, max_bytes)
+                            assert refused is not None
+                            from hal9000.knowledge.obs.metrics import record_ingest_file
+
+                            record_ingest_file(refused.status)
+                            result = UploadResult(
+                                relative_path=refused.relative_path,
+                                status=refused.status,  # type: ignore[arg-type]
+                                reason=refused.reason,
+                            )
+                        else:
+                            result = services.ingest.submit(conn, part.path, name)
+                        results.append(
+                            result.model_copy(
+                                update={"collection": display_collection(result.collection)}
+                            )
+                        )
+                finally:
+                    conn.close()
+                return results
+
+            results = await run_in_threadpool(submit_all)
+        finally:
+            form.discard()
+        services.notify_worker()
+        return UploadResponse(results=results)
 
     @r.get("/jobs", response_model=list[Job], tags=["library"])
-    def list_jobs() -> list[Job]:
-        _stub()
+    def list_jobs(conn: Db) -> list[Job]:
+        from hal9000.knowledge.ingest.jobs import list_jobs as jobs
+
+        return jobs(conn, limit=200)
 
     @r.get(
         "/jobs/stream",
         tags=["library"],
         responses={200: {**_SSE, "description": "SSE: one `job` event (a Job) per change"}},
     )
-    def stream_jobs() -> None:
-        """Live job progress (server-sent events)."""
-        _stub()
+    async def stream_jobs(services: Services) -> Response:
+        """Live job progress (server-sent events): the recent jobs, then every change."""
+        from sse_starlette import EventSourceResponse
+        from starlette.concurrency import run_in_threadpool
+
+        from hal9000.knowledge.ingest.jobs import list_jobs as jobs
+
+        bus = services.bus
+        inbox, unsubscribe = bus.asyncio_queue() if bus is not None else (asyncio.Queue(), None)
+
+        def snapshot() -> list[Job]:
+            conn = services.connect()
+            try:
+                return list(reversed(jobs(conn, limit=200)))
+            finally:
+                conn.close()
+
+        recent = await run_in_threadpool(snapshot)
+
+        async def events() -> AsyncIterator[dict]:
+            try:
+                for job in recent:
+                    yield {"event": "job", "data": job.model_dump_json()}
+                while True:
+                    job = await inbox.get()
+                    yield {"event": "job", "data": job.model_dump_json()}
+            finally:
+                if unsubscribe is not None:
+                    unsubscribe()
+
+        return EventSourceResponse(events(), ping=15)
+
+    @r.post(
+        "/jobs/{id}/retry",
+        response_model=Job,
+        tags=["library"],
+        responses={
+            409: {"model": ErrorResponse, "description": "Only a failed job can be retried"}
+        },
+    )
+    def retry_job(id: int, services: Services, conn: Db) -> Job:
+        """Queue a failed job again with its original parameters."""
+        from hal9000.knowledge.ingest.jobs import JobNotFound, JobNotRetryable
+        from hal9000.knowledge.ingest.jobs import retry_job as retry
+
+        try:
+            return retry(conn, id, bus=services.bus, worker=services.worker)
+        except JobNotFound:
+            raise _not_found("Job") from None
+        except JobNotRetryable as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
 
     # -- library -----------------------------------------------------------------
     @r.get("/documents", response_model=list[DocumentSummary], tags=["library"])
     def list_documents(
-        collection: str | None = None, doc_type: DocType | None = None
+        conn: Db, collection: str | None = None, doc_type: DocType | None = None
     ) -> list[DocumentSummary]:
-        _stub()
+        from hal9000.knowledge.api.library import list_documents as documents
+
+        try:
+            return documents(conn, collection=collection, doc_type=doc_type)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
 
     @r.get("/documents/{id}", response_model=DocumentDetail, tags=["library"])
-    def get_document(id: int) -> DocumentDetail:
-        _stub()
+    def get_document(id: int, conn: Db) -> DocumentDetail:
+        from hal9000.knowledge.api.library import document_detail
+
+        detail = document_detail(conn, id)
+        if detail is None:
+            raise _not_found("Document")
+        return detail
 
     @r.patch("/documents/{id}", response_model=DocumentMeta, tags=["library"])
-    def update_document(id: int, body: DocumentPatch) -> DocumentMeta:
-        """Edit metadata; user edits always win over segmentation."""
-        _stub()
+    def update_document(id: int, body: DocumentPatch, services: Services, conn: Db) -> DocumentMeta:
+        """Edit metadata; user edits always win over segmentation (the file is re-indexed)."""
+        from hal9000.knowledge.api.library import EditError, patch_document
+
+        try:
+            doc = patch_document(conn, id, body)
+        except EditError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+        if doc is None:
+            raise _not_found("Document")
+        _reindex_file(services, conn, doc.file_sha)
+        return doc
 
     @r.delete("/documents/{id}", status_code=204, tags=["library"])
-    def delete_document(id: int) -> None:
-        _stub()
+    def delete_document(id: int, services: Services, conn: Db) -> None:
+        from hal9000.knowledge.api.library import delete_document as delete
+
+        if not delete(conn, id, services.settings.files_dir):
+            raise _not_found("Document")
 
     @r.post("/documents/{id}/reindex", response_model=Job, tags=["library"])
-    def reindex_document(id: int) -> Job:
-        _stub()
+    def reindex_document(id: int, services: Services, conn: Db) -> Job:
+        """Re-run ingestion for the document's file (embeddings and labels are cached)."""
+        row = conn.execute("SELECT file_sha FROM documents WHERE id = ?", (id,)).fetchone()
+        if row is None:
+            raise _not_found("Document")
+        return _reindex_file(services, conn, row[0])
 
     @r.get(
         "/files/{sha}",
@@ -176,13 +476,40 @@ def _api_router() -> APIRouter:
             206: {"description": "Partial content (HTTP range request)"},
         },
     )
-    def get_file(sha: Sha) -> None:
-        _stub()
+    def get_file(sha: Sha, services: Services, conn: Db) -> Response:
+        from hal9000.knowledge.api.library import file_record
+
+        record = file_record(conn, sha)
+        stored = services.settings.files_dir / sha
+        if record is None or not stored.is_file():
+            raise _not_found("File")
+        headers = {"X-Content-Type-Options": "nosniff", "Cache-Control": "private, max-age=3600"}
+        if record.mime_type == "application/pdf":
+            return FileResponse(
+                stored,
+                media_type="application/pdf",
+                headers=headers,
+                filename=_safe_name(record.original_name),
+                content_disposition_type="inline",
+            )
+        headers["Content-Security-Policy"] = "sandbox"
+        return FileResponse(
+            stored,
+            media_type="application/octet-stream",
+            headers=headers,
+            filename=_safe_name(record.original_name),
+            content_disposition_type="attachment",
+        )
 
     @r.get("/files/{sha}/pages/{n}", response_model=PageView, tags=["library"])
-    def get_page(sha: Sha, n: Annotated[int, Path(ge=1)]) -> PageView:
+    def get_page(sha: Sha, n: Annotated[int, PathParam(ge=1)], conn: Db) -> PageView:
         """Cleaned page (or pseudo-page) text and the chunk spans on it."""
-        _stub()
+        from hal9000.knowledge.api.library import page_view
+
+        view = page_view(conn, sha, n)
+        if view is None:
+            raise _not_found("Page")
+        return view
 
     # -- chat (plan §7) ----------------------------------------------------------
     @r.post(
@@ -193,38 +520,61 @@ def _api_router() -> APIRouter:
                 "model": ChatEventEnvelope,
                 "description": "SSE over the POST response. Events: status, sources, token, "
                 "reset, verify, done; each `data:` line is the matching ChatEventEnvelope.event.",
-            }
+            },
+            409: {"model": ErrorResponse, "description": "No index profile is active yet"},
+            429: {"model": ErrorResponse, "description": "More than 20 questions a minute"},
         },
     )
-    def chat(body: ChatRequest) -> None:
+    async def chat(body: ChatRequest, session: Signed, services: Services) -> Response:
         """Ask a question. Read the stream with fetch + ReadableStream, not EventSource."""
-        _stub()
+        return await _chat(body, session, services)
 
     @r.get("/conversations", response_model=list[ConversationSummary], tags=["chat"])
-    def list_conversations() -> list[ConversationSummary]:
-        _stub()
+    def list_conversations(session: Signed, conn: Db) -> list[ConversationSummary]:
+        from hal9000.knowledge.answer.store import list_conversations as conversations
+
+        return conversations(conn, session.id)
 
     @r.get("/conversations/{id}", response_model=ConversationDetail, tags=["chat"])
-    def get_conversation(id: int) -> ConversationDetail:
-        _stub()
+    def get_conversation(id: int, session: Signed, conn: Db) -> ConversationDetail:
+        from hal9000.knowledge.answer.store import get_conversation as conversation
+
+        found = conversation(conn, session.id, id)
+        if found is None:
+            raise _not_found("Conversation")
+        return found
 
     @r.delete("/conversations", status_code=204, tags=["chat"])
-    def delete_conversations() -> None:
+    def delete_conversations(session: Signed, conn: Db) -> None:
         """Delete this session's conversation history."""
-        _stub()
+        from hal9000.knowledge.answer.store import delete_conversations as delete
+
+        delete(conn, session.id)
 
     @r.delete("/conversations/{id}", status_code=204, tags=["chat"])
-    def delete_conversation(id: int) -> None:
-        _stub()
+    def delete_conversation(id: int, session: Signed, conn: Db) -> None:
+        from hal9000.knowledge.answer.store import delete_conversation as delete
+
+        if not delete(conn, session.id, id):
+            raise _not_found("Conversation")
 
     @r.post("/feedback", response_model=FeedbackResponse, tags=["chat"])
-    def create_feedback(body: FeedbackRequest) -> FeedbackResponse:
-        """Thumbs up/down, a comment, and optionally "Add to question set"."""
-        _stub()
+    def create_feedback(body: FeedbackRequest, session: Signed, conn: Db) -> FeedbackResponse:
+        """Thumbs up/down, a comment, and optionally "Add to question set".
+
+        One row per message: a later post for the same message updates it.
+        """
+        from hal9000.knowledge.answer.store import message_session, save_feedback
+
+        if message_session(conn, body.message_id) != session.id:
+            raise _not_found("Message")
+        return save_feedback(conn, body)
 
     @r.get("/search", response_model=RetrievalResult, tags=["chat"])
     def search(
         q: Annotated[str, Query(min_length=1)],
+        services: Services,
+        conn: Db,
         k: Annotated[int, Query(ge=1, le=100)] = 10,
         doc_type: DocType | None = None,
         collection: str | None = None,
@@ -232,103 +582,399 @@ def _api_router() -> APIRouter:
         date_to: date | None = None,
     ) -> RetrievalResult:
         """Retrieval only, with scores (debugging and retrieval-only mode)."""
-        _stub()
+        from hal9000.cost.metering import BudgetExceeded
+        from hal9000.knowledge.answer.pipeline import NoActiveProfile
+
+        filters = SearchFilters(
+            doc_type=doc_type, collection=collection, date_from=date_from, date_to=date_to
+        )
+        pipeline = services.answerer
+        try:
+            try:
+                pipeline.deps.check_budget(q)
+                result = pipeline.search(conn, q, k=k, filters=filters)
+            except BudgetExceeded:  # over the cap: keyword search still works (plan §7.4)
+                result = pipeline.search(conn, q, k=k, filters=filters, bm25_only=True)
+        except NoActiveProfile as error:
+            raise HTTPException(status_code=409, detail=str(error)) from None
+        return result.model_copy(update={"candidates": result.candidates[:k]})
 
     # -- evaluation (plan §8) ----------------------------------------------------
     @r.get("/eval/gold", response_model=list[GoldItem], tags=["eval"])
     def list_gold(
-        status: str | None = None, split: str | None = None, category: str | None = None
+        conn: Db, status: str | None = None, split: str | None = None, category: str | None = None
     ) -> list[GoldItem]:
-        _stub()
+        from hal9000.knowledge.eval.store import list_gold as gold
+
+        return list(reversed(gold(conn, status=status, split=split, category=category)))
 
     @r.get("/eval/gold/{id}", response_model=GoldItem, tags=["eval"])
-    def get_gold(id: int) -> GoldItem:
-        _stub()
+    def get_gold(id: int, conn: Db) -> GoldItem:
+        from hal9000.knowledge.eval.store import get_gold as gold
+
+        item = gold(conn, id)
+        if item is None:
+            raise _not_found("Question")
+        return item
 
     @r.patch("/eval/gold/{id}", response_model=GoldItem, tags=["eval"])
-    def update_gold(id: int, body: GoldPatch) -> GoldItem:
+    def update_gold(id: int, body: GoldPatch, conn: Db) -> GoldItem:
         """Approve, edit or reject a question-set item."""
-        _stub()
+        from hal9000.knowledge.api.evaluation import patch_gold
+
+        try:
+            item = patch_gold(conn, id, body)
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from None
+        if item is None:
+            raise _not_found("Question")
+        return item
 
     @r.get("/eval/judge-labels", response_model=list[JudgeLabel], tags=["eval"])
-    def list_judge_labels(run: str | None = None) -> list[JudgeLabel]:
-        _stub()
+    def list_judge_labels(conn: Db, run: str | None = None) -> list[JudgeLabel]:
+        from hal9000.knowledge.eval.store import list_judge_labels as labels
+
+        return labels(conn, eval_run_id=run)
 
     @r.get("/eval/judge-labels/{id}", response_model=JudgeLabel, tags=["eval"])
-    def get_judge_label(id: int) -> JudgeLabel:
-        _stub()
+    def get_judge_label(id: int, conn: Db) -> JudgeLabel:
+        from hal9000.knowledge.api.evaluation import judge_label
+
+        label = judge_label(conn, id)
+        if label is None:
+            raise _not_found("Label")
+        return label
 
     @r.put("/eval/judge-labels/{id}", response_model=JudgeLabel, tags=["eval"])
-    def put_judge_label(id: int, body: JudgeLabelUpdate) -> JudgeLabel:
+    def put_judge_label(id: int, body: JudgeLabelUpdate, conn: Db) -> JudgeLabel:
         """Mike's rubric labels for one generated answer (gate G-K1b)."""
-        _stub()
+        from hal9000.knowledge.api.evaluation import judge_label
+        from hal9000.knowledge.eval.store import set_human_labels
+
+        try:
+            set_human_labels(conn, id, body.human)
+        except KeyError:
+            raise _not_found("Label") from None
+        label = judge_label(conn, id)
+        assert label is not None
+        return label
 
     @r.get("/eval/runs", response_model=list[EvalRun], tags=["eval"])
-    def list_eval_runs(stage: str | None = None) -> list[EvalRun]:
-        _stub()
+    def list_eval_runs(conn: Db, stage: str | None = None) -> list[EvalRun]:
+        from hal9000.knowledge.eval.runs import list_runs
+
+        return list_runs(conn, stage=stage)
 
     @r.get("/eval/runs/{id}", response_model=EvalRun, tags=["eval"])
-    def get_eval_run(id: str) -> EvalRun:
-        _stub()
+    def get_eval_run(id: str, conn: Db) -> EvalRun:
+        from hal9000.knowledge.eval.runs import get_run
+
+        run = get_run(conn, id)
+        if run is None:
+            raise _not_found("Run")
+        return run
+
+    @r.get("/eval/runs/{id}/results", response_model=EvalResultsPage, tags=["eval"])
+    def get_eval_run_results(
+        id: str,
+        conn: Db,
+        offset: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=500)] = 25,
+    ) -> EvalResultsPage:
+        """One run's per-question results, a page at a time."""
+        from hal9000.knowledge.eval.runs import results_page
+
+        try:
+            return results_page(conn, id, offset=offset, limit=limit)
+        except KeyError:
+            raise _not_found("Run") from None
 
     # -- profile and traces --------------------------------------------------------
     @r.get("/profile", response_model=ProfileState, tags=["profile"])
-    def get_profile() -> ProfileState:
-        _stub()
+    def get_profile(conn: Db) -> ProfileState:
+        from hal9000.knowledge.api.evaluation import profile_state
 
-    @r.put("/profile", response_model=ProfileState, tags=["profile"])
-    def put_profile(body: ProfileActivate) -> ProfileState:
-        """Switch the active profile; re-indexes in the background."""
-        _stub()
+        return profile_state(conn)
+
+    @r.put(
+        "/profile",
+        response_model=ProfileState,
+        tags=["profile"],
+        responses={409: {"model": ErrorResponse, "description": "The profile isn't built yet"}},
+    )
+    def put_profile(body: ProfileActivate, services: Services, conn: Db) -> ProfileState:
+        """Switch to an existing, built profile.
+
+        The switch runs as a background ``reindex`` job (a built profile is not
+        rebuilt: the job only activates it), so the UI follows it on the job
+        stream like any re-index; answers keep using the old profile until then.
+        """
+        from hal9000.knowledge.api.evaluation import profile_state
+        from hal9000.knowledge.index.profiles import activate_profile, profile_status
+
+        status = profile_status(conn, body.name)
+        if status is None or "#" in body.name:
+            raise _not_found("Profile")
+        if status != "ready":
+            raise HTTPException(
+                status_code=409,
+                detail=f"profile {body.name!r} is {status}; only a built profile can be activated",
+            )
+        if services.ingest is None:
+            activate_profile(conn, body.name)
+            return profile_state(conn)
+        job = services.ingest.enqueue_build(conn, body.name, activate=True)
+        services.notify_worker()
+        return profile_state(conn).model_copy(update={"reindex_job": job})
 
     @r.get("/traces", response_model=list[TraceSummary], tags=["traces"])
-    def list_traces(limit: Annotated[int, Query(ge=1, le=500)] = 50) -> list[TraceSummary]:
-        _stub()
+    def list_traces(
+        conn: Db, limit: Annotated[int, Query(ge=1, le=500)] = 50
+    ) -> list[TraceSummary]:
+        from hal9000.knowledge.api.evaluation import trace_summaries
+
+        return trace_summaries(conn, limit)
 
     @r.get("/traces/{id}", response_model=Trace, tags=["traces"])
-    def get_trace(id: str) -> Trace:
+    def get_trace(id: str, conn: Db) -> Trace:
         """The Query Inspector's data for one question."""
-        _stub()
+        from hal9000.knowledge.obs.traces import load_trace
+
+        trace = load_trace(conn, id)
+        if trace is None:
+            raise _not_found("Trace")
+        return trace
 
     return r
 
 
-def _ops_router() -> APIRouter:
-    r = APIRouter(responses={501: _ERRORS[501]})
+def _safe_name(name: str) -> str:
+    base = PurePosixPath(name).name or "original"
+    return "".join(ch for ch in base if ch.isprintable() and ch not in '"\\;') or "original"
+
+
+def _reindex_file(services, conn: sqlite3.Connection, sha: str) -> Job:
+    from hal9000.knowledge.ingest.jobs import create_job
+
+    if services.ingest is None:
+        raise HTTPException(status_code=503, detail="ingestion is not available")
+    record = conn.execute(
+        "SELECT relative_path, collection FROM files WHERE sha256 = ?", (sha,)
+    ).fetchone()
+    if record is None:
+        raise _not_found("File")
+    active = conn.execute(
+        "SELECT id FROM jobs WHERE file_sha = ? AND status IN ('queued', 'running') LIMIT 1",
+        (sha,),
+    ).fetchone()
+    if active is not None:
+        from hal9000.knowledge.ingest.jobs import get_job
+
+        job = get_job(conn, active[0])
+        assert job is not None
+        return job
+    job = create_job(
+        conn,
+        "ingest",
+        file_sha=sha,
+        params={
+            "relative_path": record[0],
+            "collection": record[1],
+            "use_llm": bool(services.ingest.use_llm),
+        },
+        detail="queued (re-index)",
+        bus=services.bus,
+    )
+    services.notify_worker()
+    return job
+
+
+# ------------------------------------------------------------------- chat
+async def _chat(body: ChatRequest, session: Session, services) -> Response:
+    from sse_starlette import EventSourceResponse
+    from starlette.concurrency import run_in_threadpool
+
+    from hal9000.knowledge.answer import store
+    from hal9000.knowledge.answer.generate import Cancelled
+    from hal9000.knowledge.answer.pipeline import NoActiveProfile
+    from hal9000.knowledge.answer.retrieval import Turn
+    from hal9000.knowledge.contracts import Answer
+
+    question = body.message.strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="Ask a question first.")
+    limiter = services.chat_limiter
+    if not limiter.allow(session.id):
+        raise HTTPException(
+            status_code=429,
+            detail="That's a lot of questions at once. Wait a moment and ask again.",
+            headers={"Retry-After": str(limiter.retry_after(session.id))},
+        )
+
+    def prepare() -> tuple[int, list[Turn]]:
+        conn = services.connect()
+        try:
+            services.answerer._profile(conn)  # NoActiveProfile before anything streams
+            turns = services.knowledge_file().retrieval.history_turns
+            if body.conversation_id is not None:
+                if store.get_conversation(conn, session.id, body.conversation_id) is None:
+                    raise _not_found("Conversation")
+                conversation = body.conversation_id
+                past = store.history(conn, conversation, turns)
+            else:
+                conversation = store.create_conversation(conn, session.id, question)
+                past = []
+            store.add_message(conn, conversation, "user", question)
+            return conversation, [Turn(role, text) for role, text in past]  # type: ignore[arg-type]
+        finally:
+            conn.close()
+
+    try:
+        conversation, history = await run_in_threadpool(prepare)
+    except NoActiveProfile as error:
+        raise HTTPException(status_code=409, detail=str(error)) from None
+
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+    cancel = threading.Event()
+
+    def emit(event: Any) -> None:
+        _put(loop, queue, event)
+
+    def answer_question() -> None:
+        conn = services.connect()
+        try:
+
+            def on_answer(answer: Answer) -> Answer:
+                message = store.add_message(
+                    conn,
+                    conversation,
+                    "assistant",
+                    answer.text,
+                    citations=answer.citations,
+                    trace_id=answer.trace_id,
+                    outcome=answer.outcome,
+                    grounding=answer.grounding,
+                    issues=answer.issues,
+                )
+                if answer.outcome == "answered":
+                    services.write_health(conn)
+                return answer.model_copy(
+                    update={"message_id": message.id, "conversation_id": conversation}
+                )
+
+            services.answerer.ask(
+                conn,
+                question,
+                emit=emit,
+                history=history,
+                filters=body.filters,
+                cancel=cancel,
+                on_answer=on_answer,
+            )
+        except Cancelled:
+            log.info("a question was cancelled: the client went away")
+        except Exception:
+            log.exception("answering failed")
+        finally:
+            conn.close()
+            _put(loop, queue, _END)
+
+    context = contextvars.copy_context()  # the trace and usage sink live in context variables
+    threading.Thread(
+        target=context.run, args=(answer_question,), name="kb-question", daemon=True
+    ).start()
+
+    async def events() -> AsyncIterator[dict]:
+        try:
+            while True:
+                event = await queue.get()
+                if event is _END:
+                    break
+                yield {"event": event.event, "data": event.model_dump_json()}
+        finally:
+            cancel.set()  # the client went away (or the stream ended: then it's a no-op)
+
+    return EventSourceResponse(events(), ping=15, headers={"Cache-Control": "no-cache"})
+
+
+# -------------------------------------------------------------------- ops
+def _ops_router(db_path: Path | None) -> APIRouter:
+    from hal9000.knowledge.obs.metrics import metrics_router
+
+    r = APIRouter()
 
     @r.get("/health", response_model=Health, tags=["ops"])
-    def health() -> Health:
-        """Unauthenticated (LAN only); never exposes question text."""
-        _stub()
+    def health(request: Request) -> Health:
+        """Unauthenticated (LAN only); never exposes question text.
 
-    @r.get(
-        "/metrics",
-        tags=["ops"],
-        responses={
-            200: {
-                "description": "Prometheus exposition format",
-                "content": {"text/plain": {"schema": {"type": "string"}}},
-            }
-        },
-    )
-    def metrics() -> None:
-        _stub()
+        Also writes ``data/knowledge_health.json`` for HAL's watchdog.
+        """
+        services = services_of(request)
+        from hal9000.knowledge.index.profiles import active_profile
 
+        conn = services.connect()
+        try:
+            profile = active_profile(conn)
+            body = services.write_health(conn)
+        finally:
+            conn.close()
+        retrieval_only = services.retrieval_only()
+        return Health(
+            status="ok" if profile is not None and not retrieval_only else "degraded",
+            version=__version__,
+            active_profile=profile.name if profile else None,
+            month_spend_usd=body["month_spend_usd"],
+            month_cap_usd=services.settings.monthly_cap_usd,
+            retrieval_only=retrieval_only,
+        )
+
+    r.include_router(metrics_router(db_path))
     return r
 
 
-def create_app() -> FastAPI:
-    """Build the app. KWP6 adds auth, the pipeline and static UI serving."""
+def _static(app: FastAPI, dist: Path) -> None:
+    """``web/dist`` at ``/``: real files, else ``index.html`` (the UI's history routes)."""
+    root = dist.resolve()
+    index = root / "index.html"
+    reserved = ("api", "health", "metrics")
+
+    @app.get("/{path:path}", include_in_schema=False)
+    def spa(path: str) -> Response:
+        first = path.split("/", 1)[0]
+        if first in reserved:
+            raise HTTPException(status_code=404, detail="Not Found")
+        target = (root / path).resolve()
+        if path and target.is_file() and target.is_relative_to(root):
+            cache = "public, max-age=31536000, immutable" if first == "assets" else "no-cache"
+            return FileResponse(target, headers={"Cache-Control": cache})
+        if not index.is_file():
+            raise HTTPException(status_code=404, detail="Not Found")
+        return FileResponse(index, headers={"Cache-Control": "no-cache"})
+
+
+def create_app(services: Any | None = None, *, web_dist: Path | None | bool = None) -> FastAPI:
+    """Build the app. ``web_dist``: the UI build to serve (default ``web/dist`` if built)."""
+    serving = services is not None  # the running service publishes no docs or schema
     app = FastAPI(
         title="HAL 9000 house knowledge",
         version=__version__,
         description="The contract between the knowledge-base backend and its web UI "
         "(docs/KNOWLEDGE_PLAN.md §11).",
         generate_unique_id_function=_operation_id,
+        docs_url=None if serving else "/docs",
+        redoc_url=None if serving else "/redoc",
+        openapi_url=None if serving else "/openapi.json",
     )
+    app.state.services = services
+    app.add_middleware(RequestGuard)
+    app.include_router(_session_router())
     app.include_router(_api_router())
-    app.include_router(_ops_router())
+    app.include_router(_ops_router(services.settings.db_path if services else None))
     _document_chat_stream(app)
+    dist = WEB_DIST if web_dist is None else web_dist
+    if services is not None and isinstance(dist, Path) and (dist / "index.html").is_file():
+        _static(app, dist)
     return app
 
 
@@ -347,6 +993,20 @@ def _document_chat_stream(app: FastAPI) -> None:
             ok["content"] = {
                 "text/event-stream": {"schema": {"$ref": "#/components/schemas/ChatEventEnvelope"}}
             }
+            # the upload handler parses its own stream; document its form as before
+            schema["paths"]["/api/uploads"]["post"]["requestBody"] = {
+                "content": {
+                    "multipart/form-data": {
+                        "schema": {"$ref": "#/components/schemas/Body_create_uploads"}
+                    }
+                },
+                "required": True,
+            }
+            schema["paths"]["/api/uploads"]["post"]["responses"].setdefault(
+                "422", _VALIDATION_ERROR
+            )
+            schema["components"]["schemas"]["Body_create_uploads"] = _UPLOAD_FORM
+            schema["components"]["schemas"] = dict(sorted(schema["components"]["schemas"].items()))
             app.openapi_schema = schema
         return app.openapi_schema
 

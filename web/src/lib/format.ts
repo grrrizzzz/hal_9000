@@ -73,6 +73,7 @@ const OUTCOME_LABEL: Record<Outcome, string> = {
   abstained: "Not in documents",
   retrieval_only: "Sources only",
   error: "Error",
+  cancelled: "Cancelled",
 };
 export const outcomeLabel = (o: Outcome | null | undefined) => (o ? OUTCOME_LABEL[o] : "—");
 export const outcomeTone = (o: Outcome | null | undefined) =>

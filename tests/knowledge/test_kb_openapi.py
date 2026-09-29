@@ -1,4 +1,8 @@
-"""The API contract: every plan §11 route, a valid schema, and no drift from the committed file."""
+"""The API contract: every plan §11 route, a valid schema, and no drift from the committed file.
+
+KWP6 replaced the KWP0 stubs; the approved additions (``GET /api/eval/runs/{id}/results``,
+``POST /api/jobs/{id}/retry``) are listed separately from the plan's routes.
+"""
 
 from __future__ import annotations
 
@@ -52,6 +56,11 @@ PLAN_ROUTES = {
     ("GET", "/health"),
     ("GET", "/metrics"),
 }
+#: Contract additions approved for KWP6 (web/src/api/pending-contract.ts).
+APPROVED_ROUTES = {
+    ("GET", "/api/eval/runs/{id}/results"),
+    ("POST", "/api/jobs/{id}/retry"),
+}
 
 RUBRIC = {"correctness": "correct", "faithful": True, "citations_correct": True}
 #: A valid request for each route, so the stub (not validation) answers.
@@ -80,13 +89,13 @@ def _served(schema: dict) -> set[tuple[str, str]]:
 
 
 def test_the_schema_lists_every_plan_route_and_nothing_else(schema):
-    assert _served(schema) == PLAN_ROUTES == set(ROUTES)
+    assert _served(schema) == PLAN_ROUTES | APPROVED_ROUTES == set(ROUTES)
 
 
 def test_the_committed_schema_is_valid_and_complete():
     committed = json.loads(COMMITTED.read_text())
     validate(committed)
-    assert _served(committed) == PLAN_ROUTES
+    assert _served(committed) == PLAN_ROUTES | APPROVED_ROUTES
 
 
 def test_the_committed_file_matches_the_app():
@@ -131,13 +140,17 @@ def test_models_from_contracts_are_in_the_schema(schema):
     assert len(ids) == len(set(ids)) and "list_documents" in ids
 
 
-@pytest.mark.parametrize(("method", "path"), sorted(PLAN_ROUTES))
-def test_every_route_is_a_501_stub(method, path):
+@pytest.mark.parametrize(("method", "path"), sorted(PLAN_ROUTES | APPROVED_ROUTES))
+def test_without_services_every_route_but_metrics_is_unavailable(method, path):
+    """``create_app()`` alone (the OpenAPI export) serves no data; nothing is a stub any more."""
     client = TestClient(create_app())
     url = path.replace("{id}", "1").replace("{sha}", SHA).replace("{n}", "2")
     response = client.request(method, url, **REQUESTS.get((method, path), {}))
-    assert response.status_code == 501, response.text
-    assert "not implemented" in response.json()["detail"]
+    if path == "/metrics":
+        assert response.status_code == 200
+        return
+    assert response.status_code == 503, response.text
+    assert "not configured" in response.json()["detail"]
 
 
 def _load_exporter():

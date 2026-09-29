@@ -12,17 +12,17 @@
           "session"
         ],
         "summary": "Create Session",
-        "description": "Exchange the household passcode for a signed session cookie.",
+        "description": "Exchange the household passcode for a signed session cookie (30 days).\n\nAt most 10 attempts a minute per address are evaluated; each is counted\nbefore the passcode is checked, and a success clears the count.",
         "operationId": "create_session",
         "requestBody": {
+          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/SessionRequest"
               }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "200": {
@@ -45,8 +45,8 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
+          "429": {
+            "description": "Too many attempts",
             "content": {
               "application/json": {
                 "schema": {
@@ -72,8 +72,20 @@
           "session"
         ],
         "summary": "Delete Session",
-        "description": "Sign out.",
+        "description": "Sign out: this session is revoked on the server; ``everywhere`` revokes every session.",
         "operationId": "delete_session",
+        "parameters": [
+          {
+            "name": "everywhere",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Everywhere"
+            }
+          }
+        ],
         "responses": {
           "204": {
             "description": "Successful Response"
@@ -88,12 +100,12 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
+          "422": {
+            "description": "Validation Error",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -107,18 +119,8 @@
           "library"
         ],
         "summary": "Create Uploads",
-        "description": "Upload many files; folder paths become collections. Returns job IDs.",
+        "description": "Upload many files; folder paths become collections. Returns job IDs.\n\nMultipart ``files`` with one ``relative_path`` each, in order. The body\nis parsed as it streams in; each file is written once, to the upload\nspool, and stops being written at ``ingest.max_upload_bytes``.",
         "operationId": "create_uploads",
-        "requestBody": {
-          "content": {
-            "multipart/form-data": {
-              "schema": {
-                "$ref": "#/components/schemas/Body_create_uploads"
-              }
-            }
-          },
-          "required": true
-        },
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -140,8 +142,8 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
+          "413": {
+            "description": "The body is too large",
             "content": {
               "application/json": {
                 "schema": {
@@ -160,6 +162,16 @@
               }
             }
           }
+        },
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_create_uploads"
+              }
+            }
+          },
+          "required": true
         }
       }
     },
@@ -194,16 +206,6 @@
                 }
               }
             }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
           }
         }
       }
@@ -214,7 +216,7 @@
           "library"
         ],
         "summary": "Stream Jobs",
-        "description": "Live job progress (server-sent events).",
+        "description": "Live job progress (server-sent events): the recent jobs, then every change.",
         "operationId": "stream_jobs",
         "responses": {
           "200": {
@@ -239,13 +241,66 @@
                 }
               }
             }
+          }
+        }
+      }
+    },
+    "/api/jobs/{id}/retry": {
+      "post": {
+        "tags": [
+          "library"
+        ],
+        "summary": "Retry Job",
+        "description": "Queue a failed job again with its original parameters.",
+        "operationId": "retry_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
+          "401": {
+            "description": "Not signed in",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Only a failed job can be retried",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -331,16 +386,6 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -393,16 +438,6 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -420,7 +455,7 @@
           "library"
         ],
         "summary": "Update Document",
-        "description": "Edit metadata; user edits always win over segmentation.",
+        "description": "Edit metadata; user edits always win over segmentation (the file is re-indexed).",
         "operationId": "update_document",
         "parameters": [
           {
@@ -456,16 +491,6 @@
           },
           "401": {
             "description": "Not signed in",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
             "content": {
               "application/json": {
                 "schema": {
@@ -517,16 +542,6 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -546,6 +561,7 @@
           "library"
         ],
         "summary": "Reindex Document",
+        "description": "Re-run ingestion for the document's file (embeddings and labels are cached).",
         "operationId": "reindex_document",
         "parameters": [
           {
@@ -571,16 +587,6 @@
           },
           "401": {
             "description": "Not signed in",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
             "content": {
               "application/json": {
                 "schema": {
@@ -644,16 +650,6 @@
           },
           "401": {
             "description": "Not signed in",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
             "content": {
               "application/json": {
                 "schema": {
@@ -729,16 +725,6 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -791,8 +777,18 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
+          "409": {
+            "description": "No index profile is active yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "More than 20 questions a minute",
             "content": {
               "application/json": {
                 "schema": {
@@ -845,16 +841,6 @@
                 }
               }
             }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
           }
         }
       },
@@ -871,16 +857,6 @@
           },
           "401": {
             "description": "Not signed in",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
             "content": {
               "application/json": {
                 "schema": {
@@ -923,16 +899,6 @@
           },
           "401": {
             "description": "Not signed in",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
             "content": {
               "application/json": {
                 "schema": {
@@ -984,16 +950,6 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -1013,7 +969,7 @@
           "chat"
         ],
         "summary": "Create Feedback",
-        "description": "Thumbs up/down, a comment, and optionally \"Add to question set\".",
+        "description": "Thumbs up/down, a comment, and optionally \"Add to question set\".\n\nOne row per message: a later post for the same message updates it.",
         "operationId": "create_feedback",
         "requestBody": {
           "content": {
@@ -1038,16 +994,6 @@
           },
           "401": {
             "description": "Not signed in",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1200,16 +1146,6 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -1305,16 +1241,6 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -1359,16 +1285,6 @@
           },
           "401": {
             "description": "Not signed in",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1430,16 +1346,6 @@
           },
           "401": {
             "description": "Not signed in",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1511,16 +1417,6 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -1565,16 +1461,6 @@
           },
           "401": {
             "description": "Not signed in",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1636,16 +1522,6 @@
           },
           "401": {
             "description": "Not signed in",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1717,16 +1593,6 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -1779,8 +1645,74 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/eval/runs/{id}/results": {
+      "get": {
+        "tags": [
+          "eval"
+        ],
+        "summary": "Get Eval Run Results",
+        "description": "One run's per-question results, a page at a time.",
+        "operationId": "get_eval_run_results",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Id"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 0,
+              "title": "Offset"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 500,
+              "minimum": 1,
+              "default": 25,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EvalResultsPage"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Not signed in",
             "content": {
               "application/json": {
                 "schema": {
@@ -1829,16 +1761,6 @@
                 }
               }
             }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
           }
         }
       },
@@ -1847,7 +1769,7 @@
           "profile"
         ],
         "summary": "Put Profile",
-        "description": "Switch the active profile; re-indexes in the background.",
+        "description": "Switch to an existing, built profile.\n\nThe switch runs as a background ``reindex`` job (a built profile is not\nrebuilt: the job only activates it), so the UI follows it on the job\nstream like any re-index; answers keep using the old profile until then.",
         "operationId": "put_profile",
         "requestBody": {
           "content": {
@@ -1880,8 +1802,8 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
+          "409": {
+            "description": "The profile isn't built yet",
             "content": {
               "application/json": {
                 "schema": {
@@ -1949,16 +1871,6 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -2012,16 +1924,6 @@
               }
             }
           },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
           "422": {
             "description": "Validation Error",
             "content": {
@@ -2041,7 +1943,7 @@
           "ops"
         ],
         "summary": "Health",
-        "description": "Unauthenticated (LAN only); never exposes question text.",
+        "description": "Unauthenticated (LAN only); never exposes question text.\n\nAlso writes ``data/knowledge_health.json`` for HAL's watchdog.",
         "operationId": "health",
         "responses": {
           "200": {
@@ -2050,16 +1952,6 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Health"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2078,22 +1970,9 @@
           "200": {
             "description": "Prometheus exposition format",
             "content": {
-              "application/json": {
-                "schema": {}
-              },
               "text/plain": {
                 "schema": {
                   "type": "string"
-                }
-              }
-            }
-          },
-          "501": {
-            "description": "Not implemented yet (KWP6)",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -2123,7 +2002,8 @@
               "answered",
               "abstained",
               "retrieval_only",
-              "error"
+              "error",
+              "cancelled"
             ],
             "title": "Outcome"
           },
@@ -2293,6 +2173,7 @@
           },
           "message": {
             "type": "string",
+            "maxLength": 4000,
             "minLength": 1,
             "title": "Message"
           },
@@ -3087,6 +2968,117 @@
         "title": "EvalMetrics",
         "description": "Aggregate retrieval and answer metrics for one run (plan §8.2, §8.4.1).\n\nBudgeted metrics are keyed by the token budget (1000, 2000, 4000) or by *k*;\na missing key means N/A (e.g. a chunk size larger than the budget)."
       },
+      "EvalQuestionResult": {
+        "properties": {
+          "gold_item_id": {
+            "type": "integer",
+            "title": "Gold Item Id"
+          },
+          "question": {
+            "type": "string",
+            "title": "Question"
+          },
+          "category": {
+            "type": "string",
+            "enum": [
+              "factoid",
+              "money",
+              "date",
+              "list",
+              "cross_document",
+              "unanswerable"
+            ],
+            "title": "Category"
+          },
+          "recall": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Recall"
+          },
+          "full_support": {
+            "type": "boolean",
+            "title": "Full Support"
+          },
+          "first_hit_rank": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Hit Rank"
+          },
+          "abstain_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Abstain Score"
+          },
+          "abstained": {
+            "type": "boolean",
+            "title": "Abstained"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "gold_item_id",
+          "question",
+          "category",
+          "recall",
+          "full_support",
+          "first_hit_rank",
+          "abstain_score",
+          "abstained"
+        ],
+        "title": "EvalQuestionResult",
+        "description": "One question's result in an eval run: ``GET /api/eval/runs/{id}/results`` items.\n\n``recall`` is keyed by the token budget as a string (``\"2000\"``); a missing\nkey means N/A (the chunk size exceeds the budget, or the item is\nunanswerable)."
+      },
+      "EvalResultsPage": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/EvalQuestionResult"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Total"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0.0,
+            "title": "Offset"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1.0,
+            "title": "Limit"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "offset",
+          "limit"
+        ],
+        "title": "EvalResultsPage",
+        "description": "A page of an eval run's per-question results."
+      },
       "EvalRun": {
         "properties": {
           "id": {
@@ -3211,10 +3203,17 @@
             "title": "Message Id"
           },
           "rating": {
-            "type": "integer",
-            "enum": [
-              -1,
-              1
+            "anyOf": [
+              {
+                "type": "integer",
+                "enum": [
+                  -1,
+                  1
+                ]
+              },
+              {
+                "type": "null"
+              }
             ],
             "title": "Rating"
           },
@@ -3238,10 +3237,10 @@
         "additionalProperties": false,
         "type": "object",
         "required": [
-          "message_id",
-          "rating"
+          "message_id"
         ],
-        "title": "FeedbackRequest"
+        "title": "FeedbackRequest",
+        "description": "Feedback on one answer. One row per message: a later POST updates it.\n\n``rating`` may be left out only to add the answer to the question set."
       },
       "FeedbackResponse": {
         "properties": {
@@ -3812,6 +3811,13 @@
             "type": "string",
             "title": "Answer"
           },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/Citation"
+            },
+            "type": "array",
+            "title": "Citations"
+          },
           "human": {
             "anyOf": [
               {
@@ -3900,7 +3906,8 @@
                   "answered",
                   "abstained",
                   "retrieval_only",
-                  "error"
+                  "error",
+                  "cancelled"
                 ]
               },
               {
@@ -3908,6 +3915,29 @@
               }
             ],
             "title": "Outcome"
+          },
+          "grounding": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "verified",
+                  "failed",
+                  "skipped"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Grounding"
+          },
+          "issues": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Issues"
           },
           "created_at": {
             "type": "string",
@@ -4455,6 +4485,7 @@
         "properties": {
           "passcode": {
             "type": "string",
+            "maxLength": 256,
             "minLength": 1,
             "title": "Passcode"
           }
@@ -4662,7 +4693,8 @@
                   "answered",
                   "abstained",
                   "retrieval_only",
-                  "error"
+                  "error",
+                  "cancelled"
                 ]
               },
               {
@@ -4801,6 +4833,17 @@
             "format": "date-time",
             "title": "Created At"
           },
+          "question": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question"
+          },
           "outcome": {
             "anyOf": [
               {
@@ -4809,7 +4852,8 @@
                   "answered",
                   "abstained",
                   "retrieval_only",
-                  "error"
+                  "error",
+                  "cancelled"
                 ]
               },
               {
@@ -4853,7 +4897,7 @@
           "created_at"
         ],
         "title": "TraceSummary",
-        "description": "A Traces-page row: no question text (it may be shown on Grafana)."
+        "description": "A Traces-page row (the in-app list, behind the passcode).\n\nGrafana reads the ``traces`` table's scalar columns, never this model, so\nthe question text here doesn't reach it."
       },
       "UploadResponse": {
         "properties": {

@@ -242,7 +242,12 @@ def judge_prep(
             result.errors.append(f"item {item.id}: {type(error).__name__}: {error}")
             continue
         label_id = insert_judge_label(
-            conn, item.id, output.text, eval_run_id=eval_run_id, judge=labels
+            conn,
+            item.id,
+            output.text,
+            eval_run_id=eval_run_id,
+            judge=labels,
+            citations=output.citations,
         )
         result.label_ids.append(label_id)
     return result
