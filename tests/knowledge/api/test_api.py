@@ -679,3 +679,27 @@ def _raw_get(app, raw_path: bytes) -> tuple[int, bytes]:
     }
     asyncio.run(app(scope, receive, send))
     return sent["status"], sent["body"]
+
+
+def test_the_services_wire_the_post_ingest_regression(tmp_path):
+    from hal9000.knowledge.api.services import build_services
+    from hal9000.knowledge.ingest.pipeline import IngestPipeline, no_regression
+    from tests.knowledge.answer.conftest import make_settings
+
+    settings = make_settings(tmp_path)
+    built = build_services(settings, fake=True, start_worker=False)
+    try:
+        hook = built.ingest.regression
+        assert hook is not no_regression and hook.__qualname__.startswith("ingest_hook")
+    finally:
+        built.close()
+
+    def mine(conn, profile):
+        return None
+
+    injected = IngestPipeline(settings.files_dir, use_llm=False, regression=mine)
+    kept = build_services(settings, fake=True, start_worker=False, ingest=injected)
+    try:
+        assert kept.ingest.regression is mine  # a caller's own hook is left alone
+    finally:
+        kept.close()

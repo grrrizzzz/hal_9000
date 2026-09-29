@@ -9,8 +9,7 @@ builds, seeds and mounts everything itself. The driver:
   abstained, retrieval-only, with a failed grounding check, with the query
   embedding down, and cancelled by the client going away mid-answer;
 - rates two answers; uploads a new file, the same bytes again and a broken
-  PDF, and waits for the ingest jobs (the post-ingest regression should run
-  too, but isn't wired yet: a strict xfail below);
+  PDF, and waits for the ingest jobs (the post-ingest regression runs too);
 - runs a manual regression and writes an ``eval_runs`` row on a connection of
   its own, as ``kb eval regression`` and a sweep do;
 - scrapes ``/metrics`` before and after, and runs every Grafana SQLite query
@@ -237,8 +236,6 @@ def _session(app, root: Path, live: dict) -> None:
     client = TestClient(app, headers=SAME_ORIGIN)
     assert client.post("/api/session", json={"passcode": services.settings.passcode}).is_success
     token = client.cookies.get(COOKIE)
-    # a fresh process binds no meter in fake mode; other tests in this process may have
-    metrics.use_configured_month_budget()
     live["month_cap"] = services.settings.monthly_cap_usd
 
     # the reranker: configured in knowledge.yaml (read per question), scored by the stand-in
@@ -268,6 +265,9 @@ def _session(app, root: Path, live: dict) -> None:
             return conn.execute("SELECT id FROM traces WHERE outcome = 'cancelled'").fetchone()
 
     _wait_for(cancelled_trace, "the cancelled question's trace")
+    # the regressions below build their own retriever from knowledge.yaml, which
+    # would load the real ONNX model: back to no reranker
+    yaml_path.write_text(yaml.safe_dump(config))
 
     for key, rating in (("answered", 1), ("unverified", -1)):
         response = client.post(
@@ -296,8 +296,7 @@ def _session(app, root: Path, live: dict) -> None:
             "SELECT COUNT(*) FROM regression_runs WHERE trigger = 'ingest'"
         ).fetchone()[0]
 
-    # what `kb eval regression` and a sweep write from their own processes: the
-    # service only reads these tables (the post-ingest hook isn't wired: see below)
+    # what `kb eval regression` and a sweep write from their own processes
     conn = services.connect()
     try:
         binding = retriever_for(conn, services.settings, meter=None)
@@ -363,6 +362,7 @@ def _as_a_fresh_process() -> None:
 def live(tmp_path_factory) -> Live:
     root = tmp_path_factory.mktemp("live")
     _as_a_fresh_process()
+    metrics.bind_month_budget(lambda: 99.0, 1.0)  # stale: kb serve --fake must replace it
     captured: dict = {"answers": {}, "sql": {}, "trace_status": {}}
 
     def drive(app, host, port, log_level, proxy_headers):
@@ -500,14 +500,12 @@ def test_regression_recall_and_eval_metric_come_from_the_tables(live: Live):
     assert not any("run" in d for d, _ in live.samples("kb_eval_metric"))
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="IngestPipeline.regression is still no_regression in the service: "
-    "eval.regression.post_ingest_regression is not wired (KWP3/KWP5/KWP6)",
-)
 def test_an_ingestion_runs_the_post_ingest_regression(live: Live):
-    # the seeded question set has an approved answerable question, so a row is due
-    assert live.ingest_regressions >= 1
+    # the seeded question set has an approved answerable question, so the one file
+    # that ingested writes one row (the library was seeded before the question set)
+    assert live.ingest_regressions == 1
+    # and it retrieved without an error (test_errors_... counts every error of the session)
+    assert live.delta("kb_stage_seconds_count", stage="regression") >= 2  # hook + manual run
 
 
 def test_no_question_or_document_text_on_metrics(live: Live):

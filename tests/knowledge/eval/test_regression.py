@@ -6,7 +6,7 @@ import pytest
 
 from hal9000.knowledge.contracts import EvidenceQuote, GoldItem
 from hal9000.knowledge.eval.config import EvalConfig
-from hal9000.knowledge.eval.regression import post_ingest_regression, run_regression
+from hal9000.knowledge.eval.regression import ingest_hook, post_ingest_regression, run_regression
 from hal9000.knowledge.eval.store import insert_gold, set_gold_status
 from hal9000.knowledge.eval.types import RetrievalOutput, SelectedItem
 from hal9000.knowledge.obs.collector import KnowledgeDbCollector
@@ -110,3 +110,84 @@ def test_the_post_ingest_hook_marks_the_trigger_and_never_raises(kb_db, caplog):
 
     assert post_ingest_regression(kb_db, Retrieve(facts, 4), config=CFG, count=broken_count) is None
     assert "post-ingest regression failed" in caplog.text
+
+
+# ------------------------------------------------------ the service's ingest hook
+def _errors(kind: str) -> float:
+    from hal9000.knowledge.obs.metrics import REGISTRY
+
+    return REGISTRY.get_sample_value("kb_errors_total", {"stage": "regression", "kind": kind}) or 0
+
+
+class _Profile:
+    name = "p"
+
+
+def test_a_budget_stop_writes_no_row_and_is_counted(kb_db, caplog):
+    from hal9000.cost.metering import MonthlyCapExceeded
+
+    facts = seed(kb_db)
+    before = _errors("MonthlyCapExceeded")
+
+    def out_of_money(question):
+        raise MonthlyCapExceeded("knowledge-eval reached its cap")
+
+    with pytest.raises(MonthlyCapExceeded):  # not scored as a recall of zero
+        run_regression(kb_db, out_of_money, config=CFG, count=_count)
+    assert post_ingest_regression(kb_db, out_of_money, config=CFG, count=_count) is None
+    assert kb_db.execute("SELECT COUNT(*) FROM regression_runs").fetchone()[0] == 0
+    assert _errors("MonthlyCapExceeded") == before + 1  # the post-ingest one
+    assert facts and "post-ingest regression failed" in caplog.text
+
+
+def test_the_ingest_hook_does_nothing_without_approved_questions(kb_db, monkeypatch):
+    from hal9000.knowledge.eval import wiring
+
+    def unexpected(*args, **kwargs):
+        raise AssertionError("no binding (and no spend) without approved questions")
+
+    monkeypatch.setattr(wiring, "retriever_for", unexpected)
+    hook = ingest_hook(object(), meter=None)
+    assert hook(kb_db, _Profile()) is None
+    assert kb_db.execute("SELECT COUNT(*) FROM regression_runs").fetchone()[0] == 0
+
+
+def test_the_ingest_hook_checks_the_eval_cap_and_never_raises(kb_db, caplog):
+    from hal9000.cost.metering import MonthlyCapExceeded
+
+    seed(kb_db)
+    checked = []
+
+    class CappedMeter:
+        def precheck(self, agent):
+            checked.append(agent)
+            raise MonthlyCapExceeded(f"{agent} reached its cap")
+
+    before = _errors("MonthlyCapExceeded")
+    assert ingest_hook(object(), meter=CappedMeter())(kb_db, _Profile()) is None
+    assert checked == ["knowledge-eval"]
+    assert kb_db.execute("SELECT COUNT(*) FROM regression_runs").fetchone()[0] == 0
+    assert _errors("MonthlyCapExceeded") == before + 1
+
+
+def test_the_ingest_hook_scores_the_profile_it_was_given(kb_db, monkeypatch, tmp_path):
+    from hal9000.knowledge.eval import wiring
+
+    facts = seed(kb_db)
+    asked = {}
+
+    def retriever_for(conn, settings, *, meter=None, run=None):
+        asked["profile"] = run.config["profile"]
+        return wiring.RetrievalBinding(
+            retrieve=Retrieve(facts, 4), profile_id=None, profile_name="p", chunk_size=None
+        )
+
+    monkeypatch.setattr(wiring, "retriever_for", retriever_for)
+    (tmp_path / "knowledge_eval.yaml").write_text("scoring:\n  n_boot: 100\n")
+
+    class Settings:
+        config_dir = tmp_path
+
+    result = ingest_hook(Settings(), meter=None)(kb_db, _Profile())
+    assert asked == {"profile": "p"} and result.trigger == "ingest"
+    assert kb_db.execute("SELECT trigger FROM regression_runs").fetchone()[0] == "ingest"

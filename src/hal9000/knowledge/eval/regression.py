@@ -1,12 +1,13 @@
 """Post-ingest regression: retrieval-only recall @ 2k on the approved question set (plan §9.2).
 
-After an ingestion (``trigger="ingest"``, called by KWP3's pipeline through
-:func:`post_ingest_regression`) or on demand (``kb eval regression``,
-``trigger="manual"``), every **approved** answerable gold item is retrieved
-against the active profile through an injected retrieve callable, scored with
-budgeted recall at the regression budget (2,000 tokens) and a bootstrap 95%
-interval, and one ``regression_runs`` row is written. ``hal-kb`` exposes the
-latest row as ``kb_regression_recall`` (a fraction, 0-1).
+After an ingestion (``trigger="ingest"``: the service sets KWP3's pipeline
+hook to :func:`ingest_hook`, which calls :func:`post_ingest_regression`) or on
+demand (``kb eval regression``, ``trigger="manual"``), every **approved**
+answerable gold item is retrieved against the active profile through an
+injected retrieve callable, scored with budgeted recall at the regression
+budget (2,000 tokens) and a bootstrap 95% interval, and one
+``regression_runs`` row is written. ``hal-kb`` exposes the latest row as
+``kb_regression_recall`` (a fraction, 0-1).
 """
 
 from __future__ import annotations
@@ -15,8 +16,10 @@ import logging
 import sqlite3
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
+from hal9000.cost.metering import BudgetExceeded
 from hal9000.knowledge.contracts import MetricCI
 from hal9000.knowledge.eval.config import EvalConfig, load_eval_config
 from hal9000.knowledge.eval.scoring import ScoringItem, bootstrap_ci, score_question
@@ -24,7 +27,7 @@ from hal9000.knowledge.eval.store import list_gold
 from hal9000.knowledge.eval.types import RetrieveFn
 from hal9000.knowledge.obs.timing import Stage, stage
 
-__all__ = ["RegressionResult", "post_ingest_regression", "run_regression"]
+__all__ = ["RegressionResult", "ingest_hook", "post_ingest_regression", "run_regression"]
 
 log = logging.getLogger(__name__)
 
@@ -94,6 +97,8 @@ def run_regression(
         for item in items:
             try:
                 output = retrieve(questions[item.gold_item_id])
+            except BudgetExceeded:
+                raise  # out of money: no row, rather than a recall of zero
             except Exception as error:  # a failed retrieval scores zero, and is counted
                 log.warning(
                     "regression: retrieval failed for item %s: %s", item.gold_item_id, error
@@ -138,6 +143,67 @@ def post_ingest_regression(
     """
     try:
         return run_regression(conn, retrieve, trigger="ingest", **kw)
-    except Exception:
-        log.exception("post-ingest regression failed")
+    except Exception as error:
+        _failed(error)
         return None
+
+
+def _failed(error: Exception) -> None:
+    from hal9000.knowledge.obs.metrics import record_error
+
+    log.exception("post-ingest regression failed", exc_info=error)
+    record_error(Stage.REGRESSION, error)  # once: the trace counts a failed stage itself
+
+
+def _has_approved_questions(conn: sqlite3.Connection) -> bool:
+    return any(g.category != "unanswerable" for g in list_gold(conn, status="approved"))
+
+
+@dataclass(frozen=True)
+class _ProfileRun:
+    """What the retrieval binding reads from a run: the profile to search."""
+
+    config: dict[str, Any]
+
+
+def ingest_hook(settings: Any, *, meter: Any = None):
+    """KWP3's ``IngestPipeline.regression``: the post-ingest regression for the service.
+
+    After each ingestion, the approved answerable gold set is retrieved (only,
+    no answers) against the profile just indexed, metered as
+    ``knowledge-eval`` (``meter``; ``None`` in fake mode, where nothing is
+    paid), and a ``regression_runs`` row is written with ``trigger="ingest"``.
+    Without approved questions it does nothing (no binding, no spend). It
+    never fails an ingestion: every error is logged and counted as
+    ``kb_errors_total{stage="regression"}``, and none writes a row.
+    """
+
+    def hook(conn: sqlite3.Connection, profile: Any) -> RegressionResult | None:
+        from hal9000.knowledge.config import EVAL_AGENT
+        from hal9000.knowledge.eval.wiring import retriever_for
+
+        try:
+            if not _has_approved_questions(conn):
+                log.info("post-ingest regression skipped: no approved answerable questions")
+                return None
+            if meter is not None:
+                meter.precheck(EVAL_AGENT)  # KB_EVAL_CAP_USD reached: no row
+            bound = retriever_for(
+                conn, settings, meter=meter, run=_ProfileRun({"profile": profile.name})
+            )
+            config_dir = getattr(settings, "config_dir", None)  # as `kb eval regression` reads it
+            config = (
+                load_eval_config(Path(config_dir) / "knowledge_eval.yaml") if config_dir else None
+            )
+        except Exception as error:
+            _failed(error)
+            return None
+        return post_ingest_regression(
+            conn,
+            bound.retrieve,
+            profile_id=bound.profile_id,
+            chunk_size=bound.chunk_size,
+            config=config,
+        )
+
+    return hook

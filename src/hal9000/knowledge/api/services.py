@@ -3,9 +3,10 @@
 :func:`build_services` wires the real service: the metered answer pipeline,
 the ingestion pipeline and its one job worker (``pipeline.worker(db_path,
 locked=True)``, so a ``kb ingest`` only queues jobs while the service runs),
-the passcode and session signer, the month's spend on ``/metrics``. With
-``fake=True`` (``kb serve --fake``) nothing is paid: the fake chat model, the
-fake embedder and heuristic segmentation.
+the post-ingest regression hook, the passcode and session signer, the
+month's spend on ``/metrics``. With ``fake=True`` (``kb serve --fake``)
+nothing is paid: the fake chat model, the fake embedder and heuristic
+segmentation.
 
 It also writes ``data/knowledge_health.json`` (plan §16): the last successful
 question, the last finished ingestion and the month's spend, for HAL's
@@ -144,8 +145,9 @@ def build_services(
 ) -> Services:
     """Build (and, unless told not to, start) the service's parts."""
     from hal9000.knowledge.answer.pipeline import AnswerDeps
+    from hal9000.knowledge.eval.regression import ingest_hook
     from hal9000.knowledge.ingest.jobs import BUS
-    from hal9000.knowledge.ingest.pipeline import IngestPipeline
+    from hal9000.knowledge.ingest.pipeline import IngestPipeline, no_regression
     from hal9000.knowledge.obs import metrics
     from hal9000.knowledge.storage import open_db
 
@@ -159,6 +161,8 @@ def build_services(
         from hal9000.knowledge.index.fake import FakeEmbedder, enable_fake_mode
 
         enable_fake_mode()
+        # nothing is paid: spend 0 against the configured cap (never a 0/0 on the dashboard)
+        metrics.use_configured_month_budget()
         deps = answer_deps or fake_deps()
         if ingest is None:
             ingest = IngestPipeline(
@@ -182,6 +186,9 @@ def build_services(
                 knowledge_file=kf,
             )
         metrics.bind_month_budget(lambda: meter.month_spend(AGENT), settings.monthly_cap_usd)
+    if ingest is not None and ingest.regression is no_regression:
+        # the post-ingest regression (plan §9.2), metered as knowledge-eval
+        ingest.regression = ingest_hook(settings, meter=meter)
     worker = ingest.worker(settings.db_path, locked=True) if ingest is not None else None
     if worker is not None and start_worker:
         worker.start()
