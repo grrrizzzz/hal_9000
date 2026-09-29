@@ -1,4 +1,4 @@
-import type { DocType, Outcome } from "@/api/types";
+import type { DocType, Grounding, Outcome } from "@/api/types";
 
 const DOC_TYPE_LABEL: Record<DocType, string> = {
   inspection_report: "Inspection report",
@@ -78,6 +78,15 @@ const OUTCOME_LABEL: Record<Outcome, string> = {
 export const outcomeLabel = (o: Outcome | null | undefined) => (o ? OUTCOME_LABEL[o] : "—");
 export const outcomeTone = (o: Outcome | null | undefined) =>
   o === "answered" ? "success" : o === "abstained" ? "neutral" : o === "retrieval_only" ? "warning" : o === "error" ? "danger" : "outline";
+
+/** The figure/citation check, in words (the same wording as the chat badge). */
+const GROUNDING_LABEL: Record<Grounding, string> = {
+  verified: "Figures checked",
+  failed: "Figures not verified",
+  skipped: "Figures not checked",
+};
+export const groundingLabel = (g: Grounding | null | undefined) => (g ? GROUNDING_LABEL[g] : "—");
+export const groundingTone = (g: Grounding | null | undefined) => (g === "verified" ? "success" : g === "failed" ? "warning" : "neutral");
 
 export const STAGE_LABEL: Record<string, string> = {
   condense: "Understanding the follow-up",

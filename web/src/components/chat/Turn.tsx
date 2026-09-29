@@ -1,4 +1,4 @@
-import { Loader2, RotateCcw, SearchX } from "lucide-react";
+import { CircleSlash, Loader2, RotateCcw, SearchX } from "lucide-react";
 import type { Citation, Grounding, Outcome } from "@/api/types";
 import { Banner } from "@/components/ui/states";
 import { STAGE_LABEL } from "@/lib/format";
@@ -43,6 +43,12 @@ export function AnswerBlock({ a, onOpen }: { a: AnswerView; onOpen: (c: Citation
         </div>
       ) : null}
       {a.text ? <CitationText text={a.text} citations={a.citations} onOpen={onOpen} /> : null}
+      {a.outcome === "cancelled" || a.outcome === "error" ? (
+        <p className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground" data-testid="answer-incomplete">
+          <CircleSlash className="size-3.5" />
+          {a.outcome === "cancelled" ? "Stopped before the answer was finished" : "The answer couldn't be completed"}
+        </p>
+      ) : null}
       {a.grounding === "failed" || a.grounding === "verified" ? (
         <div className="mt-2">
           <VerifyBadge grounding={a.grounding} issues={a.issues ?? []} />

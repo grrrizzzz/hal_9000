@@ -3,6 +3,9 @@ import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 
+/** ChatRequest.message maxLength in openapi.json. */
+export const MAX_QUESTION = 4000;
+
 export function Composer({
   onSend,
   onStop,
@@ -51,11 +54,18 @@ export function Composer({
             submit();
           }
         }}
+        maxLength={MAX_QUESTION}
+        aria-describedby={text.length > MAX_QUESTION - 500 ? "question-count" : undefined}
         placeholder="Ask about the house…"
         className="block max-h-[200px] w-full resize-none bg-transparent px-2 py-1.5 text-[15px] leading-relaxed outline-none placeholder:text-muted-foreground/80"
       />
       <div className="mt-1 flex items-center gap-2">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5">{children}</div>
+        {text.length > MAX_QUESTION - 500 ? (
+          <span id="question-count" className="tabular shrink-0 text-xs text-muted-foreground" aria-live="polite">
+            {text.length} / {MAX_QUESTION}
+          </span>
+        ) : null}
         {busy ? (
           <Button size="icon-sm" variant="secondary" aria-label="Stop" onClick={onStop}>
             <Square className="fill-current" />

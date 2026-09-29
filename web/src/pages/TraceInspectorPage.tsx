@@ -9,7 +9,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { ErrorState, Skeleton } from "@/components/ui/states";
-import { formatDateTime, formatMs, formatUsd, outcomeLabel, outcomeTone, plural, STAGE_LABEL } from "@/lib/format";
+import { formatDateTime, formatMs, formatUsd, groundingLabel, groundingTone, outcomeLabel, outcomeTone, plural, STAGE_LABEL } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { GRAFANA_URL } from "./TracesPage";
 
@@ -61,8 +61,8 @@ function Inspector({ t }: { t: Trace }) {
         <div className="mt-3 flex flex-wrap gap-1.5">
           <Badge tone={outcomeTone(t.outcome)}>{outcomeLabel(t.outcome)}</Badge>
           {t.grounding ? (
-            <Badge tone={t.grounding === "verified" ? "success" : t.grounding === "failed" ? "warning" : "neutral"}>
-              grounding {t.grounding}
+            <Badge tone={groundingTone(t.grounding)} title={`grounding: ${t.grounding}`}>
+              {groundingLabel(t.grounding)}
             </Badge>
           ) : null}
           {t.error ? <Badge tone="danger">{t.error}</Badge> : null}
