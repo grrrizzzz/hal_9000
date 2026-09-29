@@ -642,10 +642,21 @@ def test_the_cost_per_question_series_has_epoch_second_times(live: Live):
         assert cost == 0  # fake models are free
 
 
-def test_the_failed_jobs_panel_shows_the_broken_upload(live: Live):
+def test_the_failed_jobs_panel_shows_the_broken_upload_by_error_kind(live: Live):
     result = live.sql["knowledge-ingestion.json:Failed jobs"]
-    kinds = {row[result.columns.index("kind")] for row in result.rows}
-    assert kinds == {"ingest"} and all(row[result.columns.index("error")] for row in result.rows)
+    assert result.columns == ["time", "kind", "file", "error_kind"]
+    assert [row[1:] for row in result.rows] == [("ingest", result.rows[0][2], "ParseError")]
+
+
+def test_no_uploaded_file_name_reaches_a_sqlite_panel(live: Live):
+    """The job error names the file ("Could not parse broken.pdf: ..."); Grafana must not."""
+    names = {Path(p).name.lower() for p in live.uploads} | {Path(p).stem for p in live.uploads}
+    assert {"broken.pdf", "gutters.txt", "gutters"} <= names
+    for where, result in live.sql.items():
+        for row in result.rows:
+            for value in row:
+                text = str(value).lower()
+                assert not any(name in text for name in names), (where, value)
 
 
 def test_the_regression_alert_query_reads_the_live_runs(live: Live):

@@ -452,4 +452,27 @@ def test_the_pi_verification_steps_match_the_provisioning():
     # as KWP11's compose runs it: .env's GRAFANA_ADMIN_PASSWORD becomes GF_SECURITY_...
     assert 'C="docker compose --env-file .env -f deploy/docker/compose.knowledge.yaml"' in text
     assert "grep '^GRAFANA_ADMIN_PASSWORD=' .env" in text
+    # the read-only mount with hal-kb stopped: SQLite can't open it (no -wal/-shm)
     assert "while `hal-kb` is stopped, the SQLite\npanels" in text
+    stopped = text.split("If a step fails", 1)[1]
+    assert "`unable to open database file`" in text and "`unable to open database" in stopped
+    assert stopped.index("`hal-kb` is running") < stopped.index("chmod o+rx data")
+    assert "attempt to write a readonly database" not in text  # that is hal-kb's, on a rw mount
+    # step 7 can't pass on "null" or an error, and says so when it fails
+    assert '[[ "$NEWEST" == 20* && "$NEWEST" > "$ASKED" ]]' in text
+    assert "NOT visible within 60 s" in text
+    assert "```sh" not in text and "```bash" in text
+    assert "`jq`" in text and "prom/prometheus:v3.5.5" in text
+
+
+def test_grafana_ini_names_the_error_the_read_only_mount_gives():
+    text = (GRAFANA / "grafana.ini").read_text()
+    assert '"unable to open database file"' in text  # SQLite panels while hal-kb is stopped
+    assert '"attempt to write a readonly database"' in text  # hal-kb's, after a rw mount
+
+
+def test_the_plugin_provisioning_folder_exists_without_yaml():
+    """Grafana 12.4 logs "Failed to read plugin provisioning files" when it is missing."""
+    folder = GRAFANA / "provisioning" / "plugins"
+    assert folder.is_dir() and (folder / ".gitkeep").is_file()
+    assert not [p for p in folder.iterdir() if p.suffix in (".yaml", ".yml")]

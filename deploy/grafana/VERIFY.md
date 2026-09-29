@@ -36,14 +36,16 @@ while `hal-kb` is stopped would create those two files as Grafana's user (uid
 472), and `hal-kb` could not write to its database when it started again.
 The price of the read-only mount: **while `hal-kb` is stopped, the SQLite
 panels (traces, failed jobs, regression and evaluation runs) show an error**
-("attempt to write a readonly database"), and they recover by themselves once
-it runs again. The Prometheus panels are unaffected.
+(`unable to open database file`: there are no `-wal`/`-shm` files to read
+through), and they recover by themselves once it runs again. The Prometheus
+panels are unaffected.
 
 ## 0. Set up the shell
 
-From the repository root on the Pi:
+The steps need `bash`, `curl` and `jq` on the Pi (`sudo apt install jq` if
+`jq --version` fails). From the repository root on the Pi:
 
-```sh
+```bash
 C="docker compose --env-file .env -f deploy/docker/compose.knowledge.yaml"
 PW=$(grep '^GRAFANA_ADMIN_PASSWORD=' .env | cut -d= -f2-)
 G="http://localhost:3001"
@@ -51,7 +53,7 @@ G="http://localhost:3001"
 
 ## 1. Prometheus configuration (promtool)
 
-```sh
+```bash
 $C run --rm --no-deps --entrypoint promtool prometheus \
   check config /etc/prometheus/prometheus.yml
 ```
@@ -59,14 +61,14 @@ $C run --rm --no-deps --entrypoint promtool prometheus \
 Pass: `SUCCESS: /etc/prometheus/prometheus.yml is valid prometheus config file syntax`.
 If the compose file isn't ready yet, run the same check straight from the image:
 
-```sh
+```bash
 docker run --rm -v "$PWD/deploy/prometheus:/etc/prometheus:ro" \
-  --entrypoint promtool prom/prometheus check config /etc/prometheus/prometheus.yml
+  --entrypoint promtool prom/prometheus:v3.5.5 check config /etc/prometheus/prometheus.yml
 ```
 
 ## 2. Start the stack and check Prometheus scrapes hal-kb
 
-```sh
+```bash
 $C up -d hal-kb prometheus grafana
 sleep 60
 curl -s http://localhost:9090/api/v1/targets \
@@ -77,7 +79,7 @@ Pass: one line `hal-kb  up` with an empty error.
 
 ## 3. Grafana logs: no provisioning errors
 
-```sh
+```bash
 $C logs grafana 2>&1 | grep -E 'level=(error|crit)'
 $C logs grafana 2>&1 | grep -iE 'provision' | grep -iE 'fail|error|invalid'
 ```
@@ -86,7 +88,7 @@ Pass: both print nothing. If anything prints, paste those lines.
 
 ## 4. The SQLite plugin is installed and pinned
 
-```sh
+```bash
 $C logs grafana 2>&1 | grep -i 'frser-sqlite-datasource' | head -5
 curl -su "admin:$PW" "$G/api/plugins/frser-sqlite-datasource/settings" | jq -r .info.version
 curl -su "admin:$PW" "$G/api/datasources/uid/kb-sqlite/health" | jq -r .status
@@ -99,7 +101,7 @@ runs, so a missing plugin shows up as a datasource error in step 3.
 
 ## 5. Anonymous access is off and the mount is read-only
 
-```sh
+```bash
 curl -s -o /dev/null -w '%{http_code}\n' "$G/api/search"
 $C exec grafana sh -c 'touch /data/.probe'
 ls -ln data/knowledge.db*
@@ -111,7 +113,7 @@ by uid 472.
 
 ## 6. The three dashboards are provisioned
 
-```sh
+```bash
 curl -su "admin:$PW" "$G/api/search?type=dash-db&folderUIDs=kb" | jq -r '.[].title'
 ```
 
@@ -121,23 +123,29 @@ Pass: `Knowledge: Ingestion`, `Knowledge: Live` and `Knowledge: Quality`.
 
 Note the time, then ask one question in the web app (`http://<pi-address>:8910`):
 
-```sh
+```bash
 ASKED=$(date -u +%Y-%m-%dT%H:%M:%S)
 ```
 
 Then, straight away:
 
-```sh
+```bash
 Q='{"from":"now-1h","to":"now","queries":[{"refId":"A","datasource":{"uid":"kb-sqlite"},"queryType":"table","timeColumns":[],"queryText":"SELECT MAX(created_at) AS newest FROM traces WHERE kind = '"'"'question'"'"'"}]}'
+SEEN=""
 for i in $(seq 1 12); do
   NEWEST=$(curl -su "admin:$PW" -H 'Content-Type: application/json' "$G/api/ds/query" -d "$Q" \
     | jq -r '.results.A.frames[0].data.values[0][0]')
-  if [[ "$NEWEST" > "$ASKED" ]]; then echo "visible after about $((i * 5)) s"; break; fi
+  # a timestamp (20...), not "null" or an error, and newer than the question
+  if [[ "$NEWEST" == 20* && "$NEWEST" > "$ASKED" ]]; then
+    SEEN="visible after about $((i * 5)) s"; break
+  fi
   sleep 5
 done
+echo "${SEEN:-NOT visible within 60 s (last answer: $NEWEST)}"
 ```
 
-Pass: `visible after about N s` with N at most 60. Then open
+Pass: `visible after about N s` with N at most 60. `NOT visible` is a fail:
+paste the last answer it printed. Then open
 `$G/d/kb-live?var-kb_url=http://<pi-address>:8910`. Within 60 seconds (the
 dashboard refreshes every 30 s) the question is the top row of **Latest 50
 traces**, with time, outcome, latency and cost and no question text. Click its
@@ -165,7 +173,7 @@ Pass: no panel shows an error. Report which panels are empty.
 
 ## 9. The alert rules are loaded
 
-```sh
+```bash
 curl -su "admin:$PW" "$G/api/v1/provisioning/alert-rules" | jq -r '.[].title'
 sleep 120
 curl -su "admin:$PW" "$G/api/prometheus/grafana/api/v1/rules" \
@@ -184,11 +192,11 @@ message arrives.
 
 ## If a step fails
 
-- Datasource `kb-sqlite` or a SQLite panel reports `attempt to write a
-  readonly database`: `hal-kb` isn't running (step 2), so there are no
-  `-wal`/`-shm` files. Expected while it is stopped; start it.
-- `unable to open database file`: uid 472 can't read `data/` or
-  `data/knowledge.db`. Make both readable by others (`chmod o+rx data`,
+- Datasource `kb-sqlite` or a SQLite panel reports `unable to open database
+  file`. First check that `hal-kb` is running (`$C ps hal-kb`, step 2): while
+  it is stopped there are no `-wal`/`-shm` files and this error is expected;
+  start it. If it is running, uid 472 can't read `data/` or
+  `data/knowledge.db*`: make them readable by others (`chmod o+rx data`,
   `chmod o+r data/knowledge.db*`).
 - The plugin isn't installed: the Pi couldn't reach grafana.com when Grafana
   started. Paste the plugin lines from `$C logs grafana`.
