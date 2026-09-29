@@ -481,7 +481,7 @@ def test_offset_map_property(bodies, header, data):
     "line",
     [
         "Page 3 of 12",
-        "2 of 7",
+        "1 of 1",
         "Page 4",
         "Invoice #40010001 Page 1 of 3",
         "Estimate No. 77 Page 2 of 2",
@@ -517,7 +517,7 @@ def _long_file_with_a_short_letterhead_document():
         for n, w in enumerate("abcdefghijkl", 1)
     ]
     for k, n in enumerate((5, 6, 7), start=1):
-        text = f"Osprey Plumbing & Drain\nLicense #000321\nItem {k}: pipe work {'xyz'[k - 1]}\nStamp: CUSTOMER COPY"
+        text = f"Osprey Plumbing & Drain\nLicense #000321\nItem {k}: pipe work {'xyz'[k - 1]}\nCustomer copy, keep for your records"
         pages[n - 1] = ParsedPage(page=n, text=text)
     return pages
 
@@ -530,7 +530,7 @@ def test_running_lines_are_found_within_each_document():
     split = clean_pages(pages, file_sha=SHA, parser="pdfium", documents=documents)
     for n in (5, 6, 7):
         assert split.pages[n - 1].text.splitlines() == [f"Item {n - 4}: pipe work {'xyz'[n - 5]}"]
-    assert "customer copy" in " ".join(split.removed)
+    assert "customer copy, keep for your records" in split.removed
     assert split.pages[0].text == whole.pages[0].text
 
 
@@ -573,3 +573,123 @@ def test_labels_that_also_appear_in_the_body_are_content_not_furniture():
     for page in result.pages:
         assert page.text.count("Moderate") == 3 and page.text.count("Recommendation") == 3
         assert "Page" not in page.text
+
+
+# ------------------------------- per-document cleaning must not eat content (KWP1b)
+_FILL = [
+    f"Body sentence {w} about the equipment and its care."
+    for w in (
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+    )
+]
+
+
+def _stress_file(document_pages: list[list[str]]) -> tuple[list[ParsedPage], list[tuple[int, int]]]:
+    """A 12-page numbered report, then one test document; returns pages and documents."""
+    pages = [
+        ParsedPage(page=k, text="\n".join(["Acme Home Report", *_FILL, f"Page {k} of 12"]))
+        for k in range(1, 13)
+    ]
+    for lines in document_pages:
+        pages.append(ParsedPage(page=len(pages) + 1, text="\n".join(lines)))
+    return pages, [(1, 12), (13, len(pages))]
+
+
+def _doc_lines(pages, documents) -> list[str]:
+    result = clean_pages(pages, file_sha=SHA, parser="pdfium", documents=documents)
+    return [line for page in result.pages[12:] for line in page.text.splitlines()]
+
+
+def test_fixed_position_labels_in_a_three_page_document_are_kept():
+    pages, docs = _stress_file([
+        [f"Finding {k}: termites at the sill", *_FILL[:10], "Severity", "Moderate", "Recommendation",
+         "Treat the soil and replace the sill plate."]
+        for k in (1, 2, 3)
+    ])  # fmt: skip
+    lines = _doc_lines(pages, docs)
+    assert [lines.count(label) for label in ("Severity", "Moderate", "Recommendation")] == [3, 3, 3]
+
+
+def test_date_only_edge_lines_are_kept():
+    dates = ["05/06/2024", "05/13/2024", "05/20/2024", "05/27/2024"]
+    pages, docs = _stress_file(
+        [[d, "Service visit", *_FILL[:10], "Technician notes end"] for d in dates]
+    )
+    lines = _doc_lines(pages, docs)
+    assert [d for d in dates if d in lines] == dates
+    assert "Service visit" in lines  # a two-word label is never per-document furniture
+
+
+def test_amount_only_edge_lines_are_kept():
+    amounts = ["$450", "$1250", "$75"]
+    pages, docs = _stress_file([["Line items", *_FILL[:10], "Page subtotal", a] for a in amounts])
+    lines = _doc_lines(pages, docs)
+    assert [a for a in amounts if a in lines] == amounts and lines.count("Page subtotal") == 3
+
+
+def test_ratings_stay_while_the_pages_own_numbers_go():
+    pages, docs = _stress_file([
+        [f"Checklist sheet {k}", "Condition rating", f"{k + 1} of 5", *_FILL[:10], "Smoke alarms working", f"{k} of 3"]
+        for k in (1, 2, 3)
+    ])  # fmt: skip
+    lines = _doc_lines(pages, docs)
+    assert [f"{k + 1} of 5" in lines for k in (1, 2, 3)] == [True, True, True]
+    assert not any(f"{k} of 3" in lines for k in (1, 2, 3))  # page k of this 3-page document
+
+
+def test_a_bare_k_of_n_goes_only_at_its_own_place():
+    page = ParsedPage(page=1, text="Only page.\nA second line.\n2 of 7")
+    assert clean_pages([page], file_sha=SHA, parser="pdfium").pages[0].text.endswith("2 of 7")
+    pages = [ParsedPage(page=n, text=f"Sheet body {w}.\n{n} of 2") for n, w in ((1, "a"), (2, "b"))]
+    assert [p.text for p in clean_pages(pages, file_sha=SHA, parser="pdfium").pages] == [
+        "Sheet body a.",
+        "Sheet body b.",
+    ]
+
+
+def test_body_lines_anywhere_in_the_file_protect_a_document():
+    # "Recommendation" sits at fixed places in the short document (and is long enough to
+    # count), but the long report uses it as a body line: the whole file's body protects it
+    label = "Recommendation for the owner below"
+    report = [
+        ParsedPage(
+            page=k,
+            text="\n".join(["Acme Home Report", *_FILL[:6], label, *_FILL[6:], f"Page {k} of 12"]),
+        )
+        for k in range(1, 13)
+    ]
+    doc = [
+        ParsedPage(page=12 + k, text="\n".join([label, *_FILL[:10], f"Note {k}"]))
+        for k in (1, 2, 3)
+    ]
+    result = clean_pages(report + doc, file_sha=SHA, parser="pdfium", documents=[(1, 12), (13, 15)])
+    assert all(p.text.startswith(label) for p in result.pages[12:])
+
+
+def test_a_short_rising_counter_is_running_only_within_a_document():
+    pages, docs = _stress_file([[f"Batch {60 + k}", *_FILL[:10], "done"] for k in (1, 2, 3)])
+    assert not any(line.startswith("Batch") for line in _doc_lines(pages, docs))
+    # but a longer line whose number rises with the page is a line item
+    pages, docs = _stress_file(
+        [[f"Invoice line {k}.3: pipe work item 3", *_FILL[:10], "done"] for k in (1, 2, 3)]
+    )
+    assert sum(line.startswith("Invoice line") for line in _doc_lines(pages, docs)) == 3
+
+
+def test_a_page_word_counter_with_an_offset_is_running():
+    # printed "Page 1 of 3" on the bundle's pages 13-15: the number moves with the page
+    pages, docs = _stress_file(
+        [[f"Vendor copy Page {k} of 3", *_FILL[:10], "end"] for k in (1, 2, 3)]
+    )
+    assert not any("Page" in line for line in _doc_lines(pages, docs))
