@@ -870,12 +870,13 @@ class SweepRunner:
         except BudgetExceeded as error:
             raise SweepStopped(str(error)) from None
         m = run.metrics
+        budget = self.grid.decision_budget
         summary = (
             f"correct {m.correct.value:.3f}"
             if stage == "S5" and m and m.correct
-            else f"recall@2k {m.budgeted_recall[2000].value:.3f}"
-            if m and 2000 in m.budgeted_recall
-            else "recall@2k N/A"
+            else f"recall@{budget} {m.budgeted_recall[budget].value:.3f}"
+            if m and budget in m.budgeted_recall
+            else f"recall@{budget} N/A"
         )
         p95 = f", p95 {m.latency_ms_p95:.1f} ms" if m and m.latency_ms_p95 is not None else ""
         self.say(
@@ -1112,6 +1113,8 @@ class SweepRunner:
         previous = self.stage_runs("S1a", "S1b")
         self._require(previous, "S1a")
         ranked = self.ranker.top(previous, 1)
+        if not ranked:
+            raise SweepRefused("no S1 run has a recall at the decision budget to rank by")
         method = SweepConfig.from_run_config(ranked[0].config)
         top = self.ranker.top(previous, g.top, distinct=_profile_sans_embedding)
         self.say(
