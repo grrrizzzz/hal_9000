@@ -389,3 +389,13 @@ def test_default_token_counter_is_the_shared_tiktoken_one():
     s = score_question(gold(QUOTE), out(item(QUOTE, 40)), config=CFG)
     assert 0 < s.context_precision[2000] <= 1.0
     assert not math.isnan(s.context_precision[2000])
+
+
+def test_tiny_quotes_need_an_exact_run():
+    assert quote_coverage("$625", "Total due: $625.00") == 1.0
+    assert quote_coverage("$625", "Total due: $626.00") == 0.0
+
+
+def test_zero_bootstrap_replicates_give_a_degenerate_interval():
+    ci = bootstrap_ci([0.2, 0.8], n_boot=0, seed=1)
+    assert ci.value == ci.low == ci.high == 0.5
