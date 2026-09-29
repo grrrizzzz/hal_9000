@@ -42,6 +42,7 @@ __all__ = [
     "JudgePrepResult",
     "agreement",
     "choose_calibration_items",
+    "estimate_answers",
     "estimate_judge_prep",
     "judge_answer",
     "judge_prep",
@@ -177,15 +178,24 @@ def choose_calibration_items(items: Sequence[GoldItem], n: int) -> list[GoldItem
     return chosen
 
 
+def estimate_answers(n: int, config: JudgeConfig, tier: str) -> CostEstimate:
+    """``n`` answers at ``tier``: prompt, visible output and the tier's reasoning allowance."""
+    e = config.estimate
+    return estimate_cost(
+        n, n * e.answer_prompt_tokens, n * (e.answer_output_tokens + e.reasoning(tier)), tier
+    )
+
+
 def estimate_judge_prep(
     n: int, config: JudgeConfig, answer_tier: str, judge_tier: str
 ) -> CostEstimate:
+    """``n`` answers and their judgements, reasoning tokens included (billed as output)."""
     e = config.estimate
-    answers = estimate_cost(n, n * e.answer_prompt_tokens, n * e.answer_output_tokens, answer_tier)
+    answers = estimate_answers(n, config, answer_tier)
     judging = estimate_cost(
         n,
         n * (e.answer_prompt_tokens + e.answer_output_tokens + len(RUBRIC) // 4),
-        n * e.judge_output_tokens,
+        n * (e.judge_output_tokens + e.reasoning(judge_tier)),
         judge_tier,
     )
     return CostEstimate(
