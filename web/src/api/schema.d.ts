@@ -15,7 +15,7 @@ export interface paths {
         put?: never;
         /**
          * Create Session
-         * @description Exchange the household passcode for a signed session cookie.
+         * @description Exchange the household passcode for a signed session cookie (30 days).
          */
         post: operations["create_session"];
         /**
@@ -74,11 +74,31 @@ export interface paths {
         };
         /**
          * Stream Jobs
-         * @description Live job progress (server-sent events).
+         * @description Live job progress (server-sent events): the recent jobs, then every change.
          */
         get: operations["stream_jobs"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/jobs/{id}/retry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Retry Job
+         * @description Queue a failed job again with its original parameters.
+         */
+        post: operations["retry_job"];
         delete?: never;
         options?: never;
         head?: never;
@@ -119,7 +139,7 @@ export interface paths {
         head?: never;
         /**
          * Update Document
-         * @description Edit metadata; user edits always win over segmentation.
+         * @description Edit metadata; user edits always win over segmentation (the file is re-indexed).
          */
         patch: operations["update_document"];
         trace?: never;
@@ -133,7 +153,10 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /** Reindex Document */
+        /**
+         * Reindex Document
+         * @description Re-run ingestion for the document's file (embeddings and labels are cached).
+         */
         post: operations["reindex_document"];
         delete?: never;
         options?: never;
@@ -249,6 +272,8 @@ export interface paths {
         /**
          * Create Feedback
          * @description Thumbs up/down, a comment, and optionally "Add to question set".
+         *
+         *     One row per message: a later post for the same message updates it.
          */
         post: operations["create_feedback"];
         delete?: never;
@@ -387,6 +412,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/eval/runs/{id}/results": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Eval Run Results
+         * @description One run's per-question results, a page at a time.
+         */
+        get: operations["get_eval_run_results"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/profile": {
         parameters: {
             query?: never;
@@ -398,7 +443,7 @@ export interface paths {
         get: operations["get_profile"];
         /**
          * Put Profile
-         * @description Switch the active profile; re-indexes in the background.
+         * @description Make an existing, built profile the one that serves the chat.
          */
         put: operations["put_profile"];
         post?: never;
@@ -455,6 +500,8 @@ export interface paths {
         /**
          * Health
          * @description Unauthenticated (LAN only); never exposes question text.
+         *
+         *     Also writes ``data/knowledge_health.json`` for HAL's watchdog.
          */
         get: operations["health"];
         put?: never;
@@ -873,6 +920,51 @@ export interface components {
                     [key: string]: number;
                 };
             };
+        };
+        /**
+         * EvalQuestionResult
+         * @description One question's result in an eval run: ``GET /api/eval/runs/{id}/results`` items.
+         *
+         *     ``recall`` is keyed by the token budget as a string (``"2000"``); a missing
+         *     key means N/A (the chunk size exceeds the budget, or the item is
+         *     unanswerable).
+         */
+        EvalQuestionResult: {
+            /** Gold Item Id */
+            gold_item_id: number;
+            /** Question */
+            question: string;
+            /**
+             * Category
+             * @enum {string}
+             */
+            category: "factoid" | "money" | "date" | "list" | "cross_document" | "unanswerable";
+            /** Recall */
+            recall: {
+                [key: string]: number;
+            };
+            /** Full Support */
+            full_support: boolean;
+            /** First Hit Rank */
+            first_hit_rank: number | null;
+            /** Abstain Score */
+            abstain_score: number | null;
+            /** Abstained */
+            abstained: boolean;
+        };
+        /**
+         * EvalResultsPage
+         * @description A page of an eval run's per-question results.
+         */
+        EvalResultsPage: {
+            /** Items */
+            items: components["schemas"]["EvalQuestionResult"][];
+            /** Total */
+            total: number;
+            /** Offset */
+            offset: number;
+            /** Limit */
+            limit: number;
         };
         /**
          * EvalRun
@@ -1585,8 +1677,8 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
+            /** @description Too many failed attempts */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1614,15 +1706,6 @@ export interface operations {
             };
             /** @description Not signed in */
             401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Not implemented yet (KWP6) */
-            501: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1672,15 +1755,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     list_jobs: {
@@ -1703,15 +1777,6 @@ export interface operations {
             };
             /** @description Not signed in */
             401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Not implemented yet (KWP6) */
-            501: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1749,13 +1814,53 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
+        };
+    };
+    retry_job: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Job"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Only a failed job can be retried */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -1799,15 +1904,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     get_document: {
@@ -1848,15 +1944,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     delete_document: {
@@ -1893,15 +1980,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -1948,15 +2026,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     reindex_document: {
@@ -1995,15 +2064,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -2055,15 +2115,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     get_page: {
@@ -2105,15 +2156,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     chat: {
@@ -2147,6 +2189,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description No index profile is active yet */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -2156,8 +2207,8 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
+            /** @description More than 20 questions a minute */
+            429: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2194,15 +2245,6 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     delete_conversations: {
@@ -2223,15 +2265,6 @@ export interface operations {
             };
             /** @description Not signed in */
             401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Not implemented yet (KWP6) */
-            501: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2279,15 +2312,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     delete_conversation: {
@@ -2324,15 +2348,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -2375,15 +2390,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -2431,15 +2437,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     list_gold: {
@@ -2482,15 +2479,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     get_gold: {
@@ -2529,15 +2517,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -2584,15 +2563,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     list_judge_labels: {
@@ -2633,15 +2603,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     get_judge_label: {
@@ -2680,15 +2641,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -2735,15 +2687,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     list_eval_runs: {
@@ -2782,15 +2725,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -2833,13 +2767,47 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
+        };
+    };
+    get_eval_run_results: {
+        parameters: {
+            query?: {
+                offset?: number;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EvalResultsPage"];
+                };
+            };
+            /** @description Not signed in */
+            401: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -2864,15 +2832,6 @@ export interface operations {
             };
             /** @description Not signed in */
             401: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
-            /** @description Not implemented yet (KWP6) */
-            501: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -2913,6 +2872,15 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
+            /** @description The profile isn't built yet */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorResponse"];
+                };
+            };
             /** @description Validation Error */
             422: {
                 headers: {
@@ -2920,15 +2888,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
@@ -2971,15 +2930,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     get_trace: {
@@ -3020,15 +2970,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     health: {
@@ -3049,15 +2990,6 @@ export interface operations {
                     "application/json": components["schemas"]["Health"];
                 };
             };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
-                };
-            };
         };
     };
     metrics: {
@@ -3075,17 +3007,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
                     "text/plain": string;
-                };
-            };
-            /** @description Not implemented yet (KWP6) */
-            501: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ErrorResponse"];
                 };
             };
         };
