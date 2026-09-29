@@ -53,14 +53,11 @@ from __future__ import annotations
 import codecs
 import hashlib
 import io
-import multiprocessing
 import os
 import re
 import shutil
 import sqlite3
 import tempfile
-import threading
-import weakref
 import zipfile
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
@@ -94,6 +91,7 @@ from hal9000.knowledge.index.library import (
     supersede_other_versions,
     user_documents,
 )
+from hal9000.knowledge.index.parsing import ParseProcess
 from hal9000.knowledge.index.profiles import (
     BuildReport,
     active_profile,
@@ -119,14 +117,7 @@ from hal9000.knowledge.ingest.jobs import (
     recover_interrupted,
     retry_job,
 )
-from hal9000.knowledge.ingest.parsers import (
-    ParsedFile,
-    ParseError,
-    Parser,
-    ParseTimeout,
-    get_parser,
-    parse_file,
-)
+from hal9000.knowledge.ingest.parsers import ParsedFile, ParseError, get_parser, parse_file
 from hal9000.knowledge.ingest.segment import segment_file
 from hal9000.knowledge.obs import metrics
 from hal9000.knowledge.obs.timing import Stage, stage
@@ -333,105 +324,6 @@ def _store_original(files_dir: Path, sha: str, source: bytes | Path) -> Path:
     return target
 
 
-# ------------------------------------------------------------------- parse
-def _parse_server(conn) -> None:  # pragma: no cover - runs in the child process
-    """The long-lived parse process: parse requests until the pipe closes."""
-    while True:
-        try:
-            request = conn.recv()
-        except (EOFError, OSError):
-            return
-        if request is None:
-            return
-        parser, path, max_chars = request
-        try:
-            result = parse_file(path, parser=parser, isolate=False, max_chars=max_chars)
-            conn.send(("ok", result))
-        except ParseError as error:
-            conn.send(("parse_error", str(error)))
-        except BaseException as error:  # noqa: BLE001 - reported to the parent
-            conn.send(("error", f"{type(error).__name__}: {error}"))
-
-
-def _terminate(process, conn) -> None:
-    try:
-        conn.close()
-    except OSError:  # pragma: no cover
-        pass
-    if process.is_alive():
-        process.terminate()
-        process.join(5)
-        if process.is_alive():  # pragma: no cover - terminate is normally enough
-            process.kill()
-            process.join()
-
-
-class ParseProcess:
-    """One long-lived child process that parses files, reused across files.
-
-    Starting a process per file costs about 0.3 s (plan §5.1 step 4 wants
-    isolation and a time limit, not a new process each time). A parse that
-    runs past its limit, or crashes the child, kills it; the next parse starts
-    a fresh one. ``starts`` counts the processes started.
-    """
-
-    def __init__(self) -> None:
-        self._process = None
-        self._conn = None
-        self._finalizer: weakref.finalize | None = None
-        self._lock = threading.Lock()
-        self.starts = 0
-
-    def _ensure(self) -> None:
-        if self._process is not None and self._process.is_alive():
-            return
-        self._kill()
-        context = multiprocessing.get_context("spawn")
-        parent, child = context.Pipe(duplex=True)
-        process = context.Process(target=_parse_server, args=(child,), name="kb-parse", daemon=True)
-        process.start()
-        child.close()
-        self._process, self._conn = process, parent
-        self._finalizer = weakref.finalize(self, _terminate, process, parent)
-        self.starts += 1
-
-    def _kill(self) -> None:
-        if self._finalizer is not None:
-            self._finalizer()  # terminates the process and closes the pipe
-        self._process = self._conn = self._finalizer = None
-
-    def close(self) -> None:
-        with self._lock:
-            self._kill()
-
-    def parse(self, path: Path, parser: Parser, *, timeout_s: float, max_chars: int) -> ParsedFile:
-        """Parse ``path`` in the child, timed as ``stage("parse")``."""
-        with stage(Stage.PARSE), self._lock:
-            self._ensure()
-            assert self._conn is not None and self._process is not None
-            self._conn.send((parser, str(path), max_chars))
-            if not self._conn.poll(timeout_s):
-                self._kill()
-                raise ParseTimeout(
-                    f"Could not parse {path.name}: parsing took longer than {timeout_s:g} s and "
-                    "was stopped."
-                )
-            try:
-                kind, payload = self._conn.recv()
-            except (EOFError, OSError):
-                code = self._process.exitcode
-                self._kill()
-                raise ParseError(
-                    f"Could not parse {path.name}: the {parser.name} parser crashed "
-                    f"(exit code {code})."
-                ) from None
-        if kind == "ok":
-            return payload
-        if kind == "parse_error":
-            raise ParseError(payload)
-        raise ParseError(f"Could not parse {path.name}: {payload}")
-
-
 # ------------------------------------------------------------------- clean
 def clean_for_documents(
     parsed: ParsedFile,
@@ -525,6 +417,22 @@ class IngestPipeline:
         self.files_dir = Path(self.files_dir)
         if self.knowledge_file is None:
             self.knowledge_file = load_knowledge_file()
+        self.warm_up()
+
+    def warm_up(self) -> None:
+        """Pay the one-time start-up costs now, as the service does when it starts.
+
+        The parse process, the token encoding and the cleaning word list load
+        once per process (the later calls are free), instead of inside the
+        first file's ingestion.
+        """
+        from hal9000.knowledge.ingest.clean import word_costs
+        from hal9000.knowledge.tokens import EMBEDDING_ENCODING, encoding
+
+        if self.isolate_parse:
+            self.parse_process.warm()
+        encoding(EMBEDDING_ENCODING)  # chunk sizes are counted in the embedding encoding
+        word_costs()
 
     def close(self) -> None:
         self.parse_process.close()

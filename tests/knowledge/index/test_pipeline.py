@@ -39,12 +39,19 @@ def files_total(status: str) -> float:
 
 # ------------------------------------------------------------------ the corpus
 def test_the_whole_fixture_corpus_ingests_under_five_seconds(conn, make_pipeline, fake):
-    pipeline = make_pipeline()  # the default configuration: parsing isolated, with a time limit
-    assert pipeline.isolate_parse
+    constructed = time.perf_counter()
+    # the default configuration: parsing isolated with a time limit; the pipeline warms up
+    # when it is built (the parse process, the token encoding), as the service does at start
+    pipeline = make_pipeline()
+    assert pipeline.isolate_parse and pipeline.parse_process.starts == 1
     before = {name: stage_count(name) for name in INGEST_STAGES}
     started = time.perf_counter()
     jobs = ingest_all(conn, pipeline)
     elapsed = time.perf_counter() - started
+    print(
+        f"fixture corpus ingested in {elapsed:.2f} s "
+        f"(pipeline start-up {started - constructed:.2f} s before that)"
+    )
     assert [job.status for job in jobs] == ["done"] * len(corpus.ALL_FILES), [j.error for j in jobs]
     assert elapsed < 5.0, f"ingesting the fixture corpus took {elapsed:.2f} s"
 
