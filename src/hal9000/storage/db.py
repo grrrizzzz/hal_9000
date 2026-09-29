@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from collections.abc import Iterable
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -290,6 +291,33 @@ class Database:
         row = self._conn.execute(
             "SELECT COALESCE(SUM(usd), 0) AS s FROM ledger WHERE substr(at, 1, 7) = ?", (prefix,)
         ).fetchone()
+        return float(row["s"])
+
+    def month_cost_for(
+        self,
+        year: int,
+        month: int,
+        *,
+        agents: Iterable[str] | None = None,
+        exclude: Iterable[str] | None = None,
+    ) -> float:
+        """Month-to-date spend restricted to ``agents``, or excluding ``exclude``.
+
+        Rows with no agent count as ``""``, so ``exclude`` never drops them.
+        """
+        prefix = f"{year:04d}-{month:02d}"
+        sql = "SELECT COALESCE(SUM(usd), 0) AS s FROM ledger WHERE substr(at, 1, 7) = ?"
+        params: list[str] = [prefix]
+        for names, op in ((agents, "IN"), (exclude, "NOT IN")):
+            if names is None:
+                continue
+            names = list(names)
+            if not names:
+                sql += " AND 0" if op == "IN" else ""
+                continue
+            sql += f" AND COALESCE(agent, '') {op} ({','.join('?' * len(names))})"
+            params.extend(names)
+        row = self._conn.execute(sql, params).fetchone()
         return float(row["s"])
 
     def cost_breakdown(self, year: int, month: int) -> list[dict]:
