@@ -221,11 +221,36 @@ CREATE TABLE regression_runs (
 CREATE INDEX ix_regression_at ON regression_runs(at);
 """
 
+# KWP3: the persistent segmentation cache (LLM labels keyed by file SHA-256 and
+# SEGMENT_VERSION, so a retried or rebuilt file never pays for labels twice), and
+# the parameters a job needs to be retried (relative path, collection, --no-llm,
+# the profile a reindex builds).
+_V2 = """
+CREATE TABLE segment_cache (
+    key TEXT PRIMARY KEY,
+    file_sha TEXT NOT NULL,
+    documents TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX ix_segment_cache_file ON segment_cache(file_sha);
+
+ALTER TABLE jobs ADD COLUMN params TEXT NOT NULL DEFAULT '{}';
+"""
+
+# KWP3 (decision D1): a file superseded by a newer version at the same relative
+# path records which one replaced it. Its files, documents and pages rows stay (so
+# re-uploading it restores it); only its chunks leave the indexes.
+_V3 = """
+ALTER TABLE files ADD COLUMN superseded_by TEXT;
+CREATE INDEX ix_files_current ON files(relative_path, superseded_by);
+"""
+
 #: (version, script). Append only.
-MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _V1),)
+MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _V1), (2, _V2), (3, _V3))
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
-#: Every plan §12 table created by the migrations (the per-profile tables are separate).
+#: Every plan §12 table created by the migrations (the per-profile tables are separate,
+#: and so is ``segment_cache``, an implementation detail of segmentation).
 TABLES: tuple[str, ...] = (
     "files",
     "documents",

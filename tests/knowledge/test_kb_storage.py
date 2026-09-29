@@ -55,7 +55,7 @@ def test_migrations_create_every_plan_table_on_an_empty_file(tmp_path):
     conn = storage.open_db(path)
     assert PLAN_TABLES <= _tables(conn)
     assert set(storage.TABLES) == PLAN_TABLES
-    assert storage.schema_version(conn) == storage.SCHEMA_VERSION == 1
+    assert storage.schema_version(conn) == storage.SCHEMA_VERSION == len(storage.MIGRATIONS)
 
 
 def test_wal_mode_is_on(tmp_path):
@@ -74,9 +74,11 @@ def test_migrations_are_idempotent(tmp_path):
     before = _schema(first)
     first.close()
     second = storage.open_db(path)
-    assert storage.migrate(second) == 1
+    assert storage.migrate(second) == storage.SCHEMA_VERSION
     assert _schema(second) == before
-    assert second.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 1
+    assert second.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == len(
+        storage.MIGRATIONS
+    )
 
 
 def test_a_newer_database_is_refused(tmp_path):
@@ -90,21 +92,23 @@ def test_a_newer_database_is_refused(tmp_path):
 def test_a_failing_migration_leaves_nothing_behind(tmp_path, monkeypatch):
     conn = storage.open_db(tmp_path / "k.db")
     broken = "CREATE TABLE half_done (x INTEGER);\nTHIS IS NOT SQL;"
-    monkeypatch.setattr(kdb, "MIGRATIONS", (*storage.MIGRATIONS, (2, broken)))
-    monkeypatch.setattr(kdb, "SCHEMA_VERSION", 2)
+    nxt = storage.SCHEMA_VERSION + 1
+    monkeypatch.setattr(kdb, "MIGRATIONS", (*storage.MIGRATIONS, (nxt, broken)))
+    monkeypatch.setattr(kdb, "SCHEMA_VERSION", nxt)
     with pytest.raises(sqlite3.Error):
         storage.migrate(conn)
-    assert storage.schema_version(conn) == 1
+    assert storage.schema_version(conn) == nxt - 1
     assert "half_done" not in _tables(conn)
 
 
 def test_a_new_migration_applies_forward(tmp_path, monkeypatch):
     conn = storage.open_db(tmp_path / "k.db")
+    nxt = storage.SCHEMA_VERSION + 1
     monkeypatch.setattr(
-        kdb, "MIGRATIONS", (*storage.MIGRATIONS, (2, "ALTER TABLE jobs ADD COLUMN note TEXT;"))
+        kdb, "MIGRATIONS", (*storage.MIGRATIONS, (nxt, "ALTER TABLE jobs ADD COLUMN note TEXT;"))
     )
-    monkeypatch.setattr(kdb, "SCHEMA_VERSION", 2)
-    assert storage.migrate(conn) == 2
+    monkeypatch.setattr(kdb, "SCHEMA_VERSION", nxt)
+    assert storage.migrate(conn) == nxt
     assert "note" in {r[1] for r in conn.execute("PRAGMA table_info(jobs)")}
 
 
@@ -119,9 +123,10 @@ def test_a_migration_applied_by_another_process_while_waiting_is_skipped(tmp_pat
     other.isolation_level = None
     other.execute("BEGIN IMMEDIATE")
     other.execute(kdb._VERSION_TABLE)
-    for statement in kdb.statements(storage.MIGRATIONS[0][1]):
-        other.execute(statement)
-    other.execute("INSERT INTO schema_version VALUES (1, 'other process')")
+    for version, script in storage.MIGRATIONS:
+        for statement in kdb.statements(script):
+            other.execute(statement)
+        other.execute("INSERT INTO schema_version VALUES (?, 'other process')", (version,))
 
     outcome: dict = {}
 
@@ -139,9 +144,9 @@ def test_a_migration_applied_by_another_process_while_waiting_is_skipped(tmp_pat
     thread.join(timeout=30)
 
     assert "error" not in outcome, outcome.get("error")
-    assert outcome["version"] == 1
+    assert outcome["version"] == storage.SCHEMA_VERSION
     rows = mine.execute("SELECT version, applied_at FROM schema_version").fetchall()
-    assert [tuple(r) for r in rows] == [(1, "other process")]
+    assert [tuple(r) for r in rows] == [(v, "other process") for v, _ in storage.MIGRATIONS]
     assert PLAN_TABLES <= _tables(mine)
 
 
@@ -160,9 +165,10 @@ def test_the_version_is_reread_inside_the_write_lock(tmp_path, monkeypatch):
         return value
 
     monkeypatch.setattr(kdb, "schema_version", racing)
-    assert storage.migrate(mine) == 1
+    assert storage.migrate(mine) == storage.SCHEMA_VERSION
     assert raced == [0]
-    assert mine.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 1
+    count = mine.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]
+    assert count == len(storage.MIGRATIONS)
 
 
 def test_many_connections_migrating_a_new_file_at_once(tmp_path):
@@ -187,7 +193,8 @@ def test_many_connections_migrating_a_new_file_at_once(tmp_path):
         for t in threads:
             t.join(timeout=60)
         assert errors == []
-        assert conns[0].execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == 1
+        count = conns[0].execute("SELECT COUNT(*) FROM schema_version").fetchone()[0]
+        assert count == len(storage.MIGRATIONS)
         assert PLAN_TABLES <= _tables(conns[0])
 
 
@@ -220,7 +227,8 @@ def test_only_one_profile_can_be_active(kb_db):
 def test_foreign_keys_cascade(kb_db):
     sha = "a" * 64
     kb_db.execute(
-        "INSERT INTO files VALUES (?, 'f.pdf', 'f.pdf', '', 'application/pdf', 1, NULL, 'now')",
+        "INSERT INTO files (sha256, original_name, relative_path, collection, mime_type, bytes, "
+        "version_of, uploaded_at) VALUES (?, 'f.pdf', 'f.pdf', '', 'application/pdf', 1, NULL, 'now')",
         (sha,),
     )
     kb_db.execute(

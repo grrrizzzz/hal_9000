@@ -1285,7 +1285,6 @@ dev = [
 eval = [
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "rapidfuzz" },
 ]
 knowledge = [
     { name = "itsdangerous" },
@@ -1293,6 +1292,7 @@ knowledge = [
     { name = "pypdfium2" },
     { name = "python-docx" },
     { name = "python-multipart" },
+    { name = "rapidfuzz" },
     { name = "selectolax" },
     { name = "sqlite-vec" },
     { name = "sse-starlette" },
@@ -1333,16 +1333,14 @@ dev = [
     { name = "reportlab", specifier = ">=5.0.1" },
     { name = "ruff", specifier = ">=0.6" },
 ]
-eval = [
-    { name = "numpy", specifier = ">=1.26" },
-    { name = "rapidfuzz", specifier = ">=3.9" },
-]
+eval = [{ name = "numpy", specifier = ">=1.26" }]
 knowledge = [
     { name = "itsdangerous", specifier = ">=2.1" },
     { name = "prometheus-client", specifier = ">=0.20" },
     { name = "pypdfium2", specifier = ">=4.30" },
     { name = "python-docx", specifier = ">=1.1" },
     { name = "python-multipart", specifier = ">=0.0.9" },
+    { name = "rapidfuzz", specifier = ">=3.9" },
     { name = "selectolax", specifier = ">=0.3.21" },
     { name = "sqlite-vec", specifier = "==0.1.9" },
     { name = "sse-starlette", specifier = ">=2.1" },

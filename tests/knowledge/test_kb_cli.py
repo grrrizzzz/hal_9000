@@ -16,8 +16,6 @@ REPO = Path(__file__).resolve().parents[2]
 
 #: Plan §17 plus handoff KWP0's additions, with the owning work package.
 COMMANDS = [
-    (["check"], "KWP3"),
-    (["ingest", "a.pdf", "Folder/", "--collection", "Appliances", "--no-llm", "--yes"], "KWP3"),
     (["ask", "How old is the furnace?", "--trace"], "KWP6"),
     (["serve", "--host", "127.0.0.1", "--port", "8911", "--fake"], "KWP6"),
     (["gold", "generate", "--max-cost", "2.00", "--yes"], "KWP5"),
