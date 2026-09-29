@@ -644,3 +644,186 @@ def test_review_b3_misses_only_pages_without_any_signal():
     expected = {d.page_start for d in file.documents}
     assert found - expected == set()
     assert expected - found == set(corpus.REVIEW_B3_NO_SIGNAL)  # left to the LLM path
+
+
+# ----------------------------------------------- heuristic labels (KWP1c)
+_ENVELOPE = "Docusign Envelope ID: 5E7C1A90-3B2D-4C6E-9F10-A1B2C3D4E5F6"
+
+
+def _only(pages):
+    documents = heuristic_documents(pages, file_sha=SHA)
+    assert len(documents) == 1, _ranges(documents)
+    return documents[0]
+
+
+def test_a_cover_title_wins_over_a_running_address_and_name_header():
+    # every page opens with the street glued to the client's name and a vendor/page line
+    header = "12 Gull Ln Jordan Reyes\nHarbor Point Inspections Page {k} of 4"
+    cover = (
+        "HARBOR POINT INSPECTIONS\n(555) 010-0100\ninfo@harborpoint.example\n"
+        "https://www.harborpoint.example\n"
+        "PROPERTY INSPECTION REPORT\n12 Gull Ln\nPort Alder, CA 90000\nJordan Reyes\n"
+        f"JUNE 3, 2025\nInspector\nPat Lindqvist\n{_ENVELOPE}"
+    )
+    rest = "Roof\nThe roof covering is worn.\nPlumbing\nThe water heater is 13 years old."
+    pages = _pages(
+        f"{header.format(k=1)}\n{cover}",
+        *(f"{header.format(k=k)}\n{rest}\n{_ENVELOPE}" for k in (2, 3, 4)),
+    )
+    document = _only(pages)
+    assert (document.doc_type, document.title) == (
+        "inspection_report",
+        "Property Inspection Report",
+    )
+
+
+def test_the_title_can_follow_a_cover_page_and_a_table_of_contents():
+    pages = _pages(
+        "12 Gull Ln\nPort Alder, CA 90000\nOskar Lindqvist\nJune 3, 2025\nPage 1 of 3",
+        "TABLE OF CONTENTS\n1: Roof\n2: Plumbing\n3: Electrical\nPage 2 of 3",
+        "HOME INSPECTION REPORT\nSummary\nThe roof covering is worn.\nPage 3 of 3",
+    )
+    document = _only(pages)
+    assert (document.doc_type, document.title) == ("inspection_report", "Home Inspection Report")
+
+
+def test_envelope_lines_names_and_addresses_never_become_the_title():
+    pages = _pages(
+        f"{_ENVELOPE}\nOskar Lindqvist\n12 Gull Ln\nBackyard drainage plan\nSwale 1 runs east.",
+        *(f"{_ENVELOPE}\nOskar Lindqvist\n12 Gull Ln\nSwale {k} runs east." for k in (2, 3)),
+    )
+    document = _only(pages)
+    assert (document.doc_type, document.title) == ("other", "Backyard drainage plan")
+
+
+def test_an_estimate_that_mentions_an_invoice_is_an_estimate():
+    header = _only(_pages("Kestrel Plumbing Inc.\nESTIMATE\nRe-pipe\nAn invoice follows the work."))
+    assert (header.doc_type, header.title) == ("estimate", "Estimate")
+    # no form header: the estimate word in a heading still beats "invoice" and a total
+    heading = _only(
+        _pages(
+            "Kestrel Plumbing Inc.\nWater heater replacement proposal\n"
+            "This is not an invoice.\nTotal: $900.00"
+        )
+    )
+    assert heading.doc_type == "estimate"
+    # nor in the prose: no heading at all, so the title is "<Type> – <vendor>"
+    prose = _only(
+        _pages(
+            "Kestrel Plumbing Inc.\nRe-pipe\n"
+            "This written estimate holds for 30 days, and no invoice is sent until the work is done."
+        )
+    )
+    assert (prose.doc_type, prose.title) == ("estimate", "Estimate – Kestrel Plumbing Inc.")
+
+
+def test_a_pest_report_form_is_typed_and_titled_without_its_checkbox_rows():
+    pages = _pages(
+        "Inspector / License No.\n"
+        "FULL REPORT PARTIAL REPORT FOLLOW-UP REPORT REINSPECTION REPORT\n"
+        "SITE NOTES: Tag Location:\n"
+        "Drywood Termite Findings Decay Findings\n"
+        "Ask for copies of prior reports and completion notices\n"
+        "Secondary Inspection\n"
+        "What Does A Termite Inspection Report Cover?\n"
+        "Questions about this report go to the state board that licenses pest companies.\n"
+        "BLDG NO. STREET CITY ZIP INSPECTION DATE NUMBER OF PAGES\n"
+        "12 GULL LN PORT ALDER 90000 06/16/2025 1 of 2",
+        "Section 1 findings\nEvidence of drywood termites at the eaves.\n"
+        "12 GULL LN PORT ALDER 90000 06/16/2025 2 of 2",
+    )
+    document = _only(pages)
+    assert (document.doc_type, document.title) == ("pest_report", "Pest report – 2025-06-16")
+
+
+def test_a_home_inspection_report_that_mentions_termites_is_not_a_pest_report():
+    pages = _pages(
+        "Licensed termite inspector on staff\nHOME INSPECTION REPORT\nDrywood termite evidence."
+    )
+    assert _only(pages).doc_type == "inspection_report"
+
+
+def test_a_priced_letter_from_a_sole_trader_is_an_invoice_not_titled_by_name():
+    pages = _pages(
+        "Oskar Lindqvist\n88 Kelp Ave.\nPort Alder, CA. 90000\nLic # 000111\n(555) 010-0444\n"
+        "June 3, 2025\nRe: 12 Gull Ln\nRepaired the eave boards noted in the pest report.\n"
+        "Total: $900"
+    )
+    document = _only(pages)
+    assert (document.doc_type, document.title) == ("invoice", "Invoice – 2025-06-03")
+
+
+def test_a_running_heading_that_names_the_document_is_its_title():
+    pages = _pages(
+        *(
+            f"HydroMax Variable Speed Pump\nInstallation and User Guide\nChapter {k}: Clean the"
+            " filter screen with warm water.\n- {k} -"
+            for k in (1, 2, 3)
+        )
+    )
+    document = _only(pages)
+    assert (document.doc_type, document.title) == ("manual", "Installation and User Guide")
+
+
+@pytest.mark.parametrize(
+    ("text", "doc_type"),
+    [
+        ("Sandpiper Pest Control, Inc.\nStandard notice of work completed", "completion_notice"),
+        ("Wood destroying organisms findings\nSection 1", "pest_report"),
+        ("Signed receipt for reports\nBuyer acknowledges", "disclosure_form"),
+        ("Seller disclosure\nKnown defects", "disclosure_form"),
+        ("Window cleaning quote\nFront and back", "estimate"),
+        ("Bill to Pat Owner\nWindow cleaning", "invoice"),
+        ("Window cleaning\nAmount due on receipt", "invoice"),
+        ("Thank you for your business!\nPaid in full for gutter cleaning", "invoice"),
+        ("LiftRight Opener\nOwner's guide", "manual"),
+        ("Voltek Breakers Inc.\nProduct data sheet", "manual"),
+        ("Roof coverage terms\nLimited warranty for ten years", "warranty"),
+        ("City of Port Alder\nPermit for a patio cover", "permit"),
+        ("Coastal Bluffs Homeowners Association\nDear Homeowner", "other"),
+        ("Seaview Water District\nStatement date 01/15/2024", "other"),
+    ],
+)
+def test_keyword_rules_type_documents(text, doc_type):
+    assert _only(_pages(text)).doc_type == doc_type
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Estimate No. E-1001",  # a reference, not a heading
+        "Secondary Inspection",  # a title-case checkbox label
+        "Why Order A Roof Report?",  # a question
+        "Report Date: 06/16/2025",  # a dated label
+        "Invoice total $900.00",  # an amount
+        "FULL REPORT PARTIAL REPORT",  # a row of checkboxes
+        "The inspection report follows.",  # a sentence
+        "12 Gull Ln Report Services",  # an address
+        "REPORT " + "X" * 120,  # too long
+    ],
+)
+def test_lines_that_are_not_titles(line):
+    document = _only(_pages(f"{line}\nHOME INSPECTION REPORT\nbody text here"))
+    assert document.title == "Home Inspection Report"
+
+
+def test_titles_are_at_most_120_characters():
+    heading = (
+        "Report on Subsurface Drainage Remediation Recommendations for the Northwest "
+        "Retaining Wall Improvements"
+    )
+    assert 80 < len(heading) <= 120
+    document = _only(_pages(f"{heading}\nbody"))
+    assert document.title == heading
+    long_first = "x" * 150
+    assert len(_only(_pages(f"{long_first}\nbody")).title) <= 120
+
+
+@pytest.mark.parametrize("file", [corpus.MIXED, *corpus.REVIEW_FILES], ids=lambda f: f.name)
+def test_heuristic_types_on_the_synthetic_bundles(file):
+    # the documents the boundaries find are typed like the ground truth, without an LLM
+    documents = segment_file(parsed(file).pages, file_sha=SHA, use_llm=False).documents
+    expected = {d.page_start: d.doc_type for d in file.documents}
+    got = {d.page_start: d.doc_type for d in documents if d.page_start in expected}
+    assert got == {start: expected[start] for start in got}
+    assert all(len(d.title) <= 120 and "envelope" not in d.title.casefold() for d in documents)

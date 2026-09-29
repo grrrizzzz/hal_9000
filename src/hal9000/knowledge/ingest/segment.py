@@ -10,7 +10,9 @@ layers find them:
    number of the same kind, or a new vendor letterhead. A numbered document
    that has not reached its last page absorbs pages without numbering (a photo
    page, a scan). :func:`heuristic_documents` labels each part as well as
-   rules can (type, vendor, date, title).
+   rules can (type, vendor, date, title), skipping running furniture (headers,
+   footers, page numbers, e-signature envelope lines), addresses and name blocks,
+   so titles and types stay sensible without the LLM.
 2. **One fast-tier LLM call per file** confirms the boundaries and labels each
    part with ``doc_type``, ``vendor``, ``doc_date`` and ``title``, through a
    strict JSON schema (offered as a strict function tool, and validated with
@@ -41,7 +43,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from hal9000.core.prompt import Prompt
 from hal9000.knowledge.contracts import DocType, DocumentMeta
-from hal9000.knowledge.ingest.clean import normalize_line, repair_letter_spacing
+from hal9000.knowledge.ingest.clean import (
+    DEFAULT_REPEAT_FRACTION,
+    body_lines,
+    normalize_line,
+    repair_letter_spacing,
+    running_lines,
+    word_costs,
+)
 from hal9000.knowledge.ingest.parsers.base import ParsedPage
 from hal9000.knowledge.obs.timing import Stage, stage
 
@@ -455,23 +464,256 @@ def propose_boundaries(pages: Sequence[ParsedPage]) -> list[Boundary]:
     return boundaries
 
 
+# ------------------------------------------------------------------- labels
+# Labels come from the *raw* pages too, so running furniture (headers, footers,
+# page numbers, e-signature envelope lines) must be recognised here and skipped:
+# a running header (an address glued to a client's name, an inspector's name) is
+# the first line of every page and would otherwise become the title.
+
+#: Pages of a document read for its title and type (a cover page, a contents page...).
+_LABEL_PAGES = 3
+#: Non-furniture lines from the top of each of those pages that may hold its title.
+_TITLE_LINES = 15
+_MAX_TITLE = 120
+_MAX_FIRST_LINE = 80
 _TITLE_REFERENCES = {"invoice": ("invoice",), "estimate": ("estimate", "proposal", "quote")}
+# nouns that name a document: a heading holding one is a title
+_DOC_NOUNS = (
+    r"reports?|invoice|estimate|receipt|notice|proposal|quote|quotation|warranty|manual|guide|"
+    r"permit|statement|agreement|certificate|disclosure"
+)
+_DOC_NOUN = re.compile(rf"(?i)\b(?:{_DOC_NOUNS})\b")
+# "Estimate No. E-1001", "Permit B24-0117": a reference to a document, not a heading
+_NOUN_REFERENCE = re.compile(rf"(?i)\b(?:{_DOC_NOUNS})\s*(?:no\.?|#|number|:)?\s*[A-Z]*-?\d")
+# "INSPECTION" names a document too, but only in an all-caps heading: a title-case
+# "Secondary Inspection" is a form's checkbox label
+_CAPS_NOUN = re.compile(rf"\b(?:{_DOC_NOUNS.upper()}|INSPECTION)\b")
+_MINOR_WORDS = frozenset(
+    "a an and as at by for from in of on or the to with und de la".split()
+)  # fmt: skip
+_STREET = re.compile(
+    r"(?i)^\s*\d{1,6}[A-Z]?\s+(?:[NSEW]\.?\s+)?(?:[\w.'-]+\s+){0,4}?"
+    r"(?:st|street|ave|avenue|rd|road|dr|drive|blvd|boulevard|ln|lane|ct|court|way|pl|place|"
+    r"cir|circle|ter|terrace|hwy|highway|pkwy|parkway|trl|trail|sq|square)\b\.?"
+)
+_PO_BOX = re.compile(r"(?i)^\s*p\.?\s*o\.?\s+box\b")
+_NAME_WORD = re.compile(r"[A-Z][a-z'’-]+\.?|[A-Z]\.?")
+# a heading's blanks and a trailing "No. ____"
+_BLANKS = re.compile(r"(?:\s+(?:no\.?|#|number))?\s*_{2,}.*$|_{2,}", re.IGNORECASE)
+# "Total: $615.00", "Amount due $1,200": a priced document with a total is a bill
+_PRICED_TOTAL = re.compile(
+    r"(?im)^\s*(?:grand\s+)?(?:total(?:\s+due)?|amount\s+due|balance(?:\s+due)?)\b[^\n$]{0,20}\$\s*\d"
+)
+_TYPE_LABELS: dict[str, str] = {
+    "inspection_report": "Inspection report",
+    "estimate": "Estimate",
+    "invoice": "Invoice",
+    "pest_report": "Pest report",
+    "completion_notice": "Completion notice",
+    "disclosure_form": "Disclosure form",
+    "manual": "Manual",
+    "warranty": "Warranty",
+    "permit": "Permit",
+}
 
 
-def _title(signals: Sequence[PageSignals], doc_type: str, name: str | None) -> str:
-    fallback = PurePath(name).stem if name else "Untitled document"
-    first = next((s for s in signals if s.has_text), None)
-    if first is None:
-        return fallback
-    if first.form_line and len(first.form_line) <= 80:
-        title = first.form_line.title() if first.form_line.isupper() else first.form_line
-        for kind, value in first.references:
+def _rx(pattern: str) -> re.Pattern[str]:
+    return re.compile(pattern, re.IGNORECASE)
+
+
+#: ``(doc_type, all of these patterns match)``, in precedence order. A specific form
+#: comes before a word any document can mention: a pest report cites "completion
+#: notices"; an estimate may say "invoice" (an invoice is typed only without estimate
+#: words); an invoice's small print mentions its warranty.
+_TYPE_RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
+    ("completion_notice", (_rx(
+        r"\bnotice\s+of\s+(?:work\s+)?complet(?:ed|ion)\b|\bcompletion\s+notice\b(?!s)"
+        r"|\bcertificate\s+of\s+completion\b"
+    ),)),
+    ("pest_report", (_rx(
+        r"\bwood[\s-]+destroying\b|\bstructural\s+pest\s+control\b"
+        r"|\b(?:termite|pest)s?\s+(?:inspection|report)\b"
+    ),)),
+    ("inspection_report", (_rx(r"\binspection\s+report\b|\b(?:property|home)\s+inspection\b"),)),
+    ("pest_report", (_rx(r"\btermites?\b"), _rx(r"\b(?:report|inspection)\b"))),
+    ("disclosure_form", (_rx(r"\breceipt\s+for\s+reports\b|\bdisclosure\b"),)),
+    ("estimate", (_rx(r"\b(?:estimate|proposal|quote|quotation)\b"),)),
+    ("invoice", (_rx(
+        r"\binvoice\b|\bbill\s+to\b|\b(?:amount|balance)\s+due\b|\bpaid\s+in\s+full\b|\breceipt\b"
+    ),)),
+    ("manual", (_rx(
+        r"\bmanual\b|\b(?:owner'?s|owners|user|installation|operating|operation)\s+guide\b"
+        r"|\b(?:product\s+)?(?:data|spec(?:ification)?)\s+sheet\b"
+    ),)),
+    ("warranty", (_rx(r"\bwarrant(?:y|ies)\b"),)),
+    ("permit", (_rx(r"\bpermit\b"),)),
+)  # fmt: skip
+
+
+def _type_from(text: str) -> str | None:
+    """The first rule whose patterns all match ``text``, or ``None``."""
+    for doc_type, patterns in _TYPE_RULES:
+        if all(pattern.search(text) for pattern in patterns):
+            return doc_type
+    return None
+
+
+def _furniture_keys(
+    texts: Sequence[str], body: set[str], *, per_document: bool = False
+) -> set[str]:
+    """Normalised running lines of a scope, as :func:`running_lines` finds them for cleaning."""
+    found = running_lines(texts, DEFAULT_REPEAT_FRACTION, body=body, per_document=per_document)
+    return {normalize_line(key) for _, _, key in found}
+
+
+def _is_page_furniture(line: str) -> bool:
+    """A page number or an e-signature envelope line, running or not."""
+    key = normalize_line(line)
+    return _is_noise(line) or "<id>" in key or "envelope id" in key or bool(_MARKER.search(line))
+
+
+def _is_furniture(line: str, furniture: set[str]) -> bool:
+    """A running header or footer (``furniture``: normalised keys), or page furniture."""
+    return normalize_line(line) in furniture or _is_page_furniture(line)
+
+
+def _is_address(line: str) -> bool:
+    return bool(_STREET.match(line) or _PO_BOX.match(line) or _CITY_ZIP.search(line))
+
+
+def _is_name(line: str) -> bool:
+    """A person's name block ("Jordan A. Reyes"): 2-4 capitalised words, mostly not English."""
+    words = line.replace(",", " ").split()
+    if not 2 <= len(words) <= 4 or len(line) > 40:
+        return False
+    if not all(_NAME_WORD.fullmatch(word) for word in words):
+        return False
+    if _COMPANY.search(line) or _DOC_NOUN.search(line):
+        return False
+    costs = word_costs()
+    known = sum(word.strip(".").casefold() in costs for word in words if len(word.strip(".")) > 1)
+    return known * 2 < len(words)
+
+
+def _is_title_case(line: str) -> bool:
+    words = [w for w in re.findall(r"[A-Za-z][A-Za-z'’]*", line)]
+    return bool(words) and all(
+        w[0].isupper() or w.casefold() in _MINOR_WORDS for w in words if len(w) > 1
+    )
+
+
+def _title_line(line: str) -> str | None:
+    """``line`` tidied as a document title if it is a prominent heading naming a document."""
+    line = _BLANKS.sub("", repair_letter_spacing(line.lstrip("#").strip())).strip(" -–:|")
+    if not line or len(line) > _MAX_TITLE or len(line.split()) > 12:
+        return None
+    if "$" in line or line.count(":") > 1 or re.search(r":\s*[#$]?\s*\d", line):
+        return None  # an amount or a "Label: 123" line
+    if line.endswith((".", "?", "!")) or find_date(line) or _is_address(line) or _is_name(line):
+        return None  # a sentence, a date, an address block
+    if len(_FIELD_LABELS.findall(line)) >= 2:
+        return None  # a form's field-label row
+    if _REFERENCE.search(line) or _NOUN_REFERENCE.search(line):
+        return None  # "Estimate No. E-1001", "Permit B24-0117": a reference, not a heading
+    caps = line.upper() == line
+    if caps and _CAPS_NOUN.search(line):
+        nouns = [m.group(0) for m in _CAPS_NOUN.finditer(line)]
+    elif _is_title_case(line) and _DOC_NOUN.search(line):
+        nouns = [m.group(0).casefold() for m in _DOC_NOUN.finditer(line)]
+    else:
+        return None
+    if len(nouns) != len(set(nouns)):
+        return None  # "FULL REPORT PARTIAL REPORT": a row of checkboxes
+    return _capitalise(line) if caps else line
+
+
+def _capitalise(line: str) -> str:
+    """An all-caps heading in title case ("OWNER'S GUIDE" → "Owner's Guide")."""
+    return " ".join(word[:1].upper() + word[1:].lower() for word in line.split(" "))
+
+
+def _substantive(line: str) -> bool:
+    """A line that says what a document is about (not a date, address, name or field row)."""
+    return not (
+        _is_date_line(line)
+        or _is_address(line)
+        or _is_name(line)
+        or len(_FIELD_LABELS.findall(line)) >= 2
+        or _PHONE.search(line)
+        or _WEB.search(line)
+    )
+
+
+@dataclass(frozen=True)
+class _Labels:
+    doc_type: str
+    title: str
+
+
+def _labels(
+    part: Sequence[PageSignals],
+    texts: Sequence[str],
+    furniture: set[str],
+    vendor: str | None,
+    doc_date: date | None,
+    name: str | None,
+) -> _Labels:
+    """doc_type and title of one document from its first pages (see :func:`heuristic_documents`)."""
+    lines: list[list[str]] = []  # non-furniture lines of each of the first pages
+    headers: list[list[str]] = []  # and those plus running headings that name the document
+    for text in texts[:_LABEL_PAGES]:
+        raw = [line.strip() for line in text.replace("\r", "\n").split("\n") if line.strip()]
+        lines.append([line for line in raw if not _is_furniture(line, furniture)])
+        # a document's own heading repeated atop every page ("INVOICE", "Installation
+        # Guide") still names it; an address, a name or a page number never does
+        headers.append(
+            [
+                line
+                for line in raw
+                if not _is_page_furniture(line)
+                and (_form(line) or _title_line(line) or not _is_furniture(line, furniture))
+            ]
+        )
+    title = next(
+        (found for page in headers for line in page[:_TITLE_LINES] if (found := _title_line(line))),
+        None,
+    )
+    first = next((s for s in part if s.has_text), None)
+    if title is None and first and first.form_line and len(first.form_line) <= _MAX_FIRST_LINE:
+        form = _BLANKS.sub("", first.form_line).strip()
+        title = _capitalise(form) if form.isupper() else form
+
+    flat = [line for page in headers for line in page]
+    headings = [line for line in flat if len(line.split()) <= 10 and not line.endswith(".")]
+    prose = [line for line in flat if line not in headings]
+    doc_type = (
+        (_type_from(title) if title else None)
+        or next((s.form for s in part if s.form), None)
+        or _type_from("\n".join(headings))
+        or ("invoice" if _PRICED_TOTAL.search("\n".join(flat)) else None)
+        or _type_from("\n".join(prose))
+        or "other"
+    )
+
+    if title is not None:
+        references = first.references if first else ()
+        for kind, value in references:
             if kind in _TITLE_REFERENCES.get(doc_type, ()) and value not in title:
-                return f"{title} {value}"
-        return title
-    if first.first_line and len(first.first_line) <= 80:
-        return first.first_line
-    return fallback
+                return _Labels(doc_type, f"{title} {value}"[:_MAX_TITLE])
+        return _Labels(doc_type, title[:_MAX_TITLE])
+    label = _TYPE_LABELS.get(doc_type)
+    if label and vendor:
+        return _Labels(doc_type, f"{label} – {vendor}"[:_MAX_TITLE])
+    if label:
+        # a typed document without a heading or letterhead: its first lines are form
+        # fields or line items, so its type (and date) says more than they do
+        return _Labels(doc_type, f"{label} – {doc_date.isoformat()}" if doc_date else label)
+    first_page = lines[0] if lines else []
+    top = [repair_letter_spacing(line.lstrip("#").strip()) for line in first_page[:_TOP_LINES]]
+    line = next((line for line in top if _substantive(line) and not _is_noise(line)), None)
+    if line and len(line) <= _MAX_FIRST_LINE:
+        return _Labels(doc_type, line)
+    return _Labels(doc_type, PurePath(name).stem if name else "Untitled document")
 
 
 def heuristic_documents(
@@ -485,6 +727,19 @@ def heuristic_documents(
 
     A file of pseudo-pages (DOCX, HTML, Markdown, TXT) is always one document: its
     pages are its own sections, not separate documents.
+
+    Labels read the first :data:`_LABEL_PAGES` pages of each document, skipping
+    running furniture (the lines cleaning removes as headers and footers, page
+    numbers, e-signature envelope lines):
+
+    - **title**: the first prominent heading naming a document (all-caps or title
+      case, with a word such as REPORT, INVOICE, ESTIMATE, NOTICE, MANUAL; never an
+      address, a person's name, a date or a form's row of checkboxes), else
+      "<Type> – <vendor>", else the type (and date) for a typed document, else the
+      first substantive line of the first page, else the file name;
+    - **doc_type**: the title's keywords, then a form header, then keywords in the
+      short heading-like lines, then a priced total (an invoice), then keywords in
+      the prose (:data:`_TYPE_RULES`, in precedence order).
     """
     if not pages:
         return []
@@ -492,21 +747,28 @@ def heuristic_documents(
     last_page = pages[-1].page
     documents: list[DocumentMeta] = []
     by_page = {page.page: page for page in pages}
+    texts = [page.text for page in pages]
+    body: set[str] = set() if pseudo_pages else body_lines(texts)
+    furniture = set() if pseudo_pages else _furniture_keys(texts, body)
     for index, start in enumerate(starts):
         end = starts[index + 1] - 1 if index + 1 < len(starts) else last_page
         part = [page_signals(by_page[n]) for n in range(start, end + 1)]
-        text = next((by_page[s.page].text for s in part if s.has_text), "")
-        doc_type = next((s.form for s in part if s.form), None) or "other"
+        part_texts = [by_page[s.page].text for s in part if s.has_text]
+        here = furniture
+        if not pseudo_pages:
+            here = furniture | _furniture_keys(part_texts, body, per_document=True)
         vendor = next((s.vendor for s in part if s.vendor), None)
+        doc_date = find_date(part_texts[0] if part_texts else "")
+        labels = _labels(part, part_texts, here, vendor, doc_date, name)
         documents.append(
             DocumentMeta(
                 file_sha=file_sha,
                 page_start=start,
                 page_end=end,
-                title=_title(part, doc_type, name),
-                doc_type=doc_type,
+                title=labels.title,
+                doc_type=labels.doc_type,
                 vendor=vendor,
-                doc_date=find_date(text),
+                doc_date=doc_date,
             )
         )
     return documents
