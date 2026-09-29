@@ -640,3 +640,29 @@ def test_the_inspector_link_and_scrape_target_match_the_service():
     prometheus = yaml.safe_load((REPO / "deploy" / "prometheus" / "prometheus.yml").read_text())
     job = next(j for j in prometheus["scrape_configs"] if j["job_name"] == "hal-kb")
     assert job["static_configs"][0]["targets"] == [f"hal-kb:{DEFAULT_PORT}"]
+
+
+def test_the_real_service_reports_the_ledgers_month_spend_and_cap(tmp_path, monkeypatch):
+    """Without --fake the meter is bound: knowledge spend from the ledger, eval spend excluded."""
+    from hal9000.knowledge.api import create_app
+    from hal9000.knowledge.api.services import _meter, build_services
+    from tests.knowledge.answer.conftest import make_settings
+
+    monkeypatch.setenv("HAL_DATA_DIR", str(tmp_path / "hal"))
+    settings = make_settings(tmp_path, monthly_cap_usd=0.5)
+    services = build_services(settings, meter=_meter(settings), start_worker=False)
+    try:
+        client = TestClient(create_app(services, web_dist=False))
+        ledger = services.meter.db
+        ledger.add_ledger("earlier", "knowledge", {"model": "openai/gpt-5-mini"}, 0.2)
+        ledger.add_ledger("sweep", "knowledge-eval", {"model": "openai/gpt-5-mini"}, 3.0)
+        samples, _ = _parse(client.get("/metrics").text)
+        assert samples[("kb_month_spend_usd", frozenset())] == pytest.approx(0.2)
+        assert samples[("kb_month_cap_usd", frozenset())] == 0.5
+        ledger.add_ledger("later", "knowledge", {"model": "openai/gpt-5-mini"}, 0.3)
+        samples, _ = _parse(client.get("/metrics").text)  # read at scrape time
+        assert samples[("kb_month_spend_usd", frozenset())] == pytest.approx(0.5)
+    finally:
+        services.close()
+        metrics.use_configured_month_budget()
+        metrics.install_db_collector(None)
