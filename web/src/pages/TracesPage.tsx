@@ -2,7 +2,6 @@ import { useQuery } from "@tanstack/react-query";
 import { Activity, ExternalLink } from "lucide-react";
 import { Link, useNavigate } from "react-router";
 import { api } from "@/api/client";
-import type { TraceSummaryPending } from "@/api/pending-contract";
 import { Page, PageHeader } from "@/components/layout/PageHeader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -53,7 +52,7 @@ export function TracesPage() {
                 </tr>
               </thead>
               <tbody className="tabular divide-y divide-border">
-                {(q.data as TraceSummaryPending[]).map((t) => (
+                {q.data.map((t) => (
                   <tr key={t.id} className="cursor-pointer hover:bg-surface-2" onClick={() => navigate(`/traces/${t.id}`)} data-testid="trace-row">
                     {/* max-w-0 + w-full lets the question truncate while the numbers keep their width. */}
                     <td className="w-full max-w-0 py-2.5 pr-3 pl-4 sm:pl-5">

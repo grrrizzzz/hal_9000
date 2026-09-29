@@ -1,8 +1,10 @@
 """Seeding a library through the real ingestion pipeline (``kb serve --fake``, tests).
 
 A :class:`SeedFile` is uploaded with :meth:`IngestPipeline.submit`, optionally
-given user-labelled documents (page ranges and metadata, which win over
+given labelled documents (page ranges and metadata, which win over
 segmentation exactly as a Library edit does), and ingested synchronously.
+Once ingested they are marked ``meta_source='auto'``: they are seed data, not
+the user's edits, so the Library doesn't call them "Edited".
 
 :func:`fake_corpus` is the synthetic library ``kb serve --fake`` starts with:
 the UI's own fixture PDF (``web/src/mocks/fixtures/synthetic-house.pdf``, an
@@ -91,6 +93,14 @@ def seed_library(
         job = worker.run_job(conn, result.job_id)
         if job.status != "done":
             raise RuntimeError(f"seeding {seed.relative_path} failed: {job.error}")
+        if seed.documents:
+            # ``user`` only so ingestion kept the labels over segmentation; they are
+            # seed data, not the user's edits, so the Library mustn't say "Edited".
+            with conn:
+                conn.execute(
+                    "UPDATE documents SET meta_source = 'auto' WHERE file_sha = ?",
+                    (result.sha256,),
+                )
     return results
 
 

@@ -5,16 +5,17 @@
  */
 import { bypass, delay, http, HttpResponse, type HttpHandler } from "msw";
 import type { ResponseOf } from "@/api/client";
-import type { FeedbackRequestPending, TraceSummaryPending } from "@/api/pending-contract";
 import type {
   ChatEvent,
   ChatRequest,
   Citation,
   DocumentPatch,
   EvidenceQuote,
+  FeedbackRequest,
   GoldPatch,
   Job,
   JudgeLabel,
+  TraceSummary,
   UploadResult,
 } from "@/api/types";
 import { chunkText, makeTrace, MIME, MOCK_PASSCODE, PAGES, SHA, seedRunResults, TRIGGERS } from "./data";
@@ -313,10 +314,15 @@ export const handlers: HttpHandler[] = [
     db.failedSignIns = 0;
     return json<ResponseOf<"/api/session", "post">>({ ok: true, expires_at: new Date(Date.now() + 30 * 86400_000).toISOString() });
   }),
-  http.delete("/api/session", () => {
-    db.signedIn = false;
-    return new HttpResponse(null, { status: 204 });
-  }),
+  // Revokes this session; ?everywhere=true revokes every session (the mocks have only one).
+  http.delete(
+    "/api/session",
+    authed(({ request }) => {
+      db.signedIn = false;
+      if (new URL(request.url).searchParams.get("everywhere") === "true") db.revokedEverywhere++;
+      return new HttpResponse(null, { status: 204 });
+    }),
+  ),
 
   // ---------------------------------------------------------- uploads and jobs
   http.post(
@@ -478,6 +484,7 @@ export const handlers: HttpHandler[] = [
     authed(async ({ request }) => {
       const req = (await request.json()) as ChatRequest;
       if (!req.message?.trim()) return json({ detail: "Ask a question first." }, { status: 422 });
+      if (req.message.length > 4000) return json({ detail: [{ msg: "String should have at most 4000 characters" }] }, { status: 422 });
       return new HttpResponse(chatStream(req), { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache" } });
     }),
   ),
@@ -509,15 +516,19 @@ export const handlers: HttpHandler[] = [
   http.post(
     "/api/feedback",
     authed(async ({ request }) => {
-      // Pending contract (2): rating is optional when add_to_gold; one row per message.
-      const body = (await request.json()) as FeedbackRequestPending;
+      // Rating is optional (e.g. only add_to_gold); one row per message, later posts update it.
+      const body = (await request.json()) as FeedbackRequest;
+      // Like the server's FeedbackRequest validator.
+      if ((body.rating === undefined || body.rating === null) && !body.add_to_gold) {
+        return json({ detail: [{ msg: "Value error, a rating is required unless add_to_gold is set" }] }, { status: 422 });
+      }
       let row = db.feedback.find((f) => f.message_id === body.message_id);
       if (!row) {
         row = { id: nextId(), message_id: body.message_id, rating: null, comment: null, add_to_gold: false, gold_item_id: null };
         db.feedback.push(row);
       }
       if (body.rating !== undefined && body.rating !== null) row.rating = body.rating;
-      if (body.comment) row.comment = body.comment;
+      if (body.comment !== undefined && body.comment !== null) row.comment = body.comment;
       if (body.add_to_gold && row.gold_item_id === null) {
         row.add_to_gold = true;
         let question = "";
@@ -639,7 +650,7 @@ export const handlers: HttpHandler[] = [
       return r ? json<ResponseOf<"/api/eval/runs/{id}", "get">>(r) : notFound("Run");
     }),
   ),
-  // Pending contract (4): paged per-question results.
+  // Paged per-question results.
   http.get(
     "/api/eval/runs/:id/results",
     authed(({ params, request }) => {
@@ -652,14 +663,14 @@ export const handlers: HttpHandler[] = [
       return json({ items: all.slice(offset, offset + limit), total: all.length, offset, limit });
     }),
   ),
-  // Pending contract (5): retry a failed job.
+  // Retry a failed job: the same job, queued again.
   http.post(
     "/api/jobs/:id/retry",
     authed(({ params }) => {
       const job = db.jobs.find((j) => j.id === Number(params.id));
       if (!job) return notFound("Job");
-      if (job.status !== "failed") return json({ detail: "Only failed jobs can be retried." }, { status: 409 });
-      Object.assign(job, { status: "queued", progress: 0, detail: "queued", error: null, updated_at: new Date().toISOString() });
+      if (job.status !== "failed") return json({ detail: `job ${job.id} is ${job.status}; only a failed job can be retried` }, { status: 409 });
+      Object.assign(job, { status: "queued", progress: 0, detail: "queued (retry)", error: null, updated_at: new Date().toISOString() });
       db.jobs = db.jobs.filter((j) => j !== job);
       startJob(job);
       return json(job);
@@ -696,7 +707,7 @@ export const handlers: HttpHandler[] = [
       const limit = Number(new URL(request.url).searchParams.get("limit") ?? 50);
       return json<ResponseOf<"/api/traces", "get">>(
         db.traces.slice(0, limit).map(
-          (t): TraceSummaryPending => ({ id: t.id!, created_at: t.created_at!, question: t.question ?? null, outcome: t.outcome ?? null, total_ms: t.total_ms ?? null, ttft_ms: t.ttft_ms ?? null, cost_usd: t.cost_usd }),
+          (t): TraceSummary => ({ id: t.id!, created_at: t.created_at!, question: t.question ?? null, outcome: t.outcome ?? null, total_ms: t.total_ms ?? null, ttft_ms: t.ttft_ms ?? null, cost_usd: t.cost_usd }),
         ),
       );
     }),

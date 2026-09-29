@@ -83,6 +83,17 @@ for (const width of [390, 1440]) {
               .map((t) => t.textContent),
           );
           expect(clipped, `${name}: clipped chart labels at ${width}px`).toEqual([]);
+          // Every tab is fully on screen (no tab hidden past the edge of a scrolling strip).
+          const offscreenTabs = await page.evaluate(() =>
+            [...document.querySelectorAll<HTMLElement>('[role="tab"]')]
+              .filter((t) => {
+                const r = t.getBoundingClientRect();
+                const strip = t.parentElement!.getBoundingClientRect();
+                return r.width > 0 && (r.left < 0 || r.right > window.innerWidth || r.left < strip.left - 1 || r.right > strip.right + 1);
+              })
+              .map((t) => t.textContent),
+          );
+          expect(offscreenTabs, `${name}: tabs out of view at ${width}px`).toEqual([]);
           await page.screenshot({ path: `e2e-screenshots/${name}-${width}-${scheme}.png`, fullPage: true });
           if (scheme === "light") expect(await unreachable(page), `${name} at ${width}px`).toEqual([]);
         }
@@ -98,6 +109,22 @@ for (const width of [390, 1440]) {
         await page.waitForTimeout(500);
         await page.screenshot({ path: `e2e-screenshots/viewer-${width}-${scheme}.png` });
         await page.keyboard.press("Escape");
+
+        // The Account menu and the "Sign out everywhere" confirmation (cancelled here).
+        if (width < 1024) await page.getByRole("button", { name: "Open menu" }).click();
+        await page.getByRole("button", { name: "Account" }).click();
+        const everywhere = page.getByRole("button", { name: "Sign out everywhere…" });
+        await expect(everywhere).toBeVisible();
+        await page.screenshot({ path: `e2e-screenshots/account-menu-${width}-${scheme}.png` });
+        await everywhere.click();
+        const confirm = page.getByRole("alertdialog", { name: "Sign out everywhere?" });
+        await expect(confirm).toBeVisible();
+        const box = (await confirm.boundingBox())!;
+        expect(box.x >= 0 && box.x + box.width <= width, `confirm dialog fits at ${width}px`).toBe(true);
+        await page.screenshot({ path: `e2e-screenshots/account-confirm-${width}-${scheme}.png` });
+        await confirm.getByRole("button", { name: "Cancel" }).click();
+        await expect(confirm).toBeHidden();
+
         await page.goto("/sign-in");
         await expect(page.getByLabel("Passcode")).toBeVisible();
         await page.screenshot({ path: `e2e-screenshots/sign-in-${width}-${scheme}.png` });

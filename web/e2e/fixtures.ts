@@ -6,8 +6,12 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { expect, type Page } from "@playwright/test";
+import { syntheticPdf } from "./pdf";
 
 export const PASSCODE = process.env.E2E_PASSCODE ?? "pod-bay-doors";
+
+/** A real server (`npm run e2e:real` or E2E_BASE_URL), not the in-browser mocks. */
+export const REAL_SERVER = !!process.env.E2E_BASE_URL || process.env.E2E_REAL === "1";
 
 export const QUESTIONS = {
   plain: "How old is the furnace?",
@@ -33,17 +37,28 @@ export function writeTree(root: string, files: Record<string, string | Buffer>):
   }
 }
 
-const tinyPdf = Buffer.from("%PDF-1.4\n% synthetic\n1 0 obj << /Type /Catalog >> endobj\ntrailer << /Root 1 0 R >>\n%%EOF\n");
+/**
+ * Makes this run's uploads new to the server: a real server reports bytes it
+ * already holds as "Already in library", so a re-run (or a retry) against the
+ * same `kb serve --fake` would otherwise never see "Indexed".
+ */
+export const RUN = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+const tinyPdf = syntheticPdf(["Synthetic inspection summary", "Property: 12 Example Lane, Testville", "The roof covering is in fair condition.", `Fixture run ${RUN}`]);
 const tinyJpg = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1, 0xff, 0xd9]);
 
-/** A nested folder of 6 indexable fixture files plus 2 images (handoff KWP6/KWP7). */
+/**
+ * A nested folder of 6 indexable fixture files plus 2 images (handoff KWP6/KWP7).
+ * On a real server these stay in the library for the rest of the run, so they
+ * avoid the chat questions' subjects (furnace, termite repair) and figures.
+ */
 export const NESTED_FOLDER: Record<string, string | Buffer> = {
   "House/inspection-summary.pdf": tinyPdf,
-  "House/Appliances/Furnace/manual.md": "# Furnace\n\nReplace the filter every 90 days.\n",
-  "House/Appliances/Furnace/warranty.txt": "Synthetic warranty, ten years.\n",
-  "House/Appliances/Water heater/notes.html": "<html><body><p>50 gallon gas unit.</p></body></html>",
-  "House/Receipts/2023/roof-invoice.txt": "Invoice 42: $1,234.00\n",
-  "House/Receipts/2023/pest-report.md": "Pest report: no activity.\n",
+  "House/Appliances/Dishwasher/manual.md": `# Dishwasher\n\nRinse the spray arms every month.\n\nFixture run ${RUN}.\n`,
+  "House/Appliances/Dishwasher/warranty.txt": `Synthetic warranty, ten years. Fixture run ${RUN}.\n`,
+  "House/Appliances/Water heater/notes.html": `<html><body><p>50 gallon gas unit.</p><p>Fixture run ${RUN}.</p></body></html>`,
+  "House/Receipts/2023/gutter-invoice.txt": `Invoice 42: gutter cleaning, $310.00\nFixture run ${RUN}.\n`,
+  "House/Receipts/2023/pest-report.md": `Pest report: no activity.\n\nFixture run ${RUN}.\n`,
   "House/Photos/front.jpg": tinyJpg,
   "House/Photos/back.jpg": tinyJpg,
 };

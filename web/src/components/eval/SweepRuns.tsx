@@ -24,7 +24,6 @@ import {
   ZAxis,
 } from "recharts";
 import { api } from "@/api/client";
-import { pendingApi } from "@/api/pending-contract";
 import type { EvalRun } from "@/api/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -602,7 +601,7 @@ const PAGE = 20;
 /** The per-question drill-down (plan §8.6), paged. */
 function RunResults({ runId }: { runId: string }) {
   const [offset, setOffset] = useState(0);
-  const q = useQuery({ queryKey: ["run-results", runId, offset], queryFn: () => pendingApi.runResults(runId, offset, PAGE), placeholderData: (prev) => prev });
+  const q = useQuery({ queryKey: ["run-results", runId, offset], queryFn: () => api.get("/api/eval/runs/{id}/results", { params: { id: runId }, query: { offset, limit: PAGE } }), placeholderData: (prev) => prev });
   const page = q.data;
   return (
     <section className="border-t border-border px-5 py-4" data-testid="run-results">

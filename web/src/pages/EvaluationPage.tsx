@@ -21,7 +21,7 @@ export default function EvaluationPage() {
         onValueChange={(v) => setParams({ tab: v }, { replace: true })}
         className="mt-6"
       >
-        <TabsList aria-label="Evaluation sections">
+        <TabsList aria-label="Evaluation sections" className="grid grid-cols-2 sm:flex">
           <TabsTrigger value="review">
             <ListChecks /> Review queue
           </TabsTrigger>

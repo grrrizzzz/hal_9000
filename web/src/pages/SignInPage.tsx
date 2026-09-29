@@ -37,6 +37,7 @@ export function SignInPage() {
               type="password"
               autoComplete="current-password"
               autoFocus
+              maxLength={256}
               value={passcode}
               onChange={(e) => setPasscode(e.target.value)}
               aria-invalid={m.isError || undefined}

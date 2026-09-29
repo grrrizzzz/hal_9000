@@ -36,7 +36,7 @@ export function CitationText({
             onClick={() => onOpen(c)}
             aria-label={`Source ${n}: ${c.title}, page ${c.page}`}
             data-marker={s.marker}
-            className="mx-0.5 inline-flex h-[1.35em] min-w-[1.6em] translate-y-[-1px] items-center justify-center rounded-md bg-accent-soft px-1 align-middle text-[11px] font-semibold text-accent-foreground ring-1 ring-accent/20 transition-colors hover:bg-accent hover:text-white"
+            className="mx-0.5 inline-flex h-[1.35em] min-w-[1.6em] translate-y-[-1px] items-center justify-center rounded-md bg-accent-soft px-1 align-middle text-[11px] font-semibold text-accent-foreground ring-1 ring-accent/20 transition-colors hover:bg-accent hover:text-surface"
           >
             S{n}
           </button>

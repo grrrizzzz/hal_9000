@@ -1,22 +1,29 @@
 import { expect, test, type Page } from "@playwright/test";
-import { QUESTIONS, signIn } from "./fixtures";
+import { QUESTIONS, REAL_SERVER, signIn } from "./fixtures";
 
 async function ask(page: Page, q: string) {
   await page.getByLabel("Ask about the house").fill(q);
   await page.getByRole("button", { name: "Send" }).click();
 }
 
-/** Record every version of the answer text as it changes (to see what streamed). */
+/**
+ * Record every version of the answer text as it changes: the streaming bubble
+ * (`final: false`) and then the finished answer (`final: true`), so the
+ * regenerated text is always among the snapshots.
+ */
 async function recordAnswerText(page: Page) {
   await page.evaluate(() => {
-    const w = window as unknown as { __answers: string[] };
+    const w = window as unknown as { __answers: { text: string; final: boolean }[] };
     w.__answers = [];
     new MutationObserver(() => {
-      const el = document.querySelector('[data-testid="assistant-streaming"] [data-testid="answer-text"]');
-      if (el?.textContent && w.__answers.at(-1) !== el.textContent) w.__answers.push(el.textContent);
+      const streaming = document.querySelector('[data-testid="assistant-streaming"] [data-testid="answer-text"]');
+      const done = document.querySelector('[data-testid="assistant-message"] [data-testid="answer-text"]');
+      const el = streaming ?? done;
+      const last = w.__answers.at(-1);
+      if (el?.textContent && (last?.text !== el.textContent || last.final !== !streaming)) w.__answers.push({ text: el.textContent, final: !streaming });
     }).observe(document.body, { subtree: true, childList: true, characterData: true });
   });
-  return () => page.evaluate(() => (window as unknown as { __answers: string[] }).__answers);
+  return () => page.evaluate(() => (window as unknown as { __answers: { text: string; final: boolean }[] }).__answers);
 }
 
 test.beforeEach(async ({ page }) => {
@@ -29,7 +36,7 @@ test("answers stream in, and [S1] opens the viewer at the cited page with a high
   const answer = page.getByTestId("assistant-message");
   await expect(answer).toContainText("installed in 2009");
   // Tokens arrived one by one: the streaming bubble showed growing partial text.
-  const seen = await snapshots();
+  const seen = (await snapshots()).filter((s) => !s.final).map((s) => s.text);
   expect(seen.length).toBeGreaterThan(3);
   expect(seen[0].length).toBeLessThan(seen.at(-1)!.length);
   await expect(answer.getByTestId("badge-verified")).toBeVisible();
@@ -50,16 +57,31 @@ test("answers stream in, and [S1] opens the viewer at the cited page with a high
 
 test("a forced reset shows only the regenerated answer", async ({ page }) => {
   const snapshots = await recordAnswerText(page);
+  const chat = page.waitForResponse((r) => new URL(r.url()).pathname === "/api/chat" && r.request().method() === "POST");
   await ask(page, QUESTIONS.reset);
   const answer = page.getByTestId("assistant-message");
   await expect(answer).toContainText("$1,234.00");
   await expect(answer).not.toContainText("$1,324.00");
-  const seen = await snapshots();
-  const firstRegenerated = seen.findIndex((s) => s.includes("Invoice"));
-  // The first draft did stream, and once the regeneration began none of it remained.
-  expect(seen.slice(0, Math.max(firstRegenerated, 0)).some((s) => s.includes("1,324"))).toBe(true);
-  expect(firstRegenerated).toBeGreaterThan(0);
+
+  // The server streamed a draft with the wrong figure, then `reset`, then the regenerated answer.
+  const events = (await (await chat).text())
+    .split("\n")
+    .filter((l) => l.startsWith("data:"))
+    .map((l) => JSON.parse(l.slice(5)) as { event: string; text?: string });
+  const reset = events.findIndex((e) => e.event === "reset");
+  expect(reset).toBeGreaterThan(0);
+  expect(events.slice(0, reset).filter((e) => e.event === "token").map((e) => e.text).join("")).toContain("1,324");
+  expect(events.slice(reset).filter((e) => e.event === "token").map((e) => e.text).join("")).toContain("1,234.00");
+
+  // On screen: once the regenerated answer appeared (at the latest as the finished answer),
+  // none of the draft came back.
+  const seen = (await snapshots()).map((s) => s.text);
+  const firstRegenerated = seen.findIndex((s) => s.includes("1,234"));
+  expect(firstRegenerated).toBeGreaterThanOrEqual(0);
   expect(seen.slice(firstRegenerated).some((s) => s.includes("1,324"))).toBe(false);
+  // The mocks pace every token, so there the draft must also have been painted before the
+  // reset cleared it. (A real server's events can share one network read and render once.)
+  if (!REAL_SERVER) expect(seen.slice(0, firstRegenerated).some((s) => s.includes("1,324"))).toBe(true);
 });
 
 test("thumbs down with a comment, then add the answer to the question set", async ({ page }) => {

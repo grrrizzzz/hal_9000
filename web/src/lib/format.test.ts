@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatDocDate, formatMs, formatUsd } from "./format";
+import { formatDocDate, formatMs, formatUsd, groundingLabel, outcomeLabel, outcomeTone } from "./format";
 
 describe("formatters", () => {
   it("formats money without showing a string of zeros", () => {
@@ -21,5 +21,13 @@ describe("formatters", () => {
   it("shows date-only values without timezone drift", () => {
     expect(formatDocDate("2023-06-22")).toMatch(/22/);
     expect(formatDocDate(null)).toBe("");
+  });
+  it("labels every outcome and grounding result in words", () => {
+    expect(outcomeLabel("cancelled")).toBe("Cancelled");
+    expect(outcomeTone("cancelled")).toBe("outline");
+    expect(outcomeLabel(null)).toBe("—");
+    expect(groundingLabel("failed")).toBe("Figures not verified");
+    expect(groundingLabel("verified")).toBe("Figures checked");
+    expect(groundingLabel("skipped")).toBe("Figures not checked");
   });
 });

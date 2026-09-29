@@ -1,14 +1,15 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, BookOpen, FlaskConical, LogOut, Menu, MessageSquare, Upload } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
+import { Activity, BookOpen, FlaskConical, Menu, MessageSquare, Upload } from "lucide-react";
 import { Dialog as D } from "radix-ui";
 import { useEffect, useState } from "react";
-import { NavLink, Outlet, useLocation, useNavigate } from "react-router";
+import { NavLink, Outlet, useLocation } from "react-router";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Banner } from "@/components/ui/states";
 import { formatUsd } from "@/lib/format";
 import { JobsProvider } from "@/lib/jobs";
 import { cn } from "@/lib/utils";
+import { AccountMenu } from "./AccountMenu";
 import { Logo } from "./Logo";
 
 const NAV = [
@@ -66,23 +67,6 @@ function Budget() {
   );
 }
 
-function SignOut({ className }: { className?: string }) {
-  const navigate = useNavigate();
-  const qc = useQueryClient();
-  const m = useMutation({
-    mutationFn: () => api.delete("/api/session"),
-    onSettled: () => {
-      qc.clear();
-      navigate("/sign-in", { replace: true });
-    },
-  });
-  return (
-    <Button variant="ghost" size="sm" className={cn("justify-start text-muted-foreground", className)} onClick={() => m.mutate()}>
-      <LogOut /> Sign out
-    </Button>
-  );
-}
-
 function RetrievalOnlyBanner() {
   const health = useQuery({ queryKey: ["health"], queryFn: () => api.get("/health"), refetchInterval: 60_000 });
   if (!health.data?.retrieval_only) return null;
@@ -113,7 +97,7 @@ export function AppLayout() {
           </div>
           <div className="space-y-2">
             <Budget />
-            <SignOut className="w-full" />
+            <AccountMenu className="w-full" />
           </div>
         </aside>
 
@@ -137,7 +121,7 @@ export function AppLayout() {
                   </div>
                   <div className="space-y-2">
                     <Budget />
-                    <SignOut className="w-full" />
+                    <AccountMenu className="w-full" />
                   </div>
                 </D.Content>
               </D.Portal>

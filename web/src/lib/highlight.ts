@@ -180,3 +180,51 @@ export function textRanges(text: string, needles: string[]): [number, number][] 
   }
   return out.sort((a, b) => a[0] - b[0]);
 }
+
+export interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/**
+ * Merge highlight boxes that sit next to each other on the same line into one.
+ * pdf.js puts each drawn run in its own span, so a letter-spaced heading
+ * ("D E S C R I P T I O N", one glyph per span) or a line split into runs
+ * would otherwise show as a row of separate little highlights. Boxes share a
+ * line when they overlap vertically by at least half the shorter one, and are
+ * joined when the horizontal gap is at most `gapFactor` × the line height.
+ */
+export function mergeBoxes(boxes: Box[], gapFactor = 1.2): Box[] {
+  const sorted = boxes.filter((b) => b.w > 0 && b.h > 0).sort((a, b) => a.y + a.h / 2 - (b.y + b.h / 2) || a.x - b.x);
+  const lines: Box[][] = [];
+  for (const b of sorted) {
+    const line = lines.find((l) => {
+      const top = Math.min(...l.map((o) => o.y));
+      const bottom = Math.max(...l.map((o) => o.y + o.h));
+      const overlap = Math.min(bottom, b.y + b.h) - Math.max(top, b.y);
+      return overlap >= 0.5 * Math.min(b.h, bottom - top);
+    });
+    if (line) line.push(b);
+    else lines.push([b]);
+  }
+  const out: Box[] = [];
+  for (const line of lines) {
+    line.sort((a, b) => a.x - b.x);
+    let cur = { ...line[0] };
+    for (const b of line.slice(1)) {
+      const gap = b.x - (cur.x + cur.w);
+      if (gap <= gapFactor * Math.max(cur.h, b.h)) {
+        const top = Math.min(cur.y, b.y);
+        const bottom = Math.max(cur.y + cur.h, b.y + b.h);
+        cur = { x: cur.x, y: top, w: Math.max(cur.x + cur.w, b.x + b.w) - cur.x, h: bottom - top };
+      } else {
+        out.push(cur);
+        cur = { ...b };
+      }
+    }
+    out.push(cur);
+  }
+  return out.sort((a, b) => a.y - b.y || a.x - b.x);
+}

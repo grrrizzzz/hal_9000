@@ -53,6 +53,9 @@ export default defineConfig(({ mode }) => {
       include: ["src/**/*.test.{ts,tsx}"],
       css: false,
       restoreMocks: true,
+      // Page tests chain several findBy waits (5 s each, src/test/setup.ts); on a busy
+      // CI box the default 5 s per test ran out before they did.
+      testTimeout: 20_000,
     },
   };
 });

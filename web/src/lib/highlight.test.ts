@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { highlightRanges, locate, locateAll, normalize, renderItem, textRanges } from "./highlight";
+import { highlightRanges, locate, locateAll, mergeBoxes, normalize, renderItem, textRanges } from "./highlight";
 
 describe("highlight matching", () => {
   it("matches cleaned text against a letter-spaced heading split into items", () => {
@@ -63,5 +63,28 @@ describe("highlight matching", () => {
     const chunk = "The furnace is a forced-air gas unit located in the garage and the roof covering is new";
     const ranges = highlightRanges(items, [chunk]);
     expect(ranges.has(0)).toBe(false);
+  });
+});
+
+describe("mergeBoxes", () => {
+  it("joins a letter-spaced heading (one box per glyph) into one highlight", () => {
+    const glyphs = [..."DESCRIPTION"].map((_, i) => ({ x: 72 + i * 17, y: 700, w: 11, h: 16 }));
+    expect(mergeBoxes(glyphs)).toEqual([{ x: 72, y: 700, w: 10 * 17 + 11, h: 16 }]);
+  });
+  it("keeps separate lines separate, and far-apart runs on one line apart", () => {
+    const merged = mergeBoxes([
+      { x: 72, y: 100, w: 200, h: 12 },
+      { x: 72, y: 116, w: 180, h: 12 }, // next line
+      { x: 400, y: 100, w: 50, h: 12 }, // same line, a column away
+      { x: 274, y: 101, w: 40, h: 11 }, // same line, adjacent (baseline jitter)
+    ]);
+    expect(merged).toEqual([
+      { x: 72, y: 100, w: 242, h: 12 },
+      { x: 400, y: 100, w: 50, h: 12 },
+      { x: 72, y: 116, w: 180, h: 12 },
+    ]);
+  });
+  it("ignores empty boxes", () => {
+    expect(mergeBoxes([{ x: 0, y: 0, w: 0, h: 10 }])).toEqual([]);
   });
 });

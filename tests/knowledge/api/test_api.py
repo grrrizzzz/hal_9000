@@ -389,6 +389,12 @@ def test_library_lists_documents_with_collections_and_details(signed):
     assert signed.get("/api/documents/99999").status_code == 404
 
 
+def test_seeded_documents_keep_their_labels_but_are_not_marked_edited(signed):
+    doc = _document(signed, "Invoice 1001")["document"]
+    assert doc["doc_type"] == "invoice" and doc["meta_source"] == "auto"
+    assert {d["document"]["meta_source"] for d in signed.get("/api/documents").json()} == {"auto"}
+
+
 def test_a_metadata_edit_wins_and_survives_re_ingestion(api: Api, signed):
     doc = _document(signed, "Invoice 1001")["document"]
     patched = signed.patch(
@@ -623,6 +629,29 @@ def test_the_ui_is_served_with_a_history_fallback(api: Api, tmp_path):
         status, body = _raw_get(client.app, raw)
         assert status in (200, 404) and b"root:" not in body, raw
     assert client.get("/health").headers["content-type"] == "application/json"
+
+
+def test_missing_files_are_404_and_only_extensionless_paths_fall_back(api: Api, tmp_path):
+    """A stale tab asking for an old hashed bundle must get a 404, not index.html as JS."""
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<!doctype html><title>HAL</title>")
+    client = client_for(create_app(api.services, web_dist=dist))
+    for missing in (
+        "/assets/x.js",
+        "/assets/index-0ld.css",
+        "/assets/fonts",
+        "/favicon.ico",
+        "/c/robots.txt",
+    ):
+        response = client.get(missing)
+        assert response.status_code == 404, missing
+        assert "<!doctype html>" not in response.text, missing
+    for route in ("/traces/abc", "/library/12", "/evaluation"):
+        response = client.get(route)
+        assert response.status_code == 200, route
+        assert response.text.startswith("<!doctype html>"), route
+        assert response.headers["cache-control"] == "no-cache"
 
 
 # ------------------------------------------------------------------ services
