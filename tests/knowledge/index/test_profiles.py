@@ -239,3 +239,13 @@ def test_building_needs_stored_pages_or_a_parser(conn, make_pipeline):
     report = pipeline.build(conn, OTHER)
     assert report.chunks > 0
     assert conn.execute("SELECT COUNT(*) FROM pages").fetchone()[0] == corpus.ESTIMATE.page_count
+
+
+def test_a_fake_profile_build_is_refused_outside_fake_mode(conn, monkeypatch):
+    from hal9000.knowledge.index.fake import FakeModeRequired
+
+    monkeypatch.delenv("KB_FAKE")
+    fake = FakeEmbedder()
+    with pytest.raises(FakeModeRequired):
+        build_profile(conn, parse_profile_name(OTHER), EmbeddingService(conn, embed_fn=fake))
+    assert get_profile(conn, OTHER) is None and fake.calls == 0

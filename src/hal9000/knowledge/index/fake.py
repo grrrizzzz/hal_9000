@@ -19,11 +19,18 @@ goes. It is a bag-of-words model:
   at all gets a direction seeded by the text itself.
 
 The vectors are unit length, so cosine similarity is a dot product.
+
+**Fake mode must be explicit** (so a typo in a profile name can never index a
+real library with meaningless vectors): ``KB_FAKE=1`` in the environment (the
+test suite sets it), or :func:`enable_fake_mode` (``kb serve --fake``).
+Otherwise :func:`require_fake_mode` refuses ``fake/*`` models, and the
+embedding service, profile builds and ``kb ingest`` call it.
 """
 
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import threading
 import unicodedata
@@ -33,16 +40,51 @@ from functools import lru_cache
 import numpy as np
 
 from hal9000.knowledge.chunking.profiles import FAKE_EMBED_DIMENSIONS, FAKE_EMBED_MODEL
+from hal9000.knowledge.config import ConfigMissing
 from hal9000.llm import Embeddings, Usage
 
 __all__ = [
+    "FAKE_ENV",
     "FAKE_EMBED_DIMENSIONS",
     "FAKE_EMBED_MODEL",
     "STOPWORDS",
     "SYNONYMS",
     "FakeEmbedder",
+    "FakeModeRequired",
     "concepts",
+    "enable_fake_mode",
+    "fake_mode_enabled",
+    "require_fake_mode",
 ]
+
+#: ``KB_FAKE=1`` allows ``fake/*`` embedding models (tests, UI end-to-end runs).
+FAKE_ENV = "KB_FAKE"
+_enabled = False
+
+
+class FakeModeRequired(ConfigMissing):
+    """A ``fake/*`` model was used outside explicit fake mode."""
+
+
+def enable_fake_mode(enabled: bool = True) -> None:
+    """Allow ``fake/*`` models in this process (``kb serve --fake``)."""
+    global _enabled
+    _enabled = enabled
+
+
+def fake_mode_enabled() -> bool:
+    return _enabled or os.environ.get(FAKE_ENV, "").strip().lower() in ("1", "true", "yes")
+
+
+def require_fake_mode(model: str) -> None:
+    """Refuse a ``fake/*`` model unless fake mode is on."""
+    if model.startswith("fake/") and not fake_mode_enabled():
+        raise FakeModeRequired(
+            f"{model} is the offline fake embedder, for tests and `kb serve --fake` only. "
+            f"Choose a real embedding model for the profile, or set {FAKE_ENV}=1 if this "
+            "really is a test library."
+        )
+
 
 #: word -> concept. Words in one group embed identically.
 SYNONYMS: Mapping[str, str] = {

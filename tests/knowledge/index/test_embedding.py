@@ -88,10 +88,16 @@ def test_batches_are_cached_as_they_arrive(kb_db):
     assert len(other.cached(["room q", "room r", "room s", "room z"], FAKE_EMBED_MODEL, 64)) == 2
 
 
-def test_transient_errors_are_retried_with_exponential_backoff(kb_db):
+def free_meter(tmp_path) -> Meter:
+    return Meter(Database(tmp_path / "hal9000.db"), "kb-test", 10, 10)
+
+
+def test_transient_errors_are_retried_with_exponential_backoff(kb_db, tmp_path):
     flaky = Flaky(2, RateLimitError("slow down"))
     sleeps: list[float] = []
-    service = EmbeddingService(kb_db, embed_fn=flaky, backoff_s=0.5, sleep=sleeps.append)
+    service = EmbeddingService(
+        kb_db, embed_fn=flaky, meter=free_meter(tmp_path), backoff_s=0.5, sleep=sleeps.append
+    )
     vectors = service.embed(["roof"], TE3L, 256)
     assert vectors.shape == (1, 256)
     assert sleeps == [0.5, 1.0] and service.last.retries == 2
@@ -175,8 +181,8 @@ def test_paid_calls_go_through_the_meter_with_the_agent(kb_db, tmp_path):
     ledger.close()
 
 
-def test_estimate_counts_only_uncached_texts(kb_db):
-    service = EmbeddingService(kb_db, embed_fn=FakeEmbedder())
+def test_estimate_counts_only_uncached_texts(kb_db, tmp_path):
+    service = EmbeddingService(kb_db, embed_fn=FakeEmbedder(), meter=free_meter(tmp_path))
     service.embed(["already cached text"], TE3S, 64)
     tokens, usd = service.estimate(
         ["already cached text", "brand new text", "brand new text"], TE3S, 64
@@ -188,6 +194,45 @@ def test_estimate_counts_only_uncached_texts(kb_db):
 def test_default_embed_fn_picks_the_fake_offline():
     assert isinstance(default_embed_fn(FAKE_EMBED_MODEL), FakeEmbedder)
     assert default_embed_fn(TE3S) is real_embed
+
+
+def test_the_fake_needs_explicit_fake_mode(kb_db, monkeypatch):
+    from hal9000.knowledge.index.fake import FakeModeRequired, enable_fake_mode
+
+    monkeypatch.delenv("KB_FAKE")
+    with pytest.raises(FakeModeRequired, match="KB_FAKE=1"):
+        default_embed_fn(FAKE_EMBED_MODEL)
+    fake = FakeEmbedder()
+    with pytest.raises(FakeModeRequired):
+        EmbeddingService(kb_db, embed_fn=fake).embed(["deck"], FAKE_EMBED_MODEL, 64)
+    assert fake.calls == 0
+    enable_fake_mode()  # what `kb serve --fake` does
+    try:
+        assert isinstance(default_embed_fn(FAKE_EMBED_MODEL), FakeEmbedder)
+    finally:
+        enable_fake_mode(False)
+
+
+def test_a_paid_model_without_a_meter_is_refused(kb_db):
+    from hal9000.knowledge.index.embedding import UnmeteredCall
+
+    fake = FakeEmbedder()
+    with pytest.raises(UnmeteredCall, match="needs a Meter"):
+        EmbeddingService(kb_db, embed_fn=fake).embed(["deck"], TE3S, 64)
+    assert fake.calls == 0
+
+
+def test_embed_query_is_timed_as_its_stage(kb_db):
+    from hal9000.knowledge.chunking import parse_profile_name
+    from hal9000.knowledge.index.search import embed_query
+    from hal9000.knowledge.obs.timing import start_trace
+
+    service = EmbeddingService(kb_db, embed_fn=FakeEmbedder())
+    profile = parse_profile_name("pdfium.fixed-64.hdr.fake-64")
+    with start_trace() as trace:
+        vector = embed_query(service, profile, "how old is the furnace")
+    assert vector.shape == (64,)
+    assert [s.stage for s in trace.stages] == ["embed_query"]
 
 
 # -------------------------------------------------------------- fake embedder

@@ -6,7 +6,10 @@ Offline checks, always:
 - the sqlite-vec extension loads and answers a cosine KNN with a metadata filter;
 - FTS5 with the ``porter unicode61 remove_diacritics 2`` tokenizer works;
 - the vendored ``tiktoken`` encodings load without the network;
-- ``config/knowledge.yaml`` parses, and its active profile name (if any) is valid.
+- the active index profile: the database's ``profiles.active`` flag decides it
+  (decision D3); ``active_profile`` in ``config/knowledge.yaml`` (the same
+  ``settings().yaml_path`` ``kb ingest`` reads) is reported only as the default
+  for the first ingest, and must be a valid profile name.
 
 Online checks, **only when ``OPENAI_API_KEY`` is set**: one embedding with the
 configured model and one tiny fast-tier chat call, both metered with
@@ -94,23 +97,39 @@ def _tiktoken() -> str:
 
 
 def _config() -> str:
-    from hal9000.knowledge.config import load_knowledge_file
-    from hal9000.knowledge.index.profiles import configured_profile
+    """The DB's active profile (what serves) and the yaml's default for the first ingest (D3)."""
+    from hal9000.knowledge.config import load_knowledge_file, settings
+    from hal9000.knowledge.index.profiles import active_profile, configured_profile
+    from hal9000.knowledge.storage import open_db
 
-    knowledge = load_knowledge_file()
-    profile = configured_profile(knowledge.active_profile)
-    return f"active_profile: {profile.name}" if profile else "no active_profile set yet"
+    kb = settings()
+    default = configured_profile(load_knowledge_file(kb.yaml_path).active_profile)
+    conn = open_db(kb.db_path)
+    try:
+        active = active_profile(conn)
+    finally:
+        conn.close()
+    serving = f"active profile {active.name}" if active else "no active profile yet"
+    first = f"default for the first ingest: {default.name}" if default else "no default set"
+    return f"{serving}; {first}"
 
 
 def _embed_model() -> str:
     from hal9000.knowledge.config import load_knowledge_file, settings
     from hal9000.knowledge.index.embedding import is_fake_model
-    from hal9000.knowledge.index.profiles import configured_profile
+    from hal9000.knowledge.index.profiles import active_profile, configured_profile
+    from hal9000.knowledge.storage import open_db
 
-    profile = configured_profile(load_knowledge_file().active_profile)
+    kb = settings()
+    conn = open_db(kb.db_path)
+    try:
+        profile = active_profile(conn)
+    finally:
+        conn.close()
+    profile = profile or configured_profile(load_knowledge_file(kb.yaml_path).active_profile)
     if profile is not None and not is_fake_model(profile.embed_model):
         return profile.embed_model
-    return settings().embed_model
+    return kb.embed_model
 
 
 def _meter():
@@ -159,7 +178,7 @@ def run(args: argparse.Namespace) -> int:
         ("sqlite-vec loads", _sqlite_vec),
         ("FTS5 tokenizer", _fts5),
         ("tiktoken offline", _tiktoken),
-        ("config/knowledge.yaml", _config),
+        ("index profile", _config),
     ]
     online = bool(os.environ.get("OPENAI_API_KEY", "").strip())
     if online:

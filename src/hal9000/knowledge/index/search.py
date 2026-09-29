@@ -5,6 +5,7 @@ Each public function is timed with its plan stage (``vector``, ``bm25``;
 result keeps its score: the dense cosine similarity is the abstain score
 (never the RRF score).
 
+    query_vector = embed_query(embeddings, profile, question)   # stage("embed_query")
     hits_v = vector_search(conn, profile, query_vector, k=30, filters=filters)
     hits_k = keyword_search(conn, profile, question, k=30, filters=filters)
     fused = fuse(as_scored(hits_v), as_scored(hits_k), method="rrf")
@@ -18,6 +19,7 @@ from collections.abc import Sequence
 import numpy as np
 
 from hal9000.knowledge.contracts import IndexProfile, SearchFilters
+from hal9000.knowledge.index.embedding import EmbeddingService
 from hal9000.knowledge.index.fusion import FusedHit, Scored, fuse, rrf, weighted
 from hal9000.knowledge.index.keyword import FtsIndex, KeywordHit
 from hal9000.knowledge.index.vector import SqliteVecIndex, VectorHit
@@ -29,6 +31,7 @@ __all__ = [
     "Scored",
     "VectorHit",
     "as_scored",
+    "embed_query",
     "fuse",
     "keyword_search",
     "rrf",
@@ -41,6 +44,11 @@ def _id(profile: IndexProfile) -> int:
     if profile.id is None:
         raise ValueError(f"profile {profile.name!r} is not stored")
     return profile.id
+
+
+def embed_query(embeddings: EmbeddingService, profile: IndexProfile, text: str) -> np.ndarray:
+    """The query vector for ``profile``'s model, cached, timed as ``stage("embed_query")``."""
+    return embeddings.embed_query(text, profile.embed_model, profile.dimensions)
 
 
 def vector_search(

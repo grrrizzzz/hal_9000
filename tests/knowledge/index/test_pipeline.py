@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 
 import pytest
 
-from hal9000.knowledge.index.library import documents_for, get_file, load_pages
+from hal9000.knowledge.index.library import (
+    documents_for,
+    get_file,
+    is_superseded,
+    latest_files,
+    load_pages,
+)
 from hal9000.knowledge.index.profiles import active_profile, get_profile
+from hal9000.knowledge.index.search import keyword_search
 from hal9000.knowledge.ingest.pipeline import (
     IngestPipeline,
     default_collection,
@@ -121,17 +129,6 @@ def test_reingesting_identical_bytes_is_a_duplicate_with_no_rows_and_no_embeddin
     assert files_total("duplicate") == duplicates + 2
 
 
-def test_a_different_file_under_the_same_path_is_a_new_version(conn, make_pipeline):
-    pipeline = make_pipeline()
-    first = pipeline.submit(conn, b"# Pool\n\nPump runs 6 hours a day.\n", "Pool/notes.md")
-    second = pipeline.submit(conn, b"# Pool\n\nPump runs 8 hours a day.\n", "Pool/notes.md")
-    assert first.status == second.status == "added"
-    assert second.reason == "new version of an earlier file"
-    assert get_file(conn, second.sha256).version_of == first.sha256
-    assert get_file(conn, first.sha256).version_of is None
-    assert pipeline.worker(":unused:").run_pending(conn)[-1].status == "done"
-
-
 def test_an_unfinished_file_uploaded_again_is_retried_not_called_a_duplicate(conn, make_pipeline):
     pipeline = make_pipeline()
     result = pipeline.submit(conn, corpus.TEXT.path, "pool_log.txt")
@@ -145,14 +142,27 @@ def test_an_unfinished_file_uploaded_again_is_retried_not_called_a_duplicate(con
 
 
 # --------------------------------------------------------------------- screen
+ELF = b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 8 + b"\x02\x00\x3e\x00"
+PDF_BYTES = corpus.INVOICE.path.read_bytes()
+
+
 @pytest.mark.parametrize(
     ("data", "name", "status", "reason"),
     [
         (b"\xff\xd8\xff\xe0 jpeg", "photos/IMG_1.jpg", "skipped", ".jpg is not a supported type"),
         (b"no extension", "README", "skipped", "files without an extension"),
-        (b"hello", "fake.pdf", "failed", "not a PDF"),
-        (b"PK\x03\x04 not really a zip", "fake.docx", "failed", "not a DOCX"),
-        (b"text\x00with nul", "notes.txt", "failed", "not a TXT"),
+        (b"hello", "fake.pdf", "failed", "does not start with %PDF-"),
+        (b"see page 3 %PDF-1.7", "late.pdf", "failed", "does not start with %PDF-"),
+        (b"PK\x03\x04 not really a zip", "fake.docx", "failed", "not a Word document"),
+        (b"just text", "fake.docx", "failed", "not a Word document"),
+        (b"text\x00with nul", "notes.txt", "failed", "binary data"),
+        (ELF, "program.txt", "failed", "binary data"),
+        (bytes(range(256)) * 4, "blob.md", "failed", "binary data"),
+        (b"caf\xe9 au lait", "latin1.txt", "failed", "not UTF-8"),
+        (b"%PDF-1.7\n<html>not really</html>", "trick.html", "failed", "PDF or ZIP"),
+        (b"%PDF-1.4 but called text", "trick.md", "failed", "PDF or ZIP"),
+        (PDF_BYTES, "invoice.html", "failed", "not a HTML file"),
+        (b"plain words, no markup", "page.html", "failed", "does not start with <"),
         (b"", "empty.md", "failed", "empty"),
     ],
 )
@@ -162,18 +172,36 @@ def test_screening_refuses_what_is_not_on_the_allow_list(
     pipeline = make_pipeline()
     before = files_total(status)
     result = pipeline.submit(conn, data, name)
-    assert result.status == status and reason in result.reason
+    assert result.status == status and reason in result.reason, result
     assert result.job_id is None and result.sha256 is None
     assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 0
     assert files_total(status) == before + 1
 
 
-def test_the_size_limit_is_checked_before_reading(tmp_path):
+@pytest.mark.parametrize(
+    ("data", "name"),
+    [
+        (b"\xef\xbb\xbf \n%PDF-1.7\n" + PDF_BYTES[8:], "bom.pdf"),
+        (b"\xef\xbb\xbf\n  <!doctype html><p>Filter: every 90 days</p>", "bom.html"),
+        ("Café notes\tline\r\n\x0cnext page\n".encode(), "notes.txt"),
+    ],
+)
+def test_screening_accepts_a_bom_whitespace_and_ordinary_text(data, name):
+    assert screen(data, name, max_bytes=10**8).status == "ok"
+
+
+def test_type_and_size_are_checked_before_reading(tmp_path, monkeypatch):
+    from hal9000.knowledge.ingest import pipeline as module
+
+    def no_reading(source):
+        raise AssertionError("the content was read")
+
+    monkeypatch.setattr(module, "_chunks", no_reading)
     big = tmp_path / "big.pdf"
     big.write_bytes(b"%PDF-1.7\n" + b"0" * 2000)
     verdict = screen(big, "big.pdf", max_bytes=1000)
     assert verdict.status == "failed" and "too large" in verdict.reason
-    assert verdict.data is None
+    assert screen(big, "big.exe", max_bytes=10**6).status == "skipped"
 
 
 def test_every_allowed_type_passes_screening():
@@ -181,28 +209,202 @@ def test_every_allowed_type_passes_screening():
         verdict = screen(item.path, item.name, max_bytes=10**8)
         assert verdict.status == "ok", (item.name, verdict.reason)
         assert verdict.mime_type == item.mime_type
+        assert verdict.sha256 == _sha(item)
 
 
 def test_relative_paths_are_normalised_and_give_the_collection(conn, make_pipeline, tmp_path):
     assert normalize_relative_path("../../etc/Appliances\\Furnace/./manual.pdf") == (
         "etc/Appliances/Furnace/manual.pdf"
     )
-    assert default_collection("Appliances/Furnace/manual.pdf") == "Appliances/Furnace"
+    assert default_collection("Appliances/Furnace/manual.pdf") == "Appliances/Furnace/"
     assert default_collection("manual.pdf") == ""
-    with pytest.raises(ValueError):
-        normalize_relative_path("../")
+    for bad in ("../", "a\x00b.pdf", "tab\there.md", "del\x7f.txt"):
+        with pytest.raises(ValueError):
+            normalize_relative_path(bad)
     pipeline = make_pipeline()
     result = pipeline.submit(conn, corpus.MARKDOWN.path, "/Garage/Door/garage_door.md")
     assert (result.relative_path, result.collection) == (
         "Garage/Door/garage_door.md",
-        "Garage/Door",
+        "Garage/Door/",
     )
-    named = pipeline.submit(conn, corpus.TEXT.path, "Pool/pool_log.txt", collection="Outdoor")
-    assert named.collection == "Outdoor"
-    assert get_file(conn, named.sha256).collection == "Outdoor"
+    named = pipeline.submit(
+        conn, corpus.TEXT.path, "Pool/pool_log.txt", collection=" Outdoor\\Pool "
+    )
+    assert named.collection == "Outdoor/Pool/"
+    assert get_file(conn, named.sha256).collection == "Outdoor/Pool/"
     stored = tmp_path / "files" / named.sha256  # stored by hash, not by the user's path
     assert stored.read_bytes() == corpus.TEXT.path.read_bytes()
-    assert pipeline.submit(conn, b"x", "../").status == "skipped"
+    assert pipeline.submit(conn, b"x", "../").status == "failed"
+    nul = pipeline.submit(conn, b"# Notes\n", "evil\x00name.md")
+    assert nul.status == "failed" and "control characters" in nul.reason
+    assert "\x00" not in nul.relative_path
+    assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 2
+
+
+def test_a_long_multibyte_name_is_parsed_under_a_safe_link_name(conn, make_pipeline):
+    name = "é" * 147 + ".txt"  # 151 characters, 298 bytes: too long for one file name
+    assert len(name) == 151 and len(name.encode()) > 255
+    pipeline = make_pipeline()
+    result = pipeline.submit(conn, corpus.TEXT.path, f"Pool/{name}")
+    assert result.status == "added"
+    job = pipeline.worker(":unused:").run_job(conn, result.job_id)
+    assert job.status == "done", job.error
+    assert get_file(conn, result.sha256).original_name == name
+
+
+# ------------------------------------------------------------------- versions
+def _chunks_of(conn, sha: str) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM chunks c JOIN documents d ON d.id = c.document_id "
+        "WHERE d.file_sha = ?",
+        (sha,),
+    ).fetchone()[0]
+
+
+def _searchable(conn, text: str) -> bool:
+    profile = active_profile(conn)
+    return any(
+        text in conn.execute("SELECT text FROM chunks WHERE id = ?", (h.chunk_id,)).fetchone()[0]
+        for h in keyword_search(conn, profile, text, k=50)
+    )
+
+
+V1 = b"# Pool\n\nThe pump runs six hours a day in summer.\n"
+V2 = b"# Pool\n\nThe pump runs eight hours a day in summer.\n"
+
+
+def test_a_new_version_supersedes_the_old_once_it_is_indexed(conn, make_pipeline):
+    pipeline = make_pipeline()
+    worker = pipeline.worker(":unused:")
+    first = pipeline.submit(conn, V1, "Pool/notes.md")
+    worker.run_job(conn, first.job_id)
+    second = pipeline.submit(conn, V2, "Pool/notes.md")
+    assert second.status == "added" and second.reason == "new version of an earlier file"
+    assert get_file(conn, second.sha256).version_of == first.sha256
+
+    # until the new version is indexed, the old one stays searchable
+    assert _searchable(conn, "six") and not is_superseded(conn, first.sha256)
+    assert [f.sha256 for f in latest_files(conn)] == [second.sha256]
+
+    job = worker.run_job(conn, second.job_id)
+    assert job.status == "done" and "replaces 1 earlier version" in job.detail
+    assert is_superseded(conn, first.sha256) and not is_superseded(conn, second.sha256)
+    assert _chunks_of(conn, first.sha256) == 0 and _chunks_of(conn, second.sha256) > 0
+    assert _searchable(conn, "eight") and not _searchable(conn, "six")
+    profile = active_profile(conn)
+    vec_ids = {r[0] for r in conn.execute(f"SELECT chunk_id FROM {vec_table(profile.id)}")}
+    fts_ids = {r[0] for r in conn.execute(f"SELECT rowid FROM {fts_table(profile.id)}")}
+    chunk_ids = {r[0] for r in conn.execute("SELECT id FROM chunks")}
+    assert vec_ids == fts_ids == chunk_ids  # no orphaned index rows
+    # the old version's rows stay, ready to be restored
+    assert get_file(conn, first.sha256) is not None
+    assert load_pages(conn, first.sha256, "text") and documents_for(conn, first.sha256)
+    assert [f.sha256 for f in latest_files(conn)] == [second.sha256]
+    # re-uploading the current bytes is still a duplicate
+    assert pipeline.submit(conn, V2, "Pool/notes.md").status == "duplicate"
+
+
+def test_a_failed_new_version_leaves_the_old_one_searchable(conn, make_pipeline):
+    pipeline = make_pipeline()
+    worker = pipeline.worker(":unused:")
+    worker.run_job(conn, pipeline.submit(conn, corpus.INVOICE.path, "Bills/invoice.pdf").job_id)
+    broken = pipeline.submit(conn, b"%PDF-1.7\nnot really\n", "Bills/invoice.pdf")
+    assert worker.run_job(conn, broken.job_id).status == "failed"
+    assert _chunks_of(conn, _sha(corpus.INVOICE)) > 0 and _searchable(conn, "BE-10442")
+    assert not is_superseded(conn, _sha(corpus.INVOICE))
+    assert [f.sha256 for f in latest_files(conn)] == [broken.sha256]  # shown, with its error
+
+
+def test_reuploading_an_old_version_restores_it(conn, make_pipeline):
+    pipeline = make_pipeline()
+    worker = pipeline.worker(":unused:")
+    first = pipeline.submit(conn, V1, "Pool/notes.md")
+    worker.run_job(conn, first.job_id)
+    second = pipeline.submit(conn, V2, "Pool/notes.md")
+    worker.run_job(conn, second.job_id)
+
+    back = pipeline.submit(conn, V1, "Pool/notes.md")
+    assert back.status == "added" and "restoring an earlier version" in back.reason
+    assert back.sha256 == first.sha256
+    assert _searchable(conn, "eight")  # the current version serves until the restore is indexed
+    assert worker.run_job(conn, back.job_id).status == "done"
+    assert not is_superseded(conn, first.sha256) and is_superseded(conn, second.sha256)
+    assert _searchable(conn, "six") and not _searchable(conn, "eight")
+    assert [f.sha256 for f in latest_files(conn)] == [first.sha256]
+    assert conn.execute("SELECT COUNT(*) FROM files").fetchone()[0] == 2
+    assert pipeline.submit(conn, V1, "Pool/notes.md").status == "duplicate"
+
+
+def test_profile_builds_skip_superseded_versions(conn, make_pipeline):
+    pipeline = make_pipeline()
+    worker = pipeline.worker(":unused:")
+    worker.run_job(conn, pipeline.submit(conn, V1, "Pool/notes.md").job_id)
+    worker.run_job(conn, pipeline.submit(conn, V2, "Pool/notes.md").job_id)
+    report = pipeline.build(conn, "pdfium.fixed-64.hdr.fake-64")
+    assert report.files == 1
+    other = get_profile(conn, "pdfium.fixed-64.hdr.fake-64")
+    texts = [
+        r[0] for r in conn.execute("SELECT text FROM chunks WHERE profile_id = ?", (other.id,))
+    ]
+    assert any("eight" in t for t in texts) and not any("six" in t for t in texts)
+
+
+# ------------------------------------------------------------ atomicity
+def test_the_index_step_is_atomic(conn, make_pipeline, monkeypatch):
+    pipeline = make_pipeline()
+    result = pipeline.submit(conn, corpus.ESTIMATE.path, "estimate.pdf")
+    pipeline.worker(":unused:").run_job(conn, result.job_id)
+    before = table_counts(conn)
+    documents_before = documents_for(conn, result.sha256)
+
+    from hal9000.knowledge.index.vector import SqliteVecIndex
+
+    def broken_add(self, rows):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(SqliteVecIndex, "add", broken_add)
+    with pytest.raises(sqlite3.OperationalError):
+        pipeline.process(conn, result.sha256)
+    # the earlier delete of this file's rows and the new inserts were rolled back together
+    assert not conn.in_transaction
+    assert table_counts(conn) == before
+    assert documents_for(conn, result.sha256) == documents_before
+    assert _searchable(conn, "estimate")
+
+
+# --------------------------------------------------------------- parsing
+def test_one_parse_process_serves_every_file(conn, make_pipeline):
+    pipeline = make_pipeline()
+    ingest_all(conn, pipeline, [corpus.INVOICE, corpus.ESTIMATE, corpus.DOCX, corpus.HTML])
+    assert pipeline.parse_process.starts == 1
+
+
+class SlowParser:
+    """Picklable; sleeps in the parse process to trip the time limit."""
+
+    name = "text"
+
+    def parse(self, path):
+        import time as _time
+
+        _time.sleep(30)
+
+
+def test_a_parse_over_its_time_limit_kills_and_restarts_the_process(tmp_path):
+    from hal9000.knowledge.ingest.parsers import ParseTimeout, get_parser
+    from hal9000.knowledge.ingest.pipeline import ParseProcess
+
+    process = ParseProcess()
+    try:
+        started = time.perf_counter()
+        with pytest.raises(ParseTimeout, match="longer than 1 s"):
+            process.parse(corpus.TEXT.path, SlowParser(), timeout_s=1, max_chars=3000)
+        assert time.perf_counter() - started < 10
+        parsed = process.parse(corpus.TEXT.path, get_parser("text"), timeout_s=30, max_chars=3000)
+        assert parsed.page_count == corpus.TEXT.page_count
+        assert process.starts == 2
+    finally:
+        process.close()
 
 
 # ------------------------------------------------------------ segmentation

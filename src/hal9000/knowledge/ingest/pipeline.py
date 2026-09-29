@@ -3,18 +3,24 @@
 
 :meth:`IngestPipeline.submit` runs the cheap, synchronous part of an upload:
 
-2. **screen** the bytes: an allow-listed extension (PDF, DOCX, TXT, MD, HTML)
-   whose content matches (magic bytes), at most ``ingest.max_upload_bytes``
-   (100 MB), and SHA-256 deduplication: the same bytes again are
-   ``duplicate`` ("already in library"); a different file under the same
-   relative path is stored as a new version (``files.version_of``);
+2. **screen**: an allow-listed extension (PDF, DOCX, TXT, MD, HTML) and at
+   most ``ingest.max_upload_bytes`` (100 MB), both checked before anything is
+   read; then the content, streamed in chunks (:func:`screen`), must match
+   the type (magic bytes, UTF-8 text without control characters), and its
+   SHA-256 deduplicates: the same bytes again are ``duplicate`` ("already in
+   library"); a different file under the same relative path is a new version
+   (``files.version_of``) that supersedes the old one once it is indexed, and
+   an old version's bytes uploaded again restore it (decision D1);
 3. **store** the original at ``data/knowledge/files/<sha256>`` (no
    user-controlled path on disk) and record it in ``files``;
 
 then queues an ``ingest`` job. The job (:meth:`IngestPipeline.process`, on the
 one worker thread of :mod:`.jobs`) does the rest:
 
-4. **parse** with KWP1's :func:`parse_file` (child process, time limit);
+4. **parse** in one long-lived child process per pipeline
+   (:class:`ParseProcess`), reused across files and killed and restarted on
+   its time limit, so a stuck parser can't hang the worker and a file doesn't
+   pay for a process start;
 5./6. **segment** the raw pages into documents (LLM labels through the
    persistent cache, or heuristics with ``--no-llm``; documents the user
    edited are kept as they are), then **clean** the pages with those document
@@ -23,29 +29,40 @@ one worker thread of :mod:`.jobs`) does the rest:
    for evaluation);
 8. **embed** the searchable chunks through the cached, metered service;
 9. **index**: documents, pages, chunks and the profile's FTS5 and ``vec0``
-   rows in one transaction, so a crash never leaves half a file; then the
-   metrics;
+   rows, and superseding the file's older versions, in one transaction, so a
+   crash never leaves half a file; then the metrics;
 10. the **regression** hook (a no-op until KWP5's scorer plugs in).
 
 Every step runs inside the ``stage()`` timer with its plan name. Re-running a
 file (a retried job) replaces its earlier rows and pays for nothing twice:
 embeddings and LLM labels are cached.
 
-When no profile is active yet, ``active_profile`` from
-``config/knowledge.yaml`` is built from the stored pages and activated first.
-When none is configured either, files are stored, parsed, segmented and
-cleaned, but not chunked: a profile build indexes them later.
+The database's ``profiles.active`` flag decides the active profile (decision
+D3). Only when none is active yet, ``active_profile`` from
+``config/knowledge.yaml`` (the default for the first ingest) is built from the
+stored pages and activated first. When none is configured either, files are
+stored, parsed, segmented and cleaned, but not chunked: a profile build
+indexes them later.
+
+Collections are folder paths normalised to ``A/B/`` (decision D2; see
+:func:`hal9000.knowledge.index.filters.normalize_collection`).
 """
 
 from __future__ import annotations
 
+import codecs
+import hashlib
 import io
+import multiprocessing
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
+import threading
+import weakref
 import zipfile
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -60,6 +77,7 @@ from hal9000.knowledge.contracts import (
     UploadResult,
 )
 from hal9000.knowledge.index.embedding import EmbeddingService, EmbedStats
+from hal9000.knowledge.index.filters import normalize_collection
 from hal9000.knowledge.index.library import (
     DbSegmentCache,
     delete_file_index,
@@ -68,9 +86,12 @@ from hal9000.knowledge.index.library import (
     get_file,
     insert_documents,
     insert_file,
+    is_superseded,
     latest_version,
     load_pages,
+    mark_uploaded,
     save_pages,
+    supersede_other_versions,
     user_documents,
 )
 from hal9000.knowledge.index.profiles import (
@@ -92,11 +113,20 @@ from hal9000.knowledge.ingest.jobs import (
     JobWorker,
     ProgressBus,
     Reporter,
+    WriterLock,
     create_job,
     job_params,
+    recover_interrupted,
     retry_job,
 )
-from hal9000.knowledge.ingest.parsers import ParsedFile, ParseError, get_parser, parse_file
+from hal9000.knowledge.ingest.parsers import (
+    ParsedFile,
+    ParseError,
+    Parser,
+    ParseTimeout,
+    get_parser,
+    parse_file,
+)
 from hal9000.knowledge.ingest.segment import segment_file
 from hal9000.knowledge.obs import metrics
 from hal9000.knowledge.obs.timing import Stage, stage
@@ -105,9 +135,12 @@ __all__ = [
     "ALLOWED_TYPES",
     "IngestOutcome",
     "IngestPipeline",
+    "ParseProcess",
     "Screened",
     "clean_for_documents",
     "default_collection",
+    "file_sha256",
+    "normalize_collection",
     "normalize_relative_path",
     "no_regression",
     "screen",
@@ -125,6 +158,11 @@ ALLOWED_TYPES: dict[str, str] = {
     ".htm": "text/html",
 }
 _SNIFF = 8192
+_CHUNK = 1 << 20
+_TEXT_SUFFIXES = (".txt", ".md", ".markdown", ".html", ".htm")
+#: C0 controls other than tab, newline, form feed and carriage return
+_CONTROL = re.compile(rb"[\x00-\x08\x0b\x0e-\x1f]")
+_LEADING = b"\xef\xbb\xbf \t\r\n\x0c"  # a UTF-8 BOM, then whitespace
 
 Regression = Callable[[sqlite3.Connection, IndexProfile], None]
 
@@ -144,15 +182,20 @@ class Screened:
     sha256: str | None = None
     mime_type: str | None = None
     size: int = 0
-    data: bytes | None = field(default=None, repr=False)
 
 
 def normalize_relative_path(path: str) -> str:
-    """A clean POSIX relative path (``Appliances/Furnace/manual.pdf``); never escapes upward."""
+    """A clean POSIX relative path (``Appliances/Furnace/manual.pdf``); never escapes upward.
+
+    Raises ``ValueError`` for an empty path or one with control characters.
+    """
+    text = str(path)
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in text):
+        raise ValueError(f"the file name contains control characters: {text!r}")
     parts = [
-        part
-        for part in PurePosixPath(str(path).replace("\\", "/")).parts
-        if part not in ("", ".", "..", "/")
+        part.strip()
+        for part in PurePosixPath(text.replace("\\", "/")).parts
+        if part.strip() not in ("", ".", "..", "/")
     ]
     if not parts:
         raise ValueError(f"not a file path: {path!r}")
@@ -160,88 +203,233 @@ def normalize_relative_path(path: str) -> str:
 
 
 def default_collection(relative_path: str) -> str:
-    """The folder part of a relative path is its collection (plan §5.1 step 1)."""
-    parent = PurePosixPath(relative_path).parent.as_posix()
-    return "" if parent == "." else parent
+    """The folder part of a relative path is its collection, as ``A/B/`` (``''`` at the root)."""
+    return normalize_collection(PurePosixPath(relative_path).parent.as_posix())
 
 
-def _content_matches(suffix: str, data: bytes) -> bool:
-    head = data[:_SNIFF]
-    if suffix == ".pdf":
-        return b"%PDF-" in data[:1024]
-    if suffix == ".docx":
-        if not data.startswith(b"PK\x03\x04"):
-            return False
-        try:
-            with zipfile.ZipFile(io.BytesIO(data)) as archive:
-                return "word/document.xml" in archive.namelist()
-        except zipfile.BadZipFile:
-            return False
-    if b"\x00" in head:  # text formats: no NUL bytes
+def _chunks(source: bytes | Path) -> Iterator[bytes]:
+    if isinstance(source, Path):
+        with open(source, "rb") as handle:
+            while block := handle.read(_CHUNK):
+                yield block
+    else:
+        view = memoryview(source)
+        for start in range(0, len(view), _CHUNK):
+            yield bytes(view[start : start + _CHUNK])
+
+
+def file_sha256(source: bytes | Path) -> str:
+    """SHA-256 of a file or bytes, read in chunks."""
+    digest = hashlib.sha256()
+    for block in _chunks(source):
+        digest.update(block)
+    return digest.hexdigest()
+
+
+def _is_docx(source: bytes | Path) -> bool:
+    try:
+        with zipfile.ZipFile(source if isinstance(source, Path) else io.BytesIO(source)) as z:
+            return "word/document.xml" in z.namelist()
+    except (zipfile.BadZipFile, OSError):
         return False
-    if suffix in (".html", ".htm"):
-        return b"<" in head
-    return True
+
+
+def _content_problem(suffix: str, source: bytes | Path) -> tuple[str | None, str]:
+    """``(problem or None, sha256)``: one streamed pass over the content."""
+    digest = hashlib.sha256()
+    head = b""
+    text = suffix in _TEXT_SUFFIXES
+    decoder = codecs.getincrementaldecoder("utf-8")("strict")
+    problem: str | None = None
+    for block in _chunks(source):
+        digest.update(block)
+        if len(head) < _SNIFF:
+            head += block[: _SNIFF - len(head)]
+        if text and problem is None:
+            if _CONTROL.search(block):
+                problem = "it contains binary data"
+            else:
+                try:
+                    decoder.decode(block)
+                except UnicodeDecodeError:
+                    problem = "it is not UTF-8 text"
+    if text and problem is None:
+        try:
+            decoder.decode(b"", final=True)
+        except UnicodeDecodeError:
+            problem = "it is not UTF-8 text"
+    start = head.lstrip(_LEADING)
+    kind = suffix[1:].upper()
+    if suffix == ".pdf" and not start.startswith(b"%PDF-"):
+        problem = "it does not start with %PDF-"
+    elif suffix == ".docx" and not (head.startswith(b"PK\x03\x04") and _is_docx(source)):
+        problem = "it is not a Word document (no word/document.xml)"
+    elif text and problem is None:
+        if start.startswith((b"%PDF-", b"PK\x03\x04")) or head.startswith(b"PK\x03\x04"):
+            problem = "it is a PDF or ZIP file"
+        elif suffix in (".html", ".htm") and not start.startswith(b"<"):
+            problem = "it does not start with <"
+    return (f"the content is not a {kind} file: {problem}" if problem else None), digest.hexdigest()
+
+
+def _type_and_size(relative_path: str, size: int, max_bytes: int) -> Screened | None:
+    suffix = PurePosixPath(relative_path).suffix.lower()
+    if suffix not in ALLOWED_TYPES:
+        return Screened(
+            "skipped",
+            relative_path,
+            f"{suffix or 'files without an extension'} is not a supported type "
+            "(PDF, DOCX, TXT, MD, HTML)",
+        )
+    if size > max_bytes:
+        return Screened(
+            "failed",
+            relative_path,
+            f"too large: {size / 1e6:.1f} MB (the limit is {max_bytes / 1e6:.0f} MB)",
+            size=size,
+        )
+    if size == 0:
+        return Screened("failed", relative_path, "the file is empty", size=0)
+    return None
 
 
 def screen(source: bytes | Path, relative_path: str, *, max_bytes: int) -> Screened:
-    """Check one upload against the allow-list, content type and size (``stage("screen")``)."""
+    """Check one upload (``stage("screen")``): type and size first, then its content, streamed.
+
+    Raises ``ValueError`` for an unusable relative path.
+    """
     with stage(Stage.SCREEN):
-        import hashlib
-
         relative_path = normalize_relative_path(relative_path)
-        suffix = PurePosixPath(relative_path).suffix.lower()
-        mime = ALLOWED_TYPES.get(suffix)
-        if mime is None:
-            return Screened(
-                "skipped",
-                relative_path,
-                f"{suffix or 'files without an extension'} is not a supported type "
-                "(PDF, DOCX, TXT, MD, HTML)",
-            )
         size = source.stat().st_size if isinstance(source, Path) else len(source)
-        if size > max_bytes:
-            return Screened(
-                "failed",
-                relative_path,
-                f"too large: {size / 1e6:.1f} MB (the limit is {max_bytes / 1e6:.0f} MB)",
-                size=size,
-            )
-        if size == 0:
-            return Screened("failed", relative_path, "the file is empty", size=0)
-        data = source.read_bytes() if isinstance(source, Path) else bytes(source)
-        if not _content_matches(suffix, data):
-            return Screened(
-                "failed",
-                relative_path,
-                f"the content is not a {suffix[1:].upper()} file",
-                size=size,
-            )
-        return Screened(
-            "ok",
-            relative_path,
-            sha256=hashlib.sha256(data).hexdigest(),
-            mime_type=mime,
-            size=size,
-            data=data,
-        )
+        verdict = _type_and_size(relative_path, size, max_bytes)
+        if verdict is not None:
+            return verdict
+        suffix = PurePosixPath(relative_path).suffix.lower()
+        problem, sha = _content_problem(suffix, source)
+        if problem is not None:
+            return Screened("failed", relative_path, problem, size=size)
+        return Screened("ok", relative_path, sha256=sha, mime_type=ALLOWED_TYPES[suffix], size=size)
 
 
-def _store_original(files_dir: Path, sha: str, data: bytes) -> Path:
-    """Write ``files_dir/<sha>`` atomically (a crash never leaves a partial original)."""
+def _store_original(files_dir: Path, sha: str, source: bytes | Path) -> Path:
+    """Copy the upload to ``files_dir/<sha>`` atomically, checking it is still the same bytes."""
     target = files_dir / sha
-    if target.is_file() and target.stat().st_size == len(data):
+    if target.is_file():
         return target
     files_dir.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=files_dir, prefix=".upload-")
     try:
+        digest = hashlib.sha256()
         with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
+            for block in _chunks(source):
+                digest.update(block)
+                handle.write(block)
+        if digest.hexdigest() != sha:
+            raise ValueError("the file changed while it was being uploaded")
         os.replace(tmp, target)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise
     return target
+
+
+# ------------------------------------------------------------------- parse
+def _parse_server(conn) -> None:  # pragma: no cover - runs in the child process
+    """The long-lived parse process: parse requests until the pipe closes."""
+    while True:
+        try:
+            request = conn.recv()
+        except (EOFError, OSError):
+            return
+        if request is None:
+            return
+        parser, path, max_chars = request
+        try:
+            result = parse_file(path, parser=parser, isolate=False, max_chars=max_chars)
+            conn.send(("ok", result))
+        except ParseError as error:
+            conn.send(("parse_error", str(error)))
+        except BaseException as error:  # noqa: BLE001 - reported to the parent
+            conn.send(("error", f"{type(error).__name__}: {error}"))
+
+
+def _terminate(process, conn) -> None:
+    try:
+        conn.close()
+    except OSError:  # pragma: no cover
+        pass
+    if process.is_alive():
+        process.terminate()
+        process.join(5)
+        if process.is_alive():  # pragma: no cover - terminate is normally enough
+            process.kill()
+            process.join()
+
+
+class ParseProcess:
+    """One long-lived child process that parses files, reused across files.
+
+    Starting a process per file costs about 0.3 s (plan §5.1 step 4 wants
+    isolation and a time limit, not a new process each time). A parse that
+    runs past its limit, or crashes the child, kills it; the next parse starts
+    a fresh one. ``starts`` counts the processes started.
+    """
+
+    def __init__(self) -> None:
+        self._process = None
+        self._conn = None
+        self._finalizer: weakref.finalize | None = None
+        self._lock = threading.Lock()
+        self.starts = 0
+
+    def _ensure(self) -> None:
+        if self._process is not None and self._process.is_alive():
+            return
+        self._kill()
+        context = multiprocessing.get_context("spawn")
+        parent, child = context.Pipe(duplex=True)
+        process = context.Process(target=_parse_server, args=(child,), name="kb-parse", daemon=True)
+        process.start()
+        child.close()
+        self._process, self._conn = process, parent
+        self._finalizer = weakref.finalize(self, _terminate, process, parent)
+        self.starts += 1
+
+    def _kill(self) -> None:
+        if self._finalizer is not None:
+            self._finalizer()  # terminates the process and closes the pipe
+        self._process = self._conn = self._finalizer = None
+
+    def close(self) -> None:
+        with self._lock:
+            self._kill()
+
+    def parse(self, path: Path, parser: Parser, *, timeout_s: float, max_chars: int) -> ParsedFile:
+        """Parse ``path`` in the child, timed as ``stage("parse")``."""
+        with stage(Stage.PARSE), self._lock:
+            self._ensure()
+            assert self._conn is not None and self._process is not None
+            self._conn.send((parser, str(path), max_chars))
+            if not self._conn.poll(timeout_s):
+                self._kill()
+                raise ParseTimeout(
+                    f"Could not parse {path.name}: parsing took longer than {timeout_s:g} s and "
+                    "was stopped."
+                )
+            try:
+                kind, payload = self._conn.recv()
+            except (EOFError, OSError):
+                code = self._process.exitcode
+                self._kill()
+                raise ParseError(
+                    f"Could not parse {path.name}: the {parser.name} parser crashed "
+                    f"(exit code {code})."
+                ) from None
+        if kind == "ok":
+            return payload
+        if kind == "parse_error":
+            raise ParseError(payload)
+        raise ParseError(f"Could not parse {path.name}: {payload}")
 
 
 # ------------------------------------------------------------------- clean
@@ -282,6 +470,7 @@ class IngestOutcome:
     chunks: dict[str, int] = field(default_factory=dict)
     embed: EmbedStats = field(default_factory=EmbedStats)
     segmentation: str = ""
+    superseded: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     @property
@@ -292,6 +481,8 @@ class IngestOutcome:
             text += f", {self.embed.embedded} embedded, {self.embed.cache_hits} cached"
         if not self.chunks:
             text += " (no active index profile: not chunked yet)"
+        if self.superseded:
+            text += f"; replaces {len(self.superseded)} earlier version(s)"
         return text
 
 
@@ -302,13 +493,17 @@ class IngestPipeline:
     Args:
         files_dir: where originals are stored (``data/knowledge/files``).
         embed_fn: the embedding callable (default: :func:`hal9000.llm.embed`, or the
-            fake embedder for ``fake/*`` models).
-        meter: meters every paid call (rule K9); ``None`` only for the fake embedder.
+            fake embedder for ``fake/*`` models in explicit fake mode).
+        meter: meters every paid call (rule K9); required for any real model.
         generate: the metered segmentation LLM, ``(prompt, tier) -> str``.
         use_llm: default for jobs that don't say (``--no-llm`` sets it per job).
         extra_profiles: also index into these (names or profiles), for evaluation.
         regression: the post-ingest hook, called with the active profile.
-        isolate_parse: parse in a child process with the time limit (the default).
+        isolate_parse: parse in the long-lived child process with the time limit
+            (the default); ``False`` parses in-process with no limit.
+
+    Call :meth:`close` when done (it stops the parse process; garbage
+    collection does too).
     """
 
     files_dir: Path
@@ -324,11 +519,15 @@ class IngestPipeline:
     knowledge_file: KnowledgeFile | None = None
     bus: ProgressBus | None = BUS
     outcomes: dict[int, IngestOutcome] = field(default_factory=dict)
+    parse_process: ParseProcess = field(default_factory=ParseProcess, repr=False)
 
     def __post_init__(self) -> None:
         self.files_dir = Path(self.files_dir)
         if self.knowledge_file is None:
             self.knowledge_file = load_knowledge_file()
+
+    def close(self) -> None:
+        self.parse_process.close()
 
     # -- services ----------------------------------------------------------------
     def embeddings(self, conn: sqlite3.Connection) -> EmbeddingService:
@@ -338,6 +537,11 @@ class IngestPipeline:
     def max_bytes(self) -> int:
         assert self.knowledge_file is not None
         return self.knowledge_file.ingest.max_upload_bytes
+
+    @property
+    def lock_path(self) -> Path:
+        """``data/knowledge/worker.lock``: one job runner per library."""
+        return self.files_dir.parent / "worker.lock"
 
     # -- 2, 3: screen and store ----------------------------------------------------
     def submit(
@@ -352,20 +556,26 @@ class IngestPipeline:
         """Screen and store one upload, then queue its ingestion (unless it is a duplicate)."""
         try:
             screened = screen(source, relative_path, max_bytes=self.max_bytes)
+            coll = (
+                normalize_collection(collection)
+                if collection is not None
+                else default_collection(screened.relative_path)
+            )
         except ValueError as error:
-            metrics.record_ingest_file("skipped")
+            metrics.record_ingest_file("failed")
             return UploadResult(
-                relative_path=str(relative_path), status="skipped", reason=str(error)
+                relative_path=str(relative_path).encode("unicode_escape").decode("ascii"),
+                status="failed",
+                reason=str(error),
             )
         rel = screened.relative_path
-        coll = collection if collection is not None else default_collection(rel)
         if screened.status != "ok":
             metrics.record_ingest_file(screened.status)
             return UploadResult(
                 relative_path=rel, status=screened.status, collection=coll, reason=screened.reason
             )
         sha = screened.sha256
-        assert sha is not None and screened.data is not None
+        assert sha is not None
         params = {
             "relative_path": rel,
             "collection": coll,
@@ -373,9 +583,13 @@ class IngestPipeline:
         }
         existing = get_file(conn, sha)
         if existing is not None:
-            return self._resubmit(conn, existing, screened, params)
+            return self._resubmit(conn, existing, source, rel, params)
         with stage(Stage.STORE):
-            _store_original(self.files_dir, sha, screened.data)
+            try:
+                _store_original(self.files_dir, sha, source)
+            except ValueError as error:
+                metrics.record_ingest_file("failed")
+                return UploadResult(relative_path=rel, status="failed", reason=str(error))
             record = FileRecord(
                 sha256=sha,
                 original_name=PurePosixPath(rel).name,
@@ -395,26 +609,44 @@ class IngestPipeline:
         )  # fmt: skip
 
     def _resubmit(
-        self, conn: sqlite3.Connection, existing: FileRecord, screened: Screened, params: dict
+        self,
+        conn: sqlite3.Connection,
+        existing: FileRecord,
+        source: bytes | Path,
+        rel: str,
+        params: dict,
     ) -> UploadResult:
         sha = existing.sha256
-        rel = screened.relative_path
+        recover_interrupted(conn, bus=self.bus)  # a dead kb ingest's job is not "running"
+        params = {
+            **params,
+            "relative_path": existing.relative_path,
+            "collection": existing.collection,
+        }
         active = conn.execute(
             "SELECT id FROM jobs WHERE file_sha = ? AND kind = 'ingest' AND status IN "
             "('queued', 'running') ORDER BY id DESC LIMIT 1",
             (sha,),
         ).fetchone()
+        if active is None and is_superseded(conn, sha):
+            # an older version uploaded again: it becomes the current version (D1)
+            _store_original(self.files_dir, sha, source)
+            with conn:
+                mark_uploaded(conn, sha)
+            job = create_job(conn, "ingest", file_sha=sha, params=params, bus=self.bus)
+            return UploadResult(
+                relative_path=rel, status="added", sha256=sha, collection=existing.collection,
+                job_id=job.id, reason=f"restoring an earlier version of {existing.relative_path}",
+            )  # fmt: skip
         if file_has_index(conn, sha) or active is not None:
             metrics.record_ingest_file("duplicate")
-            where = existing.relative_path
             return UploadResult(
                 relative_path=rel, status="duplicate", sha256=sha,
                 collection=existing.collection, job_id=active[0] if active else None,
-                reason=f"already in library as {where}",
+                reason=f"already in library as {existing.relative_path}",
             )  # fmt: skip
         # stored before, but its ingestion never finished: run it again
-        assert screened.data is not None
-        _store_original(self.files_dir, sha, screened.data)
+        _store_original(self.files_dir, sha, source)
         failed = conn.execute(
             "SELECT id FROM jobs WHERE file_sha = ? AND kind = 'ingest' AND status = 'failed' "
             "ORDER BY id DESC LIMIT 1",
@@ -500,32 +732,41 @@ class IngestPipeline:
 
         Originals are stored as bare hashes, but parsers decide details by the
         suffix (Markdown headings), and error messages should name the file, so
-        the parser reads it through a link named like the upload.
+        the parser reads it through a link named like the upload (or
+        ``document<suffix>`` when the name is too long for a file name).
         """
-        assert self.knowledge_file is not None
-        ingest = self.knowledge_file.ingest
-        timeout = self.parse_timeout_s or ingest.parse_timeout_seconds
         stored = self.files_dir / file.sha256
         if not stored.is_file():
             raise ParseError(
                 f"Could not parse {file.original_name}: the stored original is missing."
             )
         name = PurePosixPath(file.original_name).name
-        if not name or len(name) > 200 or name.startswith("."):
-            name = "document" + PurePosixPath(file.original_name).suffix.lower()
+        if not name or len(name.encode("utf-8")) > 200 or name.startswith("."):
+            name = "document" + PurePosixPath(file.original_name).suffix.lower()[:16]
         with tempfile.TemporaryDirectory(prefix="kb-parse-") as tmp:
             view = Path(tmp) / name
             try:
                 view.symlink_to(stored.resolve())
             except OSError:  # pragma: no cover - filesystems without symlinks
                 shutil.copyfile(stored, view)
-            return parse_file(
-                view,
-                parser=get_parser(parser, max_chars=ingest.pseudo_page_chars),
-                timeout_s=timeout,
-                isolate=self.isolate_parse,
-                max_chars=ingest.pseudo_page_chars,
-            )
+            return self.parse_path(view, parser)
+
+    def parse_path(self, path: Path, parser: str | None = None) -> ParsedFile:
+        """Parse any file with the pipeline's parse process and limits (the CLI's estimate)."""
+        from hal9000.knowledge.ingest.parsers import parser_for
+
+        assert self.knowledge_file is not None
+        ingest = self.knowledge_file.ingest
+        max_chars = ingest.pseudo_page_chars
+        chosen = (
+            parser_for(path, max_chars=max_chars)
+            if parser is None
+            else get_parser(parser, max_chars=max_chars)
+        )
+        if not self.isolate_parse:
+            return parse_file(path, parser=chosen, isolate=False, max_chars=max_chars)
+        timeout = self.parse_timeout_s or ingest.parse_timeout_seconds
+        return self.parse_process.parse(path, chosen, timeout_s=timeout, max_chars=max_chars)
 
     def process(
         self,
@@ -614,6 +855,7 @@ class IngestPipeline:
                     for meta, doc in zip(stored, prepared)
                 ]
                 outcome.chunks[profile.name] = write_chunks(conn, profile, with_ids, chunked, vecs)
+            outcome.superseded = supersede_other_versions(conn, sha)
         outcome.documents = len(documents)
         outcome.pages = len(primary.pages)
         outcome.pages_without_text = sum(1 for page in primary.pages if not page.has_text_layer)
@@ -669,6 +911,13 @@ class IngestPipeline:
     def handlers(self) -> dict[str, Callable[[sqlite3.Connection, Job, Reporter], str]]:
         return {"ingest": self._ingest_job, "reindex": self._reindex_job}
 
-    def worker(self, db_path: Path | str) -> JobWorker:
-        """The one background worker for this pipeline (call ``start()`` in the service)."""
-        return JobWorker(db_path, self.handlers(), bus=self.bus)
+    def worker(self, db_path: Path | str, *, locked: bool = False) -> JobWorker:
+        """A worker for this pipeline's jobs.
+
+        The service passes ``locked=True`` and calls ``start()``: the thread then
+        holds the library's :class:`WriterLock` (``data/knowledge/worker.lock``)
+        so a ``kb ingest`` only queues jobs for it. Synchronous use (``run_job``)
+        needs no lock object here; the caller holds the lock.
+        """
+        lock = WriterLock(self.lock_path) if locked else None
+        return JobWorker(db_path, self.handlers(), bus=self.bus, lock=lock)

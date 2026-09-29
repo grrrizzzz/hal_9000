@@ -237,8 +237,16 @@ CREATE INDEX ix_segment_cache_file ON segment_cache(file_sha);
 ALTER TABLE jobs ADD COLUMN params TEXT NOT NULL DEFAULT '{}';
 """
 
+# KWP3 (decision D1): a file superseded by a newer version at the same relative
+# path records which one replaced it. Its files, documents and pages rows stay (so
+# re-uploading it restores it); only its chunks leave the indexes.
+_V3 = """
+ALTER TABLE files ADD COLUMN superseded_by TEXT;
+CREATE INDEX ix_files_current ON files(relative_path, superseded_by);
+"""
+
 #: (version, script). Append only.
-MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _V1), (2, _V2))
+MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _V1), (2, _V2), (3, _V3))
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
 #: Every plan §12 table created by the migrations (the per-profile tables are separate,

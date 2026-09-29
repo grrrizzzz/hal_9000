@@ -6,10 +6,11 @@ One ``vec0`` table per index profile, ``vec_<profile_id>``, created by
 ``collection`` and ``doc_date`` (ISO text; ``''`` when unknown, because
 sqlite-vec 0.1.9 rejects NULL metadata). Row IDs are chunk IDs.
 
-Filters are ``vec0`` metadata constraints in the KNN query itself, so they
-apply **inside** the search: a filtered search still returns *k* results when
-at least *k* chunks match (a post-filter would return fewer). A date range
-excludes chunks whose document date is unknown.
+Filters (:mod:`.filters`) are ``vec0`` metadata constraints in the KNN query
+itself, so they apply **inside** the search: a filtered search still returns
+*k* results when at least *k* chunks match (a post-filter would return fewer).
+A collection filter includes its sub-folders; a date range excludes chunks
+whose document date is unknown.
 
 The protocol keeps Qdrant or LanceDB as drop-in alternatives (plan §3.3).
 """
@@ -24,6 +25,7 @@ from typing import Protocol, runtime_checkable
 import numpy as np
 
 from hal9000.knowledge.contracts import SearchFilters
+from hal9000.knowledge.index.filters import NO_MATCH, vec_filters
 from hal9000.knowledge.storage import vec_table
 
 __all__ = ["MAX_K", "ChunkMeta", "SqliteVecIndex", "VectorHit", "VectorIndex", "VectorRow"]
@@ -85,28 +87,6 @@ def _blob(vector: Sequence[float] | np.ndarray, dimensions: int) -> bytes:
     return array.tobytes()
 
 
-def vec_filters(filters: SearchFilters | None) -> tuple[str, list[object]]:
-    """``AND ...`` constraints on the ``vec0`` metadata columns, and their parameters."""
-    if filters is None:
-        return "", []
-    sql: list[str] = []
-    params: list[object] = []
-    if filters.doc_type:
-        sql.append("doc_type = ?")
-        params.append(filters.doc_type)
-    if filters.collection is not None and filters.collection != "":
-        sql.append("collection = ?")
-        params.append(filters.collection)
-    if filters.date_from is not None:
-        sql.append("doc_date >= ?")
-        params.append(filters.date_from.isoformat())
-    if filters.date_to is not None:
-        sql.append("doc_date <= ?")
-        params.append(filters.date_to.isoformat())
-        sql.append("doc_date != ''")
-    return "".join(f" AND {clause}" for clause in sql), params
-
-
 class SqliteVecIndex:
     """:class:`VectorIndex` over one profile's ``vec_<profile_id>`` table."""
 
@@ -154,7 +134,10 @@ class SqliteVecIndex:
         """The ``k`` nearest chunks by cosine distance, filters applied inside the KNN."""
         if k < 1:
             return []
-        where, params = vec_filters(filters)
+        constraints = vec_filters(self.conn, filters)
+        if constraints is NO_MATCH:
+            return []
+        where, params = constraints
         rows = self.conn.execute(
             f"SELECT chunk_id, distance FROM {self.table} "
             f"WHERE embedding MATCH ? AND k = ?{where} ORDER BY distance",

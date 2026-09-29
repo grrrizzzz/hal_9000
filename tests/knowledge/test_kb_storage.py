@@ -227,7 +227,8 @@ def test_only_one_profile_can_be_active(kb_db):
 def test_foreign_keys_cascade(kb_db):
     sha = "a" * 64
     kb_db.execute(
-        "INSERT INTO files VALUES (?, 'f.pdf', 'f.pdf', '', 'application/pdf', 1, NULL, 'now')",
+        "INSERT INTO files (sha256, original_name, relative_path, collection, mime_type, bytes, "
+        "version_of, uploaded_at) VALUES (?, 'f.pdf', 'f.pdf', '', 'application/pdf', 1, NULL, 'now')",
         (sha,),
     )
     kb_db.execute(

@@ -18,8 +18,9 @@ Every vector the knowledge base computes goes through :class:`EmbeddingService`:
   queries) or ``agent="knowledge-eval"`` (the evaluation harness), so caps are
   checked before every request and every request writes a ledger row.
   Prometheus ``kb_tokens_total`` / ``kb_cost_usd_total{purpose="embed"}`` are
-  counted from the same usage. ``fake/*`` models (the offline
-  :class:`~hal9000.knowledge.index.fake.FakeEmbedder`) are free and never
+  counted from the same usage. A paid model without a meter is refused.
+  ``fake/*`` models (the offline
+  :class:`~hal9000.knowledge.index.fake.FakeEmbedder`, explicit fake mode only) are free and never
   reach the ledger.
 - ``dimensions`` is passed to the provider, which is how
   ``text-embedding-3-large`` is reduced to 1,024 or 1,536 dimensions.
@@ -48,6 +49,7 @@ __all__ = [
     "EmbedStats",
     "EmbeddingError",
     "EmbeddingService",
+    "UnmeteredCall",
     "default_embed_fn",
     "is_fake_model",
     "is_transient",
@@ -101,11 +103,16 @@ def is_transient(error: BaseException) -> bool:
     return isinstance(status, int) and status in _TRANSIENT_STATUS
 
 
-def default_embed_fn(model: str) -> EmbedFn:
-    """:class:`FakeEmbedder` for ``fake/*`` models, else :func:`hal9000.llm.embed`."""
-    if is_fake_model(model):
-        from hal9000.knowledge.index.fake import FakeEmbedder
+class UnmeteredCall(RuntimeError):
+    """A paid embedding model was used without a meter (rule K9)."""
 
+
+def default_embed_fn(model: str) -> EmbedFn:
+    """:class:`FakeEmbedder` for ``fake/*`` models (in fake mode only), else ``llm.embed``."""
+    if is_fake_model(model):
+        from hal9000.knowledge.index.fake import FakeEmbedder, require_fake_mode
+
+        require_fake_mode(model)
         return FakeEmbedder()
     from hal9000.llm import embed
 
@@ -241,8 +248,17 @@ class EmbeddingService:
         """Vectors for ``texts`` (``len(texts) × dimensions``, float32), in order.
 
         ``progress(done, total)`` is called after each batch, counting distinct
-        texts that needed the provider.
+        texts that needed the provider. A ``fake/*`` model needs fake mode; any
+        other model needs a meter (:class:`UnmeteredCall` otherwise).
         """
+        if is_fake_model(model):
+            from hal9000.knowledge.index.fake import require_fake_mode
+
+            require_fake_mode(model)
+        elif self.meter is None:
+            raise UnmeteredCall(
+                f"{model} is a paid model: the embedding service needs a Meter (rule K9)"
+            )
         stats = EmbedStats(requested=len(texts))
         order = [text_sha(text) for text in texts]
         vectors = self.cached(texts, model, dimensions)
@@ -280,8 +296,11 @@ class EmbeddingService:
         return np.stack([vectors[sha] for sha in order])
 
     def embed_query(self, text: str, model: str, dimensions: int) -> np.ndarray:
-        """One query's vector, cached by its text like any other (plan §7.1 ``embed_query``)."""
-        return self.embed([text], model, dimensions)[0]
+        """One query's vector, cached by its text, timed as ``stage("embed_query")`` (plan §7.1)."""
+        from hal9000.knowledge.obs.timing import Stage, stage
+
+        with stage(Stage.EMBED_QUERY):
+            return self.embed([text], model, dimensions)[0]
 
     def estimate(self, texts: Sequence[str], model: str, dimensions: int) -> tuple[int, float]:
         """``(tokens, usd)`` to embed the texts not yet cached: the estimate paid commands print."""

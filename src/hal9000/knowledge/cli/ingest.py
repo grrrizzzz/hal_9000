@@ -15,6 +15,12 @@ needs the key (a ``fake-64`` profile embeds offline, for tests).
 Prints one line per file (added, duplicate, skipped, failed) with its
 documents, chunks and embedding cost, then the totals. Exits 1 if any file
 failed.
+
+**One job runner per library.** ``kb ingest`` first marks jobs left
+``running`` by a dead process as failed. Then, if it can take the library's
+writer lock (``data/knowledge/worker.lock``), it runs its jobs itself; if the
+``hal-kb`` service holds the lock, it only stores the files and queues their
+jobs, which the service's worker picks up, and says so.
 """
 
 from __future__ import annotations
@@ -25,6 +31,7 @@ import sys
 from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 __all__ = ["collect", "estimate_cost", "run"]
 
@@ -60,20 +67,24 @@ def _has_key() -> bool:
 
 
 def estimate_cost(
-    files: Iterable[Path], *, embed_model: str | None, segment: bool
+    files: Iterable[Path],
+    *,
+    embed_model: str | None,
+    segment: bool,
+    parse: Callable[[Path], Any],
 ) -> tuple[float, float, int]:
     """``(embedding usd, segmentation usd, text tokens)`` for new files, parsed to count text."""
     from hal9000 import config as hal_config
     from hal9000.cost.metering import usage_cost
     from hal9000.knowledge.index.embedding import is_fake_model
-    from hal9000.knowledge.ingest.parsers import ParseError, parse_file
+    from hal9000.knowledge.ingest.parsers import ParseError
     from hal9000.knowledge.tokens import count_tokens
 
     tokens = 0
     segment_usd = 0.0
     for path in files:
         try:
-            parsed = parse_file(path)
+            parsed = parse(path)
         except ParseError:
             continue  # it will fail in the pipeline too, at no cost
         tokens += sum(count_tokens(page.text) for page in parsed.pages)
@@ -123,9 +134,11 @@ def run(args: argparse.Namespace) -> int:
     from hal9000.cost.metering import Meter
     from hal9000.knowledge.config import AGENT, load_knowledge_file, monthly_caps, settings
     from hal9000.knowledge.index.embedding import is_fake_model
+    from hal9000.knowledge.index.fake import FakeModeRequired, require_fake_mode
     from hal9000.knowledge.index.library import get_file
     from hal9000.knowledge.index.profiles import active_profile, configured_profile
-    from hal9000.knowledge.ingest.pipeline import IngestPipeline
+    from hal9000.knowledge.ingest.jobs import WriterLock, recover_interrupted
+    from hal9000.knowledge.ingest.pipeline import ALLOWED_TYPES, IngestPipeline, file_sha256
     from hal9000.knowledge.storage import open_db
     from hal9000.storage.db import Database
 
@@ -140,9 +153,23 @@ def run(args: argparse.Namespace) -> int:
     knowledge = load_knowledge_file(kb.yaml_path)
     conn = open_db(kb.db_path)
     ledger: Database | None = None
+    pipeline: IngestPipeline | None = None
+    lock: WriterLock | None = None
     try:
+        interrupted = recover_interrupted(conn, bus=None)
+        if interrupted:
+            print(
+                f"{len(interrupted)} job(s) interrupted by a stopped process were marked failed; "
+                "ingesting their files again retries them."
+            )
         profile = active_profile(conn) or configured_profile(knowledge.active_profile)
         embed_model = profile.embed_model if profile is not None else None
+        if embed_model is not None:
+            try:
+                require_fake_mode(embed_model)  # a fake-64 profile only in explicit fake mode
+            except FakeModeRequired as error:
+                print(str(error), file=sys.stderr)
+                return 1
         paid_embedding = embed_model is not None and not is_fake_model(embed_model)
         if profile is None:
             print("No active index profile: files are stored and parsed, not yet searchable.")
@@ -157,17 +184,22 @@ def run(args: argparse.Namespace) -> int:
             print("No OpenAI key: segmenting with heuristics only (as with --no-llm).")
             use_llm = False
 
-        import hashlib
-
+        pipeline = IngestPipeline(kb.files_dir, use_llm=use_llm, knowledge_file=knowledge, bus=None)
+        # type and size first (no reading), then a chunked hash to find what is new
+        max_bytes = pipeline.max_bytes
         new_files = [
             path
             for path, _ in targets
-            if get_file(conn, hashlib.sha256(path.read_bytes()).hexdigest()) is None
+            if path.suffix.lower() in ALLOWED_TYPES
+            and 0 < path.stat().st_size <= max_bytes
+            and get_file(conn, file_sha256(path)) is None
         ]
-        meter = generate = None
         if (paid_embedding or use_llm) and new_files:
             embed_usd, segment_usd, tokens = estimate_cost(
-                new_files, embed_model=embed_model if paid_embedding else None, segment=use_llm
+                new_files,
+                embed_model=embed_model if paid_embedding else None,
+                segment=use_llm,
+                parse=pipeline.parse_path,
             )
             caps = monthly_caps(kb)
             if not _confirm(
@@ -179,22 +211,17 @@ def run(args: argparse.Namespace) -> int:
                 return 1
             ledger = Database(hal_config.settings().data_dir / "hal9000.db")
             run_id = f"kb-ingest-{datetime.now(UTC).strftime('%Y%m%dT%H%M%S')}"
-            meter = Meter(
+            pipeline.meter = Meter(
                 ledger, run_id, soft_cap=float("inf"), hard_cap=float("inf"), monthly_caps=caps
             )
             if use_llm:
-                generate = meter.wrap(_segment_generate(), agent=AGENT)
+                pipeline.generate = pipeline.meter.wrap(_segment_generate(), agent=AGENT)
 
-        pipeline = IngestPipeline(
-            kb.files_dir,
-            meter=meter,
-            generate=generate,
-            use_llm=use_llm,
-            knowledge_file=knowledge,
-            bus=None,
-        )
+        lock = WriterLock(pipeline.lock_path)
+        inline = lock.acquire()  # held by the service: only queue, it runs the jobs
         worker = pipeline.worker(kb.db_path)
         counts = {"added": 0, "duplicate": 0, "skipped": 0, "failed": 0}
+        queued = 0
         total_usd = 0.0
         for path, relative in targets:
             result = pipeline.submit(
@@ -206,6 +233,10 @@ def run(args: argparse.Namespace) -> int:
             if result.status != "added" or result.job_id is None:
                 counts[result.status] += 1
                 print(f"{result.status:<10} {label}: {result.reason or ''}".rstrip(": "))
+                continue
+            if not inline:
+                queued += 1
+                print(f"{'queued':<10} {label}")
                 continue
             job = worker.run_job(conn, result.job_id)
             if job.status == "done":
@@ -219,6 +250,15 @@ def run(args: argparse.Namespace) -> int:
             else:
                 counts["failed"] += 1
                 print(f"{'failed':<10} {label}: {job.error}")
+        if not inline:
+            print(
+                f"\nThe knowledge service is running and holds the library lock: {queued} file(s) "
+                "queued for it to index (follow them in the Library). "
+                f"{counts['duplicate']} duplicate, {counts['skipped']} skipped, "
+                f"{counts['failed']} failed."
+            )
+            return 1 if counts["failed"] else 0
+        meter = pipeline.meter
         print(
             f"\n{counts['added']} added, {counts['duplicate']} duplicate, "
             f"{counts['skipped']} skipped, {counts['failed']} failed. "
@@ -227,6 +267,10 @@ def run(args: argparse.Namespace) -> int:
         )
         return 1 if counts["failed"] else 0
     finally:
+        if lock is not None:
+            lock.release()
+        if pipeline is not None:
+            pipeline.close()
         conn.close()
         if ledger is not None:
             ledger.close()

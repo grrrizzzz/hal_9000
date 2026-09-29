@@ -49,10 +49,12 @@ knowledge = [
     "prometheus-client>=0.20",
     "itsdangerous>=2.1",
     "python-multipart>=0.0.9",
+    # Evidence-quote matching at runtime (decision D4), not only in evaluation.
+    "rapidfuzz>=3.9",
 ]
 knowledge-docling = ["docling>=2.0"]
 knowledge-rerank = ["fastembed>=0.4"]
-eval = ["rapidfuzz>=3.9", "numpy>=1.26"]
+eval = ["numpy>=1.26"]
 otel = ["opentelemetry-sdk>=1.25", "opentelemetry-exporter-otlp>=1.25"]
 
 [build-system]

@@ -22,11 +22,11 @@ from tests.knowledge.index.conftest import PROFILE, ingest_all
 
 DIMS = 16
 TYPES = ("invoice", "estimate", "manual", "inspection_report")
-COLLECTIONS = ("Appliances", "Pool", "")
+COLLECTIONS = ("Appliances/", "Pool/", "")
 DATES = ("2021-05-01", "2023-06-22", "2024-11-30", "")
 
 
-def build_synthetic(conn, n: int = 240, seed: int = 7):
+def build_synthetic(conn, n: int = 240, seed: int = 7, collections=COLLECTIONS):
     """``n`` chunks with random unit vectors and cycling metadata, in one stored profile."""
     profile = ensure_profile(conn, parse_profile_name("pdfium.fixed-64.nohdr.fake-64").model_copy(
         update={"name": "synthetic", "dimensions": DIMS}
@@ -34,18 +34,19 @@ def build_synthetic(conn, n: int = 240, seed: int = 7):
     rng = np.random.default_rng(seed)
     vectors = rng.standard_normal((n, DIMS)).astype(np.float32)
     metas: dict[int, ChunkMeta] = {}
-    shas = [letter * 64 for letter in "abc"]  # one file per collection
+    shas = [f"{i:064x}" for i in range(1, len(collections) + 1)]  # one file per collection
     with conn:
-        for sha, collection in zip(shas, COLLECTIONS):
+        for sha, collection in zip(shas, collections):
             insert_file(conn, FileRecord(sha256=sha, original_name="s.txt", relative_path="s.txt",
                                          collection=collection, mime_type="text/plain", bytes=1))  # fmt: skip
         index = SqliteVecIndex(conn, profile.id, DIMS)
         fts = FtsIndex(conn, profile.id)
         rows = []
         for i in range(n):
-            meta = ChunkMeta(TYPES[i % 4], COLLECTIONS[i % 3], DATES[i % 4])
+            which = i % len(collections)
+            meta = ChunkMeta(TYPES[i % 4], collections[which], DATES[i % 4])
             [doc] = insert_documents(conn, [DocumentMeta(
-                file_sha=shas[i % 3], page_start=1, page_end=1, title=f"doc {i}", doc_type=meta.doc_type,
+                file_sha=shas[which], page_start=1, page_end=1, title=f"doc {i}", doc_type=meta.doc_type,
                 doc_date=date.fromisoformat(meta.doc_date) if meta.doc_date else None,
             )])  # fmt: skip
             cid = conn.execute(
@@ -99,8 +100,8 @@ def test_collection_and_date_filters_apply_to_vectors(kb_db):
     profile, _, _, metas = build_synthetic(kb_db)
     query = np.ones(DIMS)
     pool = vector_search(kb_db, profile, query, k=500, filters=SearchFilters(collection="Pool"))
-    assert len(pool) == sum(1 for m in metas.values() if m.collection == "Pool")
-    assert {metas[h.chunk_id].collection for h in pool} == {"Pool"}
+    assert len(pool) == sum(1 for m in metas.values() if m.collection == "Pool/")
+    assert {metas[h.chunk_id].collection for h in pool} == {"Pool/"}
     window = SearchFilters(date_from=date(2022, 1, 1), date_to=date(2024, 1, 1))
     dated = vector_search(kb_db, profile, query, k=500, filters=window)
     assert {metas[h.chunk_id].doc_date for h in dated} == {"2023-06-22"}
@@ -131,12 +132,80 @@ def test_filters_restrict_bm25_too(kb_db):
     )
     assert {metas[h.chunk_id].doc_date for h in until} == {"2021-05-01"}
     pool = keyword_search(kb_db, profile, "common", k=500, filters=SearchFilters(collection="Pool"))
-    assert {h.chunk_id for h in pool} == {c for c, m in metas.items() if m.collection == "Pool"}
+    assert {h.chunk_id for h in pool} == {c for c, m in metas.items() if m.collection == "Pool/"}
     assert (
         keyword_search(kb_db, profile, "common", k=500, filters=SearchFilters(collection="Nope"))
         == []
     )
     assert keyword_search(kb_db, profile, "What is it?", k=5) == []
+
+
+NESTED = (
+    "Appliances/",
+    "Appliances/Furnace/",
+    "Appliances/Water heater and softener/",  # a value of 12 bytes or more
+    "Appliances-old/",  # sorts before "Appliances/": must not match it
+    "AppliancesX/",  # sorts after "Appliances0": must not match either
+    "🏠 House/",  # outside the BMP
+    "🏠 House/Garage door/",
+    "Pool/",
+    "",
+)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (
+            "Appliances",
+            {"Appliances/", "Appliances/Furnace/", "Appliances/Water heater and softener/"},
+        ),
+        ("/Appliances/Water heater and softener/", {"Appliances/Water heater and softener/"}),
+        ("🏠 House", {"🏠 House/", "🏠 House/Garage door/"}),
+        ("🏠 House\\Garage door", {"🏠 House/Garage door/"}),
+        ("Appliances/Fur", set()),  # a prefix of a name is not its folder
+        ("Nowhere", set()),
+        ("", set(NESTED)),  # the root: no filter
+    ],
+)
+def test_a_collection_filter_includes_its_sub_folders_in_both_searches(kb_db, value, expected):
+    profile, _, vectors, metas = build_synthetic(kb_db, n=270, collections=NESTED)
+    wanted = [cid for cid, meta in metas.items() if meta.collection in expected]
+    query = np.random.default_rng(5).standard_normal(DIMS)
+    only = SearchFilters(collection=value)
+    dense = vector_search(kb_db, profile, query, k=40, filters=only)
+    subset = [list(metas).index(cid) for cid in wanted]
+    if wanted:
+        want, sims = brute_force(vectors[subset], wanted, query, 40)
+        assert [h.chunk_id for h in dense] == want  # exact, filtered inside the KNN
+        assert [h.similarity for h in dense] == pytest.approx(sims, abs=1e-5)
+    else:
+        assert dense == []
+    keyword = keyword_search(kb_db, profile, "common", k=500, filters=only)
+    assert {h.chunk_id for h in keyword} == set(wanted)
+
+
+def test_collections_are_normalised():
+    from hal9000.knowledge.index.filters import collection_bounds, normalize_collection
+
+    assert normalize_collection(" Appliances \\ Furnace ") == "Appliances/Furnace/"
+    assert normalize_collection("./a//b/../") == "a/b/"
+    assert normalize_collection("") == normalize_collection(None) == normalize_collection("/") == ""
+    assert collection_bounds("🏠 House") == ("🏠 House/", "🏠 House0")
+    assert collection_bounds("") is None
+    with pytest.raises(ValueError):
+        normalize_collection("bad\x07name")
+
+
+def test_long_doc_types_filter_inside_the_knn(kb_db):
+    profile, _, vectors, metas = build_synthetic(kb_db)
+    reports = [cid for cid, meta in metas.items() if meta.doc_type == "inspection_report"]
+    query = np.random.default_rng(9).standard_normal(DIMS)
+    hits = vector_search(
+        kb_db, profile, query, k=30, filters=SearchFilters(doc_type="inspection_report")
+    )
+    want, _ = brute_force(vectors[[list(metas).index(c) for c in reports]], reports, query, 30)
+    assert [h.chunk_id for h in hits] == want
 
 
 def test_searches_are_timed_as_their_plan_stages(kb_db):

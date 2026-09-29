@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+import sqlite3
 import subprocess
 import sys
 import textwrap
@@ -21,6 +22,7 @@ from hal9000.knowledge.ingest.jobs import (
     JobNotRetryable,
     JobWorker,
     ProgressBus,
+    WriterLock,
     create_job,
     get_job,
     job_params,
@@ -263,3 +265,101 @@ def test_a_reindex_job_builds_and_activates_a_profile(conn, db_path, make_pipeli
     with pytest.raises(ValueError):
         pipeline.enqueue_build(conn, "not a profile name")
     assert get_profile(conn, PROFILE).active is False
+
+
+def test_the_worker_survives_a_failing_bookkeeping_call(conn, db_path, monkeypatch):
+    from hal9000.knowledge.ingest import jobs
+
+    ran: list[int] = []
+
+    def handler(c, job, report):
+        ran.append(job.id)
+        return "ok"
+
+    real_update = jobs.update_job
+    failures = {"left": 1}
+
+    def flaky_update(c, job_id, **fields):
+        if fields.get("status") == "done" and failures["left"]:
+            failures["left"] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return real_update(c, job_id, **fields)
+
+    monkeypatch.setattr(jobs, "update_job", flaky_update)
+    first = create_job(conn, "ingest", bus=None)
+    second = create_job(conn, "ingest", bus=None)
+    worker = JobWorker(db_path, {"ingest": handler}, bus=None, poll_s=0.05)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and get_job(conn, second.id).status != "done":
+            time.sleep(0.05)
+    finally:
+        worker.stop()
+    assert ran == [first.id, second.id]  # the loop went on to the next job
+    failed = get_job(conn, first.id)
+    assert failed.status == "failed" and "recording" in failed.error
+    assert get_job(conn, second.id).status == "done"
+
+
+def test_a_handler_raising_systemexit_fails_its_job_before_it_propagates(conn, db_path):
+    def bail(c, job, report):
+        raise SystemExit(3)
+
+    job = create_job(conn, "ingest", bus=None)
+    worker = JobWorker(db_path, {"ingest": bail}, bus=None)
+    with pytest.raises(SystemExit):
+        worker.run_job(conn, job.id)
+    stopped = get_job(conn, job.id)
+    assert stopped.status == "failed" and stopped.error == "stopped: SystemExit"
+
+
+def test_the_asyncio_bridge_is_bounded_and_leaves_with_its_loop(conn):
+    bus = ProgressBus()
+
+    async def fill() -> list[str]:
+        inbox, _ = bus.asyncio_queue(maxsize=2)
+        for kind in ("ingest", "reindex", "regression"):
+            create_job(conn, kind, bus=bus)
+        await asyncio.sleep(0.05)  # let the loop run the deliveries
+        return [inbox.get_nowait().kind for _ in range(inbox.qsize())]
+
+    assert asyncio.run(fill()) == ["reindex", "regression"]  # the oldest was dropped
+    # asyncio.run closed that loop: the next publish unsubscribes the listener
+    create_job(conn, "ingest", bus=bus)
+    assert bus._subscribers == []
+
+
+def test_the_writer_lock_is_exclusive_and_released_on_close(tmp_path):
+    first = WriterLock(tmp_path / "k" / "worker.lock")
+    second = WriterLock(tmp_path / "k" / "worker.lock")
+    assert first.acquire() and first.acquire() and first.held
+    assert not second.acquire()
+    first.release()
+    with second:
+        assert second.acquire()
+    assert not second.held
+
+
+def test_a_locked_worker_waits_for_the_lock_before_running_anything(conn, db_path, tmp_path):
+    lock_path = tmp_path / "worker.lock"
+    cli = WriterLock(lock_path)
+    assert cli.acquire()  # a kb ingest is running jobs itself
+    ran: list[int] = []
+    job = create_job(conn, "ingest", bus=None)
+    worker = JobWorker(
+        db_path, {"ingest": lambda c, j, r: ran.append(j.id)}, bus=None, poll_s=0.05,
+        lock=WriterLock(lock_path),
+    )  # fmt: skip
+    worker.start()
+    try:
+        time.sleep(0.4)
+        assert ran == [] and get_job(conn, job.id).status == "queued"
+        cli.release()
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline and get_job(conn, job.id).status != "done":
+            time.sleep(0.05)
+        assert ran == [job.id]
+    finally:
+        worker.stop()
+    assert WriterLock(lock_path).acquire()  # the stopped worker released it

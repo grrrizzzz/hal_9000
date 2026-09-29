@@ -47,6 +47,7 @@ __all__ = [
     "JobWorker",
     "ProgressBus",
     "Reporter",
+    "WriterLock",
     "create_job",
     "get_job",
     "job_params",
@@ -134,16 +135,30 @@ class ProgressBus:
             unsubscribe()
 
     def asyncio_queue(
-        self, loop: asyncio.AbstractEventLoop | None = None
+        self, loop: asyncio.AbstractEventLoop | None = None, *, maxsize: int = 1000
     ) -> tuple[asyncio.Queue[Job], Callable[[], None]]:
-        """An ``asyncio.Queue`` fed from the worker thread, and its unsubscribe (for SSE)."""
+        """A bounded ``asyncio.Queue`` fed from the worker thread, and its unsubscribe (SSE).
+
+        When the queue is full the oldest update is dropped (the newest state of
+        a job is what matters). Once the loop has closed, the subscription
+        removes itself.
+        """
         loop = loop or asyncio.get_running_loop()
-        inbox: asyncio.Queue[Job] = asyncio.Queue()
+        inbox: asyncio.Queue[Job] = asyncio.Queue(maxsize=maxsize)
+
+        def deliver(job: Job) -> None:  # runs on the loop
+            if inbox.full():
+                inbox.get_nowait()
+            inbox.put_nowait(job)
 
         def put(job: Job) -> None:
-            loop.call_soon_threadsafe(inbox.put_nowait, job)
+            try:
+                loop.call_soon_threadsafe(deliver, job)
+            except RuntimeError:  # the loop is closed: this listener is gone
+                unsubscribe()
 
-        return inbox, self.subscribe(put)
+        unsubscribe = self.subscribe(put)
+        return inbox, unsubscribe
 
 
 #: The process-wide bus the service's worker publishes on and SSE subscribes to.
@@ -310,6 +325,58 @@ def retry_job(
     return job
 
 
+# --------------------------------------------------------------- the lock
+class WriterLock:
+    """One job runner per library (decision on CLI vs service concurrency).
+
+    An exclusive ``flock`` on a lock file under ``data/knowledge/``. The
+    service's worker holds it for its lifetime; ``kb ingest`` runs jobs itself
+    only when it can take it, and otherwise just queues them for the service.
+    The lock is released when the process dies, however it dies.
+    """
+
+    def __init__(self, path: Path | str) -> None:
+        self.path = Path(path)
+        self._handle = None
+
+    @property
+    def held(self) -> bool:
+        return self._handle is not None
+
+    def acquire(self) -> bool:
+        """Take the lock without waiting; ``True`` if this object now holds it."""
+        if self._handle is not None:
+            return True
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(self.path, "a+")  # noqa: SIM115 - held open for the lock's lifetime
+        try:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except ImportError:  # pragma: no cover - no flock (Windows): single-process use only
+            pass
+        except OSError:
+            handle.close()
+            return False
+        handle.seek(0)
+        handle.truncate()
+        handle.write(worker_id())
+        handle.flush()
+        self._handle = handle
+        return True
+
+    def release(self) -> None:
+        if self._handle is not None:
+            self._handle.close()  # closing the descriptor releases the flock
+            self._handle = None
+
+    def __enter__(self) -> WriterLock:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.release()
+
+
 # ------------------------------------------------------------------- worker
 class JobWorker:
     """Runs queued jobs one at a time: on a background thread, or synchronously.
@@ -318,7 +385,12 @@ class JobWorker:
         db_path: ``knowledge.db``; the worker thread opens its own connection.
         handlers: job kind → handler.
         connect: opens a migrated connection (default :func:`open_db`).
+        lock: the library's :class:`WriterLock`; the thread takes it before it
+            runs anything (waiting while a ``kb ingest`` holds it).
     """
+
+    #: longest pause after repeated failures of the loop itself
+    MAX_BACKOFF_S = 30.0
 
     def __init__(
         self,
@@ -328,6 +400,7 @@ class JobWorker:
         bus: ProgressBus | None = BUS,
         poll_s: float = 2.0,
         connect: Callable[[Path | str], sqlite3.Connection] | None = None,
+        lock: WriterLock | None = None,
     ) -> None:
         from hal9000.knowledge.storage import open_db
 
@@ -335,22 +408,26 @@ class JobWorker:
         self.handlers = dict(handlers)
         self.bus = bus
         self.poll_s = poll_s
+        self.lock = lock
         self._connect = connect or open_db
         self._wake = threading.Event()
         self._stop = threading.Event()
         self._idle = threading.Event()
         self._thread: threading.Thread | None = None
+        self._recovered = False
 
     # -- the thread ------------------------------------------------------------
     def start(self) -> None:
-        """Recover interrupted jobs, then start the one worker thread."""
+        """Recover interrupted jobs (now, if the lock is free), then start the one thread."""
         if self._thread is not None and self._thread.is_alive():
             return
-        conn = self._connect(self.db_path)
-        try:
-            recover_interrupted(conn, bus=self.bus)
-        finally:
-            conn.close()
+        if self.lock is None or self.lock.acquire():
+            conn = self._connect(self.db_path)
+            try:
+                recover_interrupted(conn, bus=self.bus)
+                self._recovered = True
+            finally:
+                conn.close()
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="kb-job-worker", daemon=True)
         self._thread.start()
@@ -372,21 +449,56 @@ class JobWorker:
         return self._idle.wait(timeout)
 
     def _loop(self) -> None:
-        conn = self._connect(self.db_path)
+        conn: sqlite3.Connection | None = None
+        backoff = 0.0
         try:
             while not self._stop.is_set():
-                self._wake.clear()
-                job = self._claim(conn)
-                if job is None:
-                    self._idle.set()
-                    self._wake.wait(self.poll_s)
-                    continue
-                self._idle.clear()
-                self._run(conn, job)
-        except Exception:  # pragma: no cover - the loop itself must never die silently
-            log.exception("the knowledge job worker stopped")
+                job: Job | None = None
+                try:
+                    if self.lock is not None and not self.lock.acquire():
+                        self._stop.wait(self.poll_s)  # a kb ingest is running jobs itself
+                        continue
+                    if conn is None:
+                        conn = self._connect(self.db_path)
+                    if not self._recovered:
+                        recover_interrupted(conn, bus=self.bus)
+                        self._recovered = True
+                    self._wake.clear()
+                    job = self._claim(conn)
+                    if job is None:
+                        self._idle.set()
+                        self._wake.wait(self.poll_s)
+                        continue
+                    self._idle.clear()
+                    self._run(conn, job)
+                    backoff = 0.0
+                except Exception:
+                    # the bookkeeping itself failed (a locked or full database): never die
+                    log.exception("the knowledge job worker hit an error; backing off")
+                    if conn is not None:
+                        self._salvage(conn, job)
+                    backoff = min(max(backoff * 2, 0.5), self.MAX_BACKOFF_S)
+                    self._stop.wait(backoff)
         finally:
-            conn.close()
+            if conn is not None:
+                conn.close()
+            if self.lock is not None:
+                self.lock.release()
+
+    def _salvage(self, conn: sqlite3.Connection, job: Job | None) -> None:
+        """After a loop error: roll back, and fail the job it was on if it is still running."""
+        try:
+            if conn.in_transaction:
+                conn.rollback()
+            if job is not None and job.id is not None:
+                current = get_job(conn, job.id)
+                if current is not None and current.status == "running":
+                    update_job(
+                        conn, job.id, bus=self.bus, status="failed", detail="failed",
+                        error="the job worker failed while recording this job",
+                    )  # fmt: skip
+        except Exception:  # still failing: the next pass (or a restart) recovers it
+            log.exception("could not record the failure of job %s", job.id if job else None)
 
     # -- one job ---------------------------------------------------------------
     def _claim(self, conn: sqlite3.Connection, job_id: int | None = None) -> Job | None:
@@ -410,6 +522,7 @@ class JobWorker:
         return job
 
     def _run(self, conn: sqlite3.Connection, job: Job) -> Job:
+        """Run one claimed job. Bookkeeping errors propagate (the loop recovers from them)."""
         assert job.id is not None
         job_id = job.id
 
@@ -429,6 +542,17 @@ class JobWorker:
             return update_job(
                 conn, job_id, bus=self.bus, status="failed", error=message, detail="failed"
             )
+        except BaseException as error:  # SystemExit, KeyboardInterrupt: record, then go
+            try:
+                if conn.in_transaction:
+                    conn.rollback()
+                update_job(
+                    conn, job_id, bus=self.bus, status="failed", detail="failed",
+                    error=f"stopped: {type(error).__name__}"[:_ERROR_CHARS],
+                )  # fmt: skip
+            except Exception:  # pragma: no cover - a restart's recovery marks it instead
+                log.exception("could not record that job %s stopped", job_id)
+            raise
         return update_job(
             conn, job_id, bus=self.bus, status="done", progress=1.0, detail=detail or "done"
         )

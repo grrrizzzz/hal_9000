@@ -14,9 +14,13 @@ new one is complete, and a failed build leaves the old one active.
 rebuilding an existing ready profile builds a shadow copy and swaps it in
 atomically when complete.
 
-Which profile is active: the ``profiles.active`` row. When none is,
-``active_profile`` in ``config/knowledge.yaml`` names the one to build and
-activate (see :func:`configured_profile`).
+Which profile is active (decision D3): the ``profiles.active`` flag in the
+database, and nothing else. ``active_profile`` in ``config/knowledge.yaml`` is
+only the *default for the first ingest*: when no profile is active yet, the
+ingestion pipeline builds and activates it (see :func:`configured_profile`).
+After that, changing the yaml changes nothing; activation does.
+
+Superseded file versions (decision D1) are not indexed into a build.
 """
 
 from __future__ import annotations
@@ -113,7 +117,10 @@ def active_profile(conn: sqlite3.Connection) -> IndexProfile | None:
 
 
 def configured_profile(name: str | None) -> IndexProfile | None:
-    """The profile ``config/knowledge.yaml`` names (unsaved), or ``None``."""
+    """The profile ``config/knowledge.yaml`` names (unsaved), or ``None``.
+
+    It is the default for the first ingest only; the database decides what is active.
+    """
     return parse_profile_name(name) if name else None
 
 
@@ -225,7 +232,7 @@ def build_profile(
     rebuild: bool = False,
     progress: Progress | None = None,
 ) -> BuildReport:
-    """Chunk, embed and index every stored document into ``profile``.
+    """Chunk, embed and index every stored document of the current file versions into ``profile``.
 
     - A profile that is already ``ready`` is left alone (``skipped``) unless
       ``rebuild``: then a shadow copy is built and swapped in, in one
@@ -237,6 +244,9 @@ def build_profile(
       ``failed``) and the error re-raised; the active profile is untouched.
     - ``activate`` activates it once ready.
     """
+    from hal9000.knowledge.index.fake import require_fake_mode
+
+    require_fake_mode(profile.embed_model)
     report = BuildReport(profile=profile)
     existing = get_profile(conn, profile.name)
     status = profile_status(conn, profile.name)

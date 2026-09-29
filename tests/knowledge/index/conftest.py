@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
 
 from hal9000.knowledge.config import KnowledgeFile
-from hal9000.knowledge.index.fake import FakeEmbedder
+from hal9000.knowledge.index.fake import FAKE_ENV, FakeEmbedder
 from hal9000.knowledge.ingest.pipeline import IngestPipeline
 from hal9000.knowledge.storage import open_db
 from tests.knowledge.fixtures import corpus
@@ -17,22 +17,34 @@ from tests.knowledge.fixtures import corpus
 PROFILE = "pdfium.structure-256.hdr.fake-64"
 
 
+@pytest.fixture(autouse=True)
+def fake_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These tests index with the fake embedder, which needs explicit fake mode."""
+    monkeypatch.setenv(FAKE_ENV, "1")
+
+
 @pytest.fixture
 def fake() -> FakeEmbedder:
     return FakeEmbedder()
 
 
 @pytest.fixture
-def make_pipeline(tmp_path: Path, fake: FakeEmbedder) -> Callable[..., IngestPipeline]:
+def make_pipeline(tmp_path: Path, fake: FakeEmbedder) -> Iterator[Callable[..., IngestPipeline]]:
+    made: list[IngestPipeline] = []
+
     def make(active: str | None = PROFILE, **kw) -> IngestPipeline:
         kw.setdefault("embed_fn", fake)
         kw.setdefault("use_llm", False)
         kw.setdefault("bus", None)
-        return IngestPipeline(
+        pipeline = IngestPipeline(
             tmp_path / "files", knowledge_file=KnowledgeFile(active_profile=active), **kw
         )
+        made.append(pipeline)
+        return pipeline
 
-    return make
+    yield make
+    for pipeline in made:  # stop their parse processes
+        pipeline.close()
 
 
 @pytest.fixture

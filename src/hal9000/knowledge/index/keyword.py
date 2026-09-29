@@ -20,10 +20,11 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 
 from hal9000.knowledge.contracts import SearchFilters
+from hal9000.knowledge.index.filters import sql_filters
 from hal9000.knowledge.index.fts_query import build_fts_query
 from hal9000.knowledge.storage import fts_table
 
-__all__ = ["FtsIndex", "KeywordHit", "sql_filters"]
+__all__ = ["FtsIndex", "KeywordHit", "sql_filters"]  # sql_filters re-exported
 
 
 @dataclass(frozen=True)
@@ -33,29 +34,6 @@ class KeywordHit:
     chunk_id: int
     score: float
     rank: int
-
-
-def sql_filters(filters: SearchFilters | None) -> tuple[str, list[object]]:
-    """``AND ...`` constraints on ``d`` (documents) and ``f`` (files), and their parameters."""
-    if filters is None:
-        return "", []
-    sql: list[str] = []
-    params: list[object] = []
-    if filters.doc_type:
-        sql.append("d.doc_type = ?")
-        params.append(filters.doc_type)
-    if filters.collection is not None and filters.collection != "":
-        sql.append("f.collection = ?")
-        params.append(filters.collection)
-    if filters.date_from is not None:
-        sql.append("d.doc_date >= ?")
-        params.append(filters.date_from.isoformat())
-    if filters.date_to is not None:
-        sql.append("d.doc_date <= ?")
-        params.append(filters.date_to.isoformat())
-    if filters.date_from is not None or filters.date_to is not None:
-        sql.append("COALESCE(d.doc_date, '') != ''")
-    return "".join(f" AND {clause}" for clause in sql), params
 
 
 class FtsIndex:
