@@ -265,7 +265,8 @@ def test_eval_judge_prep(env, tmp_path, fixture_docs, monkeypatch, capsys):
     assert "no approved dev items" in capsys.readouterr().err
     _approve_facts(env)
     assert main(["kb", "eval", "judge-prep", run.id, "--yes"]) == 1
-    assert "answering is not available yet (KWP6" in capsys.readouterr().err
+    # KWP6's answer binding is found; the run's profile has not been built here
+    assert "index profile 'p1' is not built" in capsys.readouterr().err
 
     def answerer(conn, settings, *, meter, run):
         assert run.stage == "S4" and meter is not None

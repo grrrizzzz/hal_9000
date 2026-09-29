@@ -151,7 +151,11 @@ def build_services(
         deps = answer_deps or fake_deps()
         if ingest is None:
             ingest = IngestPipeline(
-                settings.files_dir, embed_fn=FakeEmbedder(), use_llm=False, bus=BUS
+                settings.files_dir,
+                embed_fn=FakeEmbedder(),
+                use_llm=False,
+                bus=BUS,
+                knowledge_file=kf,
             )
     else:
         from hal9000 import llm
@@ -164,6 +168,7 @@ def build_services(
                 meter=meter,
                 generate=meter.wrap(llm.generate_response, AGENT),
                 bus=BUS,
+                knowledge_file=kf,
             )
         metrics.bind_month_budget(lambda: meter.month_spend(AGENT), settings.monthly_cap_usd)
     worker = ingest.worker(settings.db_path, locked=True) if ingest is not None else None

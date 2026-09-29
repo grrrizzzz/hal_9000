@@ -16,10 +16,9 @@ REPO = Path(__file__).resolve().parents[2]
 
 #: Plan §17 plus handoff KWP0's additions, with the owning work package. A command
 #: leaves this list when its work package implements it (KWP5 part A: gold and
-#: eval judge-prep/export/report/regression, tested in tests/knowledge/eval/).
+#: eval judge-prep/export/report/regression, tested in tests/knowledge/eval/; KWP6:
+#: ask and serve, tested in tests/knowledge/answer/test_cli.py).
 COMMANDS = [
-    (["ask", "How old is the furnace?", "--trace"], "KWP6"),
-    (["serve", "--host", "127.0.0.1", "--port", "8911", "--fake"], "KWP6"),
     (["eval", "sweep", "--stages", "S1a,S1b,S2,S3,S4", "--max-cost", "10", "--yes"], "KWP5 part B"),
     (
         ["eval", "sweep", "--stages", "S5", "--resume", "RUN1", "--yes", "--force-judge"],

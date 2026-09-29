@@ -84,7 +84,7 @@ def seed_library(
 
 
 _MANUAL = (
-    "# Furnace care\n\n"
+    "# Air handler care\n\n"
     "Replace the air filter every 90 days, or monthly during heavy use. "
     "Use a MERV 8 filter sized 16x25x1.\n\n"
     "Keep the area around the unit clear by at least 30 inches.\n\n"
@@ -133,7 +133,7 @@ def fake_corpus() -> list[SeedFile]:
         SeedFile(
             "Appliances/Furnace/furnace-manual.md",
             _MANUAL.encode(),
-            (SeedDocument(1, 1, "Furnace care and troubleshooting", "manual"),),
+            (SeedDocument(1, 1, "Air handler care and troubleshooting", "manual"),),
         )
     )
     files.append(

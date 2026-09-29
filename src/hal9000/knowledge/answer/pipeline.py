@@ -193,7 +193,9 @@ class AnswerPipeline:
     """Answers questions over the active (or a given) index profile.
 
     ``knowledge_file`` pins ``config/knowledge.yaml`` (tests); by default it is
-    read per question, like the policy.
+    read per question, like the policy. ``profile`` pins the index profile
+    (an evaluation run's) instead of the active one. ``record_traces=False``
+    keeps questions out of the ``traces`` table (evaluation answers).
     """
 
     def __init__(
@@ -204,12 +206,14 @@ class AnswerPipeline:
         knowledge_file: KnowledgeFile | None = None,
         tier: str | None = None,
         profile: IndexProfile | None = None,
+        record_traces: bool = True,
     ) -> None:
         self.settings = settings
         self.deps = deps or AnswerDeps()
         self.knowledge_file = knowledge_file
         self.tier = tier or settings.chat_tier
         self.profile = profile
+        self.record_traces = record_traces
 
     # ------------------------------------------------------------ helpers
     def _kf(self) -> KnowledgeFile:
@@ -277,13 +281,15 @@ class AnswerPipeline:
         filters: SearchFilters | None = None,
         cancel: threading.Event | None = None,
         on_answer: Callable[[Answer], Answer] | None = None,
+        on_sources: Callable[[list[NumberedSource]], None] | None = None,
     ) -> Answer:
         """Answer ``question``, emitting the chat events; returns the final :class:`Answer`.
 
         ``on_answer`` runs before ``done`` is emitted (the API stores the
-        message there and fills its IDs). Raises :class:`NoActiveProfile`
-        before anything is emitted, and :class:`Cancelled` when ``cancel``
-        was set.
+        message there and fills its IDs); ``on_sources`` receives the
+        numbered sources with their full text (the evaluation harness).
+        Raises :class:`NoActiveProfile` before anything is emitted, and
+        :class:`Cancelled` when ``cancel`` was set.
         """
         profile = self._profile(conn)
         kf = self._kf()
@@ -291,7 +297,7 @@ class AnswerPipeline:
         state = _State()
         trace = Trace(question=question, profile=profile.name)
         try:
-            with observe(conn, trace=trace):
+            with observe(conn if self.record_traces else None, trace=trace):
                 self._answer(
                     conn, question, profile, kf, emit, history, filters, cancel, deadline, state
                 )
@@ -303,6 +309,8 @@ class AnswerPipeline:
             if state.emitted:
                 emit(ChatResetEvent(reason=BANNER_FAILED))
             self._sources(emit, state, retrieval_only=True, banner=BANNER_FAILED)
+        if on_sources is not None:
+            on_sources(list(state.sources))
         citations = self._citations(state)
         answer = Answer(
             text=state.text,
