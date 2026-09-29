@@ -48,6 +48,7 @@ from typing import Any
 from hal9000.cost.metering import BudgetExceeded
 from hal9000.knowledge.answer.generate import (
     DeadlineExceeded,
+    call_within,
     metered_generate,
     stream_answer,
 )
@@ -85,6 +86,7 @@ from hal9000.knowledge.obs.timing import Stage, stage
 from hal9000.knowledge.obs.traces import describe_error, hits_from_retrieval, observe
 
 __all__ = [
+    "ABSTAIN_NOTHING",
     "ABSTAIN_TEXT",
     "BANNER_CAP",
     "BANNER_CHAT_ERROR",
@@ -103,6 +105,10 @@ Emit = Callable[[Any], None]
 
 ABSTAIN_TEXT = (
     "I couldn't find that in the house documents. The closest passages are listed as sources."
+)
+ABSTAIN_NOTHING = (
+    "I couldn't find anything about that in the house documents. A document that covers it "
+    "may not have been added yet."
 )
 BANNER_CAP = (
     "This month's answer budget is used up, so here are the closest passages instead. "
@@ -177,6 +183,7 @@ class _State:
     issues: list[str] = field(default_factory=list)
     text: str = ""
     banner: str | None = None
+    verified: bool = False  # a verify event went out
 
 
 class _Fallback(Exception):  # noqa: N818 - control flow, not an error
@@ -230,28 +237,50 @@ class AnswerPipeline:
             )
         return profile
 
-    def _embeddings(self, conn: sqlite3.Connection):
-        from hal9000.knowledge.index.embedding import EmbeddingService
+    def _embeddings(
+        self, conn: sqlite3.Connection, profile: IndexProfile, deadline: float | None = None
+    ):
+        from hal9000.knowledge.index.embedding import EmbeddingService, default_embed_fn
+
+        embed_fn = self.deps.embed_fn
+        if deadline is not None:
+            inner = embed_fn or default_embed_fn(profile.embed_model)
+            clock = self.deps.clock
+
+            def embed_fn(*args, **kw):  # the query embedding counts against the deadline
+                return call_within(deadline, clock, inner, *args, **kw)
 
         return EmbeddingService(
             conn,
-            embed_fn=self.deps.embed_fn,
+            embed_fn=embed_fn,
             meter=self.deps.meter,
             agent=self.deps.agent,
             max_attempts=2,
             backoff_s=0.25,
         )
 
-    def _retriever(self, conn: sqlite3.Connection, profile: IndexProfile, config):
+    def _retriever(
+        self,
+        conn: sqlite3.Connection,
+        profile: IndexProfile,
+        config,
+        deadline: float | None = None,
+    ):
         condense = metered_generate(
             self.deps.generate_fn,  # type: ignore[arg-type]
             meter=self.deps.meter,
             agent=self.deps.agent,
             purpose="condense",
             default_tier=self.settings.condense_tier,
+            deadline=deadline,
+            clock=self.deps.clock,
         )
         return self.deps.retriever_cls(
-            conn, self._embeddings(conn), generate=condense, config=config, profile=profile
+            conn,
+            self._embeddings(conn, profile, deadline),
+            generate=condense,
+            config=config,
+            profile=profile,
         )
 
     def retrieve(
@@ -296,6 +325,13 @@ class AnswerPipeline:
         deadline = self.deps.clock() + kf.answer.wall_clock_seconds
         state = _State()
         trace = Trace(question=question, profile=profile.name)
+        downstream = emit
+
+        def emit(event) -> None:  # noqa: F811 - tracks what went out
+            if event.event == "verify":
+                state.verified = True
+            downstream(event)
+
         try:
             with observe(conn if self.record_traces else None, trace=trace):
                 self._answer(
@@ -309,6 +345,8 @@ class AnswerPipeline:
             if state.emitted:
                 emit(ChatResetEvent(reason=BANNER_FAILED))
             self._sources(emit, state, retrieval_only=True, banner=BANNER_FAILED)
+        if not state.verified:  # every stream carries a verify event before done
+            emit(ChatVerifyEvent(grounding=state.grounding, issues=state.issues))  # type: ignore[arg-type]
         if on_sources is not None:
             on_sources(list(state.sources))
         citations = self._citations(state)
@@ -363,11 +401,16 @@ class AnswerPipeline:
         if not capped:
             emit(ChatStatusEvent(stage=Stage.CONDENSE if history else Stage.EMBED_QUERY))
             try:
-                result = self._retriever(conn, profile, config).retrieve(
+                result = self._retriever(conn, profile, config, deadline).retrieve(
                     question, history, filters, config
                 )
             except BudgetExceeded:
                 capped = True
+            except DeadlineExceeded as error:  # condensing or embedding ran out the clock
+                trace.error = describe_error(error)
+                state.outcome = "error"
+                self._sources(emit, state, retrieval_only=True, banner=BANNER_TIMEOUT)
+                return
         if capped:
             emit(ChatStatusEvent(stage=Stage.BM25, detail="retrieval only"))
             bm25 = replace(config, mode="bm25")
@@ -421,10 +464,10 @@ class AnswerPipeline:
 
     @staticmethod
     def _abstain(emit: Emit, state: _State) -> None:
-        state.text = ABSTAIN_TEXT
+        state.text = ABSTAIN_TEXT if state.sources else ABSTAIN_NOTHING
         state.outcome = "abstained"
         state.grounding = "skipped"
-        emit(ChatTokenEvent(text=ABSTAIN_TEXT))
+        emit(ChatTokenEvent(text=state.text))
         emit(ChatVerifyEvent(grounding="skipped"))
 
     # -------------------------------------------------------- generation

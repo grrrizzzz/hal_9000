@@ -36,6 +36,7 @@ from hal9000.llm import Usage
 
 __all__ = [
     "Cancelled",
+    "call_within",
     "DeadlineExceeded",
     "Generation",
     "StreamFn",
@@ -174,6 +175,46 @@ def stream_answer(
     )
 
 
+def call_within(
+    deadline: float | None,
+    clock: Callable[[], float],
+    fn: Callable[..., Any],
+    *args: Any,
+    **kw: Any,
+) -> Any:
+    """``fn(*args, **kw)``, but raise :class:`DeadlineExceeded` if it isn't done by ``deadline``.
+
+    For the question's paid calls that take no timeout of their own (condensing,
+    the query embedding): the call runs on a helper thread in a copy of this
+    context, so its usage still reaches the ledger and the trace if it finishes
+    after the question gave up on it.
+    """
+    if deadline is None:
+        return fn(*args, **kw)
+    remaining = deadline - clock()
+    if remaining <= 0:
+        raise DeadlineExceeded("the question's time limit passed")
+    import contextvars
+
+    box: dict[str, Any] = {}
+    context = contextvars.copy_context()
+
+    def run() -> None:
+        try:
+            box["value"] = context.run(fn, *args, **kw)
+        except BaseException as error:  # handed to the caller below
+            box["error"] = error
+
+    worker = threading.Thread(target=run, name="kb-bounded-call", daemon=True)
+    worker.start()
+    worker.join(remaining)
+    if worker.is_alive():
+        raise DeadlineExceeded("the question's time limit passed")
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
 def metered_generate(
     generate_fn: Callable[..., str],
     *,
@@ -181,11 +222,14 @@ def metered_generate(
     agent: str,
     purpose: str,
     default_tier: str,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> Callable[..., str]:
     """``(prompt, tier=None) -> str`` over ``generate_fn``, metered and counted as ``purpose``.
 
     For the retriever's condense (and multi-query) calls: the cap is checked
-    first, and each call's usage reaches the ledger, Prometheus and the trace.
+    first, each call's usage reaches the ledger, Prometheus and the trace, and
+    with a ``deadline`` the call is abandoned when the question's time is up.
     """
 
     import inspect
@@ -199,8 +243,11 @@ def metered_generate(
         if meter is not None:
             meter.precheck(agent)
         if not accepts_usage:  # a scripted stand-in: nothing to record
-            return generate_fn(prompt, tier or default_tier)
-        return generate_fn(
+            return call_within(deadline, clock, generate_fn, prompt, tier or default_tier)
+        return call_within(
+            deadline,
+            clock,
+            generate_fn,
             prompt,
             tier or default_tier,
             on_usage=lambda usage: record(usage, purpose, meter=meter, agent=agent),
