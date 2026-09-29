@@ -11,6 +11,7 @@ from __future__ import annotations
 import configparser
 import json
 import re
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -306,6 +307,9 @@ def test_there_are_four_alert_rules_matching_the_plan():
     assert "kb_answer_seconds_bucket" in rules["kb-latency-p95"]["data"][0]["model"]["expr"]
     assert threshold(rules["kb-month-spend"]) == {"type": "gt", "params": [0.8]}
     assert threshold(rules["kb-regression-drop"]) == {"type": "gt", "params": [5]}
+    # the read-only mount can't open knowledge.db while hal-kb restarts: not a recall drop
+    assert rules["kb-regression-drop"]["execErrState"] == "KeepLast"
+    assert {rules[u]["execErrState"] for u in rules if u != "kb-regression-drop"} == {"Error"}
     for rule in rules.values():
         refs = {d["refId"] for d in rule["data"]}
         assert rule["condition"] in refs
@@ -345,6 +349,40 @@ def test_the_regression_alert_compares_the_latest_ingest_run_with_the_previous(k
 
 
 # ------------------------------------------------------ datasources and servers
+def test_a_mode_ro_reader_in_a_writable_directory_leaves_wal_files_behind(tmp_path):
+    """Why Grafana gets data/ read-only (grafana.ini): the reader would own -wal and -shm.
+
+    With no writer connected (hal-kb stopped), a ``mode=ro`` reader of a WAL
+    database creates ``-wal`` and ``-shm`` itself and can't remove them; in
+    Grafana's container they belong to uid 472, and hal-kb, another user, can
+    then no longer write. While a writer is connected, the files are the
+    writer's and a reader sees the rows that are only in the WAL.
+    """
+    from hal9000.knowledge.storage import open_db
+
+    db = tmp_path / "knowledge.db"
+    open_db(db).close()
+    wal, shm = Path(f"{db}-wal"), Path(f"{db}-shm")
+    assert not wal.exists() and not shm.exists()  # the last writer cleaned up
+
+    reader = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    reader.execute("SELECT COUNT(*) FROM traces").fetchone()
+    reader.close()
+    assert wal.exists() and shm.exists()  # created by the reader, and left behind
+
+    writer = open_db(db)  # hal-kb running: its connection owns the files
+    try:
+        with writer:
+            writer.execute(
+                "INSERT INTO traces (id, created_at, body) VALUES ('t', '2026-09-01T00:00:00Z', '{}')"
+            )
+        reader = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+        assert reader.execute("SELECT COUNT(*) FROM traces").fetchone() == (1,)
+        reader.close()
+    finally:
+        writer.close()
+
+
 def test_datasources_open_knowledge_db_read_only_and_match_the_dashboards():
     doc = yaml.safe_load((GRAFANA / "provisioning" / "datasources" / "knowledge.yaml").read_text())
     by_uid = {d["uid"]: d for d in doc["datasources"]}

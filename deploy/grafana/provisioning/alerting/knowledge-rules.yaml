@@ -2,7 +2,9 @@
 # default unless deploy/grafana/optional/telegram.yaml is provisioned too.
 # Recall is stored as a fraction, so '5 points' is a drop of 0.05 (x100 below).
 # Rates are over questions that finished: a cancelled one (the client went
-# away) is neither an error nor a question with a result.
+# away) is neither an error nor a question with a result. The SQLite rule keeps
+# its last state on a query error: with data/ mounted read-only, knowledge.db
+# can't be opened while hal-kb is restarting, which is not a recall drop.
 apiVersion: 1
 groups:
 - orgId: 1
@@ -187,7 +189,7 @@ groups:
             params:
             - 5
     noDataState: OK
-    execErrState: Error
+    execErrState: KeepLast  # knowledge.db is unreadable only while hal-kb is down
     for: 0s
     annotations:
       summary: The post-ingest regression recall @ 2k fell by more than 5 points against the previous
