@@ -36,10 +36,12 @@ gold:                       # plan §8.1
   dedup_similarity: 90          # rapidfuzz token_sort_ratio at which two questions are duplicates
   min_quote_words: 3            # shorter evidence quotes are rejected
   min_quote_chars: 12           # (counting letters and digits only)
-  estimate:
-    output_tokens_per_item: 220
-    repair_allowance: 0.25      # share of calls expected to need one repair call
-    check_output_tokens: 120
+  estimate:                     # used when the cost ledger has fewer than min_ledger_calls
+    completion_tokens_per_call: {fast: 1000, powerful: 3200}   # visible output + reasoning
+    seconds_per_call: 60
+    repair_reserve: 0.10        # extra calls reserved for repairs (share of generation calls)
+    min_ledger_calls: 5         # earlier calls to the model needed to use the ledger's means
+    check_passage_tokens: 4000  # passages one unanswerable check shows (largest scoring budget)
 
 judge:                      # plan §8.4.1
   n_items: 20                   # dev items answered for calibration

@@ -459,10 +459,13 @@ def test_the_estimate_counts_the_real_prompts_and_prices_the_tier(fixture_docs, 
     plan = plan_generation(fixture_docs, GoldConfig())
     estimate = plan.estimate()
     assert estimate.model == "openai/gpt-5"
-    assert estimate.calls >= len(plan.tasks) + plan.n_unanswerable
+    reserve = -(-len(plan.tasks) // 10)  # 10% of the generation calls, rounded up
+    assert estimate.calls == len(plan.tasks) + reserve + plan.n_unanswerable
     assert estimate.prompt_tokens > 10_000
-    assert 0.1 < estimate.usd < 2.0  # plan §8.1: about $1
+    # every call is allowed 3,200 completion tokens incl. reasoning: ~$0.035 per call on gpt-5
+    assert 0.03 * estimate.calls < estimate.usd < 0.045 * estimate.calls
     assert "estimated $" in estimate.describe()
+    assert "completion tokens incl. reasoning" in estimate.describe()
     cheap = plan_generation(fixture_docs, GoldConfig(quotas={"factoid": 1}))
     assert cheap.estimate().usd < estimate.usd
 
