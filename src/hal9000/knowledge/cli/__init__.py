@@ -91,7 +91,33 @@ def register(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     generate = _command(
         gold_cmds, "generate", "gold", "generate the draft question set", "gold generate"
     )
-    generate.add_argument("--max-cost", type=float, default=2.00, metavar="USD")
+    generate.add_argument(
+        "--max-cost",
+        type=float,
+        default=3.00,
+        metavar="USD",
+        help="stop spending at this amount for this session (default 3.00)",
+    )
+    generate.add_argument(
+        "--resume",
+        nargs="?",
+        const="latest",
+        metavar="ID",
+        help="continue a stopped generation (default: the latest unfinished checkpoint); "
+        "finished calls are not paid for again",
+    )
+    generate.add_argument(
+        "--only",
+        metavar="CATEGORY[,CATEGORY]",
+        help="top up: generate only what these categories are short of their quotas "
+        "(e.g. unanswerable)",
+    )
+    generate.add_argument(
+        "--count",
+        type=int,
+        metavar="N",
+        help="with --only: store N items of each category instead of the shortfall",
+    )
     generate.add_argument(
         "--allow-keyword-check",
         action="store_true",
