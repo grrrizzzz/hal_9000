@@ -203,3 +203,64 @@ class FakeRetrieve:
             ],
             abstain_score=0.5,
         )
+
+
+class RealisticProvider:
+    """Stands in for ``hal9000.llm.generate_response`` with GPT-5-like usage.
+
+    Reports the prompt's real token count and, by default, the completion
+    measured on Mike's first run: 3,190 completion tokens per call, of which
+    2,890 are reasoning. ``prompt_tokens`` fixes the prompt size instead;
+    ``delay`` sleeps before answering (a slow call to interrupt);
+    ``interrupt_on`` raises KeyboardInterrupt on that call, before usage is
+    reported, as Ctrl-C during a request would.
+    """
+
+    def __init__(
+        self,
+        llm,
+        *,
+        completion: int = 3190,
+        reasoning: int = 2890,
+        prompt_tokens: int | None = None,
+        delay: float = 0.0,
+        interrupt_on: int | None = None,
+    ) -> None:
+        self.llm = llm
+        self.completion = completion
+        self.reasoning = reasoning
+        self.prompt_tokens = prompt_tokens
+        self.delay = delay
+        self.interrupt_on = interrupt_on
+        self.calls = 0
+        self.purposes: list[str] = []
+
+    def __call__(self, prompt, tier="powerful", *, on_usage=None):
+        import time
+
+        from hal9000.knowledge.eval.gold import _prompt_text
+        from hal9000.knowledge.tokens import CHAT_ENCODING, count_tokens
+        from hal9000.llm import Usage
+
+        if self.delay:
+            time.sleep(self.delay)
+        if self.interrupt_on is not None and self.calls + 1 == self.interrupt_on:
+            self.interrupt_on = None
+            raise KeyboardInterrupt
+        self.calls += 1
+        self.purposes.append(prompt.metadata["purpose"])
+        reply = self.llm(prompt, tier)
+        if on_usage:
+            prompt_tokens = self.prompt_tokens
+            if prompt_tokens is None:
+                prompt_tokens = count_tokens(_prompt_text(prompt), CHAT_ENCODING)
+            on_usage(
+                Usage(
+                    model="openai/gpt-5",
+                    prompt=prompt_tokens,
+                    cached=0,
+                    completion=self.completion,
+                    reasoning=self.reasoning,
+                )
+            )
+        return reply

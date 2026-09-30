@@ -8,10 +8,13 @@ declares. ``bundle.pdf`` is left out because it repeats three other files.
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 
+from hal9000.knowledge.eval import wiring
 from hal9000.knowledge.eval.gold import SourceDocument
+from hal9000.knowledge.storage import open_db
 from tests.knowledge.fixtures import corpus
 from tests.knowledge.ingest.conftest import cleaned
 
@@ -92,3 +95,30 @@ def store_documents(conn, documents: list[SourceDocument]) -> None:
                     "VALUES (?, ?, 'pdfium', ?, 1)",
                     (d.file_sha, page, text),
                 )
+
+
+#: the small quota mix of the gold-generation CLI tests (15 items, 7 generation tasks)
+GOLD_QUOTAS = {
+    "factoid": 4,
+    "money": 2,
+    "date": 2,
+    "list": 2,
+    "cross_document": 2,
+    "unanswerable": 3,
+}
+
+
+@pytest.fixture
+def gold_env(tmp_path, monkeypatch, openai_env, fixture_docs):
+    data, config = tmp_path / "data", tmp_path / "config"
+    config.mkdir()
+    (config / "knowledge_eval.yaml").write_text(
+        "gold:\n  quotas: " + json.dumps(GOLD_QUOTAS) + "\n"
+    )
+    monkeypatch.setenv("HAL_DATA_DIR", str(data))
+    monkeypatch.setenv("HAL_CONFIG_DIR", str(config))
+    conn = open_db(data / "knowledge.db")
+    store_documents(conn, fixture_docs)
+    yield conn
+    conn.close()
+    wiring.register_retriever(None)

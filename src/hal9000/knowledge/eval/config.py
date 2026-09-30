@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any, Literal
 
@@ -60,10 +61,48 @@ class ScoringSection(_Model):
         )
 
 
+def _default_completion() -> dict[str, int]:
+    return {"fast": 1000, "powerful": 3200}
+
+
+#: gold.estimate keys of the first estimate (no reasoning tokens), accepted and ignored
+RETIRED_ESTIMATE_KEYS = ("output_tokens_per_item", "repair_allowance", "check_output_tokens")
+
+
 class GoldEstimate(_Model):
-    output_tokens_per_item: int = 220
-    repair_allowance: float = Field(default=0.25, ge=0)
-    check_output_tokens: int = 120
+    """Allowances for ``kb gold generate``'s estimate when the ledger has too few calls."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _retired(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            found = [key for key in RETIRED_ESTIMATE_KEYS if key in data]
+            if found:
+                warnings.warn(
+                    f"knowledge_eval.yaml gold.estimate: {', '.join(found)} "
+                    f"{'is' if len(found) == 1 else 'are'} no longer used and ignored (the "
+                    "estimate now allows completion_tokens_per_call incl. reasoning)",
+                    UserWarning,
+                    stacklevel=2,
+                )
+                data = {k: v for k, v in data.items() if k not in RETIRED_ESTIMATE_KEYS}
+        return data
+
+    #: completion tokens per call *including reasoning* (billed as output), by tier
+    completion_tokens_per_call: dict[Literal["fast", "powerful"], int] = Field(
+        default_factory=_default_completion
+    )
+    seconds_per_call: float = Field(default=60.0, gt=0)
+    #: extra calls reserved for repairs, as a share of generation calls
+    repair_reserve: float = Field(default=0.10, ge=0)
+    #: the ledger's mean is used once it has at least this many calls to the model
+    min_ledger_calls: int = Field(default=5, ge=1)
+    #: passage tokens an unanswerable check shows at most (the eval retriever's largest
+    #: scored budget, ``scoring.budgets``)
+    check_passage_tokens: int = Field(default=4000, ge=1)
+
+    def completion(self, tier: str) -> int:
+        return int(self.completion_tokens_per_call.get(tier, 3200))  # type: ignore[call-overload]
 
 
 def _default_quotas() -> dict[str, int]:

@@ -280,6 +280,15 @@ class Database:
                 ),
             )
 
+    def ledger_calls(self, *, agent: str, model: str) -> list[dict]:
+        """Every ledger row of ``agent`` calling ``model``, oldest first (for estimates)."""
+        rows = self._conn.execute(
+            "SELECT id, at, run_id, completion_tokens, reasoning_tokens, usd FROM ledger "
+            "WHERE agent = ? AND model = ? ORDER BY id",
+            (agent, model),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def run_cost(self, run_id: str) -> float:
         row = self._conn.execute(
             "SELECT COALESCE(SUM(usd), 0) AS s FROM ledger WHERE run_id = ?", (run_id,)

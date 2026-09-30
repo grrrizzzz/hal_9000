@@ -95,7 +95,7 @@ def test_gold_generate_prints_the_estimate_first_and_meters_as_knowledge_eval(
     assert main(["kb", "gold", "generate", "--allow-keyword-check", "--yes"]) == 0
     out = capsys.readouterr().out
     assert out.index("Estimate: about") < out.index("FIRST LLM CALL")
-    assert "cap --max-cost $2.00" in out
+    assert "cap --max-cost $3.00" in out
     assert (
         "keyword search only" in out
     )  # retrieval not wired yet: the lexical fallback checks drafts
@@ -150,7 +150,7 @@ def test_gold_generate_stops_at_the_hard_cap_and_keeps_partial_results(
     monkeypatch.setattr("hal9000.llm.generate_response", expensive)
     assert (
         main(["kb", "gold", "generate", "--allow-keyword-check", "--max-cost", "1.00", "--yes"])
-        == 0
+        == 4  # stopped by the cap: what was done is stored
     )
     out = capsys.readouterr().out
     assert "STOPPED EARLY" in out

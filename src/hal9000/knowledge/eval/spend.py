@@ -10,18 +10,27 @@ LLM calls through a :class:`~hal9000.cost.metering.Meter` whose hard cap is
 
 from __future__ import annotations
 
+import math
 import sys
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
 
 from hal9000 import config as hal_config
 from hal9000.cost.metering import Meter
 from hal9000.knowledge.config import EVAL_AGENT, KnowledgeSettings, monthly_caps
 from hal9000.knowledge.eval.types import Generate
 
-__all__ = ["EvalSpend", "confirm", "open_spend"]
+if TYPE_CHECKING:  # pragma: no cover
+    from hal9000.knowledge.eval.checkpoint import Guard
+
+__all__ = ["EvalSpend", "confirm", "open_spend", "suggest_max_cost"]
+
+
+def suggest_max_cost(estimate_usd: float) -> float:
+    """A ``--max-cost`` with headroom over an estimate: +25%, rounded up to the next $0.50."""
+    return max(0.5, math.ceil(estimate_usd * 1.25 * 2 - 1e-9) / 2)
 
 
 @dataclass
@@ -44,7 +53,7 @@ class EvalSpend:
         if self.max_cost is not None and estimate_usd > self.max_cost:
             return (
                 f"the estimate ${estimate_usd:.2f} exceeds --max-cost ${self.max_cost:.2f}; "
-                "raise --max-cost to run it"
+                f"to run it, pass --max-cost {suggest_max_cost(estimate_usd):.2f}"
             )
         if estimate_usd > self.remaining:
             return (
@@ -59,6 +68,22 @@ class EvalSpend:
             hal_config.require_llm_key()
             from hal9000.llm import generate_response
         return self.meter.wrap(generate_response, EVAL_AGENT)
+
+    def guard_records(self, guard: Guard) -> None:
+        """Write every ledger row inside ``guard.shield()``, then ``guard.hold()``.
+
+        A signal can't cut a ledger row in half, and one arriving after the row
+        is written waits until the reply it paid for is saved.
+        """
+        record = self.meter.record
+
+        def guarded(usage: dict, agent: str) -> float:
+            with guard.shield():
+                usd = record(usage, agent)
+                guard.hold()
+            return usd
+
+        self.meter.record = guarded  # type: ignore[method-assign]
 
     def close(self) -> None:
         self.meter.db.close()

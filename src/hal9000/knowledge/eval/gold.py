@@ -35,7 +35,7 @@ import re
 import sqlite3
 import threading
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from functools import lru_cache
@@ -46,7 +46,9 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from hal9000.core.prompt import Prompt
 from hal9000.cost.metering import BudgetExceeded
 from hal9000.knowledge.contracts import EvidenceQuote, GoldCategory, GoldItem
+from hal9000.knowledge.eval.checkpoint import Checkpoint, Guard
 from hal9000.knowledge.eval.config import CATEGORIES, GoldConfig
+from hal9000.knowledge.eval.progress import Progress, UsageBasis, format_duration
 from hal9000.knowledge.eval.text import (
     extend_to_words,
     find_normalized,
@@ -63,9 +65,12 @@ from hal9000.knowledge.eval.types import (
 
 __all__ = [
     "CostEstimate",
+    "GenerationEstimate",
     "GenerationPlan",
     "GenerationTask",
     "GoldGeneration",
+    "GoldRun",
+    "PendingWork",
     "LexicalRetriever",
     "SourceDocument",
     "align_selection",
@@ -77,9 +82,15 @@ __all__ = [
     "link_keys",
     "load_corpus",
     "parse_tool_reply",
+    "plan_from_descriptors",
+    "question_key",
+    "estimate_checks",
+    "needs_recheck",
+    "recheck_unanswerable",
     "plan_generation",
     "propose_link_sets",
     "stems",
+    "task_labels",
 ]
 
 log = logging.getLogger(__name__)
@@ -532,6 +543,22 @@ class GenerationTask:
     prompt: Prompt
     links: tuple[str, ...] = ()
 
+    def descriptor(self) -> dict:
+        """What a checkpoint keeps to rebuild this task (documents by file and first page)."""
+        return {
+            "kind": self.kind,
+            "docs": [[d.file_sha, min(d.pages)] for d in self.documents],
+            "pages": [list(p) for p in self.pages],
+            "requested": dict(self.requested),
+            "links": list(self.links),
+        }
+
+    @property
+    def key(self) -> str:
+        """A stable ID for the task, the same whenever the plan is rebuilt."""
+        text = json.dumps(self.descriptor(), sort_keys=True)
+        return hashlib.sha256(text.encode()).hexdigest()[:16]
+
 
 @dataclass(frozen=True)
 class CostEstimate:
@@ -550,6 +577,30 @@ class CostEstimate:
         )
 
 
+@dataclass(frozen=True)
+class GenerationEstimate(CostEstimate):
+    """Gold generation's estimate: calls by kind, completion incl. reasoning, and time."""
+
+    generation_calls: int = 0
+    reserve_calls: int = 0
+    check_calls: int = 0
+    seconds: float = 0.0
+    basis: UsageBasis | None = None
+
+    def describe(self) -> str:
+        parts = [
+            (self.generation_calls, "generation"),
+            (self.reserve_calls, "repair reserve"),
+            (self.check_calls, "unanswerable checks"),
+        ]
+        kinds = " + ".join(f"{n} {what}" for n, what in parts if n) or "none"
+        return (
+            f"about {self.calls} calls to {self.model} ({kinds}): ~{self.prompt_tokens:,} prompt "
+            f"and ~{self.output_tokens:,} completion tokens incl. reasoning, estimated "
+            f"${self.usd:.2f}, taking about {format_duration(self.seconds)}"
+        )
+
+
 def _prompt_text(prompt: Prompt) -> str:
     parts = [str(m.get("content", "")) for m in prompt.messages]
     parts.append(json.dumps(prompt.tools or []))
@@ -565,6 +616,22 @@ def estimate_cost(calls: int, prompt_tokens: int, output_tokens: int, tier: str)
     return CostEstimate(calls, prompt_tokens, output_tokens, usd, model)
 
 
+@dataclass(frozen=True)
+class PendingWork:
+    """What is left of a plan: unfinished generation tasks, checks, and a repair reserve."""
+
+    tasks: list[GenerationTask]
+    checks: int
+    reserve: int
+
+    @property
+    def calls(self) -> int:
+        return len(self.tasks) + self.checks + self.reserve
+
+    def __bool__(self) -> bool:
+        return bool(self.tasks or self.checks)
+
+
 @dataclass
 class GenerationPlan:
     """Every call gold generation will make, so its cost can be estimated first."""
@@ -573,43 +640,134 @@ class GenerationPlan:
     corpus: list[SourceDocument]
     config: GoldConfig
     link_sets: list[tuple[tuple[int, ...], tuple[str, ...]]] = field(default_factory=list)
+    #: items per category the selection fills (default: the config's quotas)
+    targets: dict[str, int] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.targets:
+            self.targets = {c: int(self.config.quotas.get(c, 0)) for c in CATEGORIES}
 
     @property
     def n_unanswerable(self) -> int:
         return sum(t.requested.get("unanswerable", 0) for t in self.tasks)
 
-    def estimate(self, count=None) -> CostEstimate:
-        """Prompt tokens are counted on the real prompts; output from the config's allowances."""
-        from hal9000 import config as hal_config
-        from hal9000.knowledge.tokens import count_tokens, encoding_for_model
+    def descriptors(self) -> list[dict]:
+        return [t.descriptor() for t in self.tasks]
 
-        cfg = self.config
-        if count is None:
-            encoding = encoding_for_model(hal_config.model_for(cfg.tier))
-
-            def count(text: str) -> int:
-                return count_tokens(text, encoding)
-
-        allowance = 1 + cfg.estimate.repair_allowance
-        prompt_tokens = 0.0
-        output_tokens = 0.0
-        calls = 0.0
+    def pending(self, checkpoint: Checkpoint | None = None) -> PendingWork:
+        """The calls still to make; drafts not written yet count as their requested checks."""
+        tasks: list[GenerationTask] = []
+        checks = 0
         for task in self.tasks:
-            n = sum(task.requested.values())
-            prompt_tokens += count(_prompt_text(task.prompt)) * allowance
-            output_tokens += n * cfg.estimate.output_tokens_per_item * allowance
-            calls += allowance
-        # unanswerable checks: the question plus k passages of about a page each
-        pages = [text for doc in self.corpus for text in doc.pages.values()]
-        mean_page = sum(count(t) for t in pages) / len(pages) if pages else 0
-        check_prompt = count(_CHECK_SYSTEM) + cfg.unanswerable_check_k * mean_page
-        n_checks = self.n_unanswerable
-        prompt_tokens += n_checks * check_prompt
-        output_tokens += n_checks * cfg.estimate.check_output_tokens
-        calls += n_checks
-        return estimate_cost(
-            math.ceil(calls), math.ceil(prompt_tokens), math.ceil(output_tokens), cfg.tier
+            key = task.key
+            if task.kind == "unanswerable":
+                drafts = checkpoint.drafts.get(key) if checkpoint else None
+                if drafts is None:
+                    tasks.append(task)
+                    checks += task.requested.get("unanswerable", 0)
+                else:
+                    checks += len(drafts) - len(checkpoint.checks.get(key, {}))  # type: ignore[union-attr]
+            elif checkpoint is None or key not in checkpoint.done:
+                tasks.append(task)
+        reserve = math.ceil(len(tasks) * self.config.estimate.repair_reserve - 1e-9)
+        return PendingWork(tasks, checks, reserve)
+
+    def default_basis(self) -> UsageBasis:
+        allowance = self.config.estimate
+        return UsageBasis(allowance.completion(self.config.tier), allowance.seconds_per_call)
+
+    def estimate(
+        self,
+        basis: UsageBasis | None = None,
+        *,
+        checkpoint: Checkpoint | None = None,
+        count=None,
+    ) -> GenerationEstimate:
+        """The cost and time of what is left of the plan (all of it without a checkpoint).
+
+        Prompt tokens are counted on the real prompts (a check: the question
+        plus ``unanswerable_check_k`` passages of about a page each, at most
+        ``estimate.check_passage_tokens``). Every
+        call, checks and a repair reserve included, is allowed ``basis``'s
+        completion tokens, which include reasoning, and its seconds.
+        """
+        cfg = self.config
+        basis = basis or self.default_basis()
+        count = count or _counter(cfg)
+
+        work = self.pending(checkpoint)
+        task_prompts = [count(_prompt_text(t.prompt)) for t in work.tasks]
+        mean_task = sum(task_prompts) / len(task_prompts) if task_prompts else 0.0
+        prompt_tokens = sum(task_prompts) + work.reserve * mean_task
+        prompt_tokens += work.checks * _check_prompt_tokens(self.corpus, cfg, count)
+        return _estimate(
+            cfg,
+            basis,
+            generation=len(work.tasks),
+            reserve=work.reserve,
+            checks=work.checks,
+            prompt_tokens=prompt_tokens,
         )
+
+
+def _counter(cfg: GoldConfig):
+    from hal9000 import config as hal_config
+    from hal9000.knowledge.tokens import count_tokens, encoding_for_model
+
+    encoding = encoding_for_model(hal_config.model_for(cfg.tier))
+
+    def count(text: str) -> int:
+        return count_tokens(text, encoding)
+
+    return count
+
+
+def _check_prompt_tokens(corpus: Sequence[SourceDocument], cfg: GoldConfig, count) -> float:
+    """One check's prompt: the instructions plus up to ``check_passage_tokens`` of passages."""
+    pages = [text for doc in corpus for text in doc.pages.values()]
+    mean_page = sum(count(t) for t in pages) / len(pages) if pages else 0.0
+    passages = min(cfg.unanswerable_check_k, len(pages)) * mean_page
+    return count(_CHECK_SYSTEM) + min(passages, cfg.estimate.check_passage_tokens)
+
+
+def _estimate(
+    cfg: GoldConfig,
+    basis: UsageBasis,
+    *,
+    generation: int,
+    reserve: int,
+    checks: int,
+    prompt_tokens: float,
+) -> GenerationEstimate:
+    calls = generation + reserve + checks
+    completion = calls * basis.completion_tokens
+    cost = estimate_cost(calls, math.ceil(prompt_tokens), math.ceil(completion), cfg.tier)
+    return GenerationEstimate(
+        cost.calls,
+        cost.prompt_tokens,
+        cost.output_tokens,
+        cost.usd,
+        cost.model,
+        generation_calls=generation,
+        reserve_calls=reserve,
+        check_calls=checks,
+        seconds=calls * basis.seconds,
+        basis=basis,
+    )
+
+
+def estimate_checks(
+    n: int,
+    corpus: Sequence[SourceDocument],
+    cfg: GoldConfig,
+    basis: UsageBasis | None = None,
+    count=None,
+) -> GenerationEstimate:
+    """The cost and time of ``n`` unanswerable checks (``kb gold recheck``)."""
+    basis = basis or UsageBasis(cfg.estimate.completion(cfg.tier), cfg.estimate.seconds_per_call)
+    count = count or _counter(cfg)
+    prompt = n * _check_prompt_tokens(corpus, cfg, count)
+    return _estimate(cfg, basis, generation=0, reserve=0, checks=n, prompt_tokens=prompt)
 
 
 def _allocate(total: int, weights: Sequence[float]) -> list[int]:
@@ -632,16 +790,42 @@ def _windows(doc: SourceDocument, cfg: GoldConfig) -> list[tuple[int, ...]]:
     return [w for w in windows if sum(len(doc.pages[p]) for p in w) >= cfg.min_window_chars]
 
 
-def plan_generation(corpus: Sequence[SourceDocument], config: GoldConfig) -> GenerationPlan:
-    """Lay out every generation call for ``corpus`` under ``config``'s quotas."""
+def plan_generation(
+    corpus: Sequence[SourceDocument],
+    config: GoldConfig,
+    *,
+    targets: Mapping[str, int] | None = None,
+    avoid: Sequence[GoldItem] = (),
+) -> GenerationPlan:
+    """Lay out every generation call for ``corpus`` under ``config``'s quotas.
+
+    ``targets`` replaces the quotas (a top-up: only the shortfall, other
+    categories 0), so only as many windows and linked sets get a task as the
+    targets need. Pages already cited by ``avoid`` (the stored items) weigh
+    less, so a top-up leans toward windows the set covers least.
+    """
     cfg = config
     corpus = list(corpus)
+    quotas = (
+        {c: int(cfg.quotas.get(c, 0)) for c in CATEGORIES}
+        if targets is None
+        else {c: max(0, int(targets.get(c, 0))) for c in CATEGORIES}
+    )
+    cited: Counter[tuple[str, int]] = Counter(
+        (e.file_sha, e.page) for item in avoid for e in item.evidence
+    )
+
+    def weight(doc: SourceDocument, pages: Sequence[int], base: float) -> float:
+        return base / (1 + sum(cited[(doc.file_sha, p)] for p in pages))
+
     tasks: list[GenerationTask] = []
     windows = [(doc, w) for doc in corpus for w in _windows(doc, cfg)]
-    weights = [min(cfg.window_max_chars, sum(len(doc.pages[p]) for p in w)) for doc, w in windows]
+    weights = [
+        weight(doc, w, min(cfg.window_max_chars, sum(len(doc.pages[p]) for p in w)))
+        for doc, w in windows
+    ]
     per_category = {
-        c: _allocate(math.ceil(cfg.quotas.get(c, 0) * cfg.overgenerate), weights)
-        for c in ANSWERABLE_WINDOW
+        c: _allocate(math.ceil(quotas[c] * cfg.overgenerate), weights) for c in ANSWERABLE_WINDOW
     }
     for i, (doc, window) in enumerate(windows):
         requested = {c: per_category[c][i] for c in ANSWERABLE_WINDOW if per_category[c][i]}
@@ -649,10 +833,12 @@ def plan_generation(corpus: Sequence[SourceDocument], config: GoldConfig) -> Gen
             prompt = _questions_prompt("window", [doc], [window], requested, cfg.window_max_chars)
             tasks.append(GenerationTask("window", (doc,), (window,), requested, prompt))
     link_sets = propose_link_sets(corpus, max_sets=cfg.max_link_sets, max_docs=cfg.max_link_docs)
-    cross_total = math.ceil(cfg.quotas.get("cross_document", 0) * cfg.overgenerate)
-    for (members, keys), n in zip(
-        link_sets, _allocate(cross_total, [1.0] * len(link_sets)), strict=True
-    ):
+    cross_total = math.ceil(quotas["cross_document"] * cfg.overgenerate)
+    set_weights = [
+        1.0 / (1 + sum(cited[(corpus[i].file_sha, p)] for i in members for p in corpus[i].pages))
+        for members, _keys in link_sets
+    ]
+    for (members, keys), n in zip(link_sets, _allocate(cross_total, set_weights), strict=True):
         if not n:
             continue
         docs = tuple(corpus[i] for i in members)
@@ -662,14 +848,65 @@ def plan_generation(corpus: Sequence[SourceDocument], config: GoldConfig) -> Gen
             "cross", docs, pages, requested, cfg.window_max_chars, links=_readable(keys)
         )
         tasks.append(GenerationTask("cross", docs, pages, requested, prompt, keys))
-    unanswerable = math.ceil(cfg.quotas.get("unanswerable", 0) * cfg.overgenerate)
+    unanswerable = math.ceil(quotas["unanswerable"] * cfg.overgenerate)
     if unanswerable:
         tasks.append(
             GenerationTask(
                 "unanswerable", (), (), {"unanswerable": unanswerable}, _drafts_prompt(unanswerable)
             )
         )
-    return GenerationPlan(tasks, corpus, cfg, link_sets)
+    return GenerationPlan(tasks, corpus, cfg, link_sets, quotas)
+
+
+def plan_from_descriptors(
+    descriptors: Sequence[Mapping],
+    corpus: Sequence[SourceDocument],
+    config: GoldConfig,
+    targets: Mapping[str, int],
+) -> GenerationPlan:
+    """Rebuild a checkpoint's plan over ``corpus`` (the same prompts, so the same task keys).
+
+    Raises ``ValueError`` when a document or page the plan used is gone.
+    """
+    cfg = config
+    by_start = {(d.file_sha, min(d.pages)): d for d in corpus}
+    tasks: list[GenerationTask] = []
+    for desc in descriptors:
+        kind = desc["kind"]
+        requested = {str(c): int(n) for c, n in desc["requested"].items()}
+        if kind == "unanswerable":
+            n = requested.get("unanswerable", 0)
+            tasks.append(GenerationTask("unanswerable", (), (), requested, _drafts_prompt(n)))
+            continue
+        docs = []
+        for sha, first in desc["docs"]:
+            doc = by_start.get((sha, int(first)))
+            if doc is None:
+                raise ValueError(
+                    f"the library changed since this checkpoint: the document in file "
+                    f"{sha[:12]} starting on page {first} is gone"
+                )
+            docs.append(doc)
+        pages = tuple(tuple(int(p) for p in group) for group in desc["pages"])
+        for doc, group in zip(docs, pages, strict=True):
+            if not set(group) <= set(doc.pages):
+                raise ValueError(
+                    f"the library changed since this checkpoint: pages of {doc.file_sha[:12]} "
+                    "it used are gone"
+                )
+        links = tuple(desc.get("links", ()))
+        prompt = _questions_prompt(
+            kind,
+            docs,
+            pages,
+            requested,
+            cfg.window_max_chars,
+            links=_readable(links) if kind == "cross" else (),
+        )
+        tasks.append(GenerationTask(kind, tuple(docs), pages, requested, prompt, links))
+    return GenerationPlan(
+        tasks, list(corpus), cfg, targets={c: int(targets.get(c, 0)) for c in CATEGORIES}
+    )
 
 
 def _readable(keys: Sequence[str]) -> list[str]:
@@ -774,7 +1011,7 @@ def _verify(draft: _DraftItem, task: GenerationTask, cfg: GoldConfig) -> GoldIte
 # ---------------------------------------------------------------- generation
 @dataclass
 class GoldGeneration:
-    """The outcome of :func:`generate_gold`."""
+    """The outcome of :func:`generate_gold` / :meth:`GoldRun.finish`: the items to store now."""
 
     items: list[GoldItem]
     selected_by_category: dict[str, int]
@@ -787,11 +1024,17 @@ class GoldGeneration:
     calls: int = 0
     errors: list[str] = field(default_factory=list)
     stopped: str | None = None
+    #: items of the same checkpoint stored by an earlier session (kept, not stored again)
+    already_stored: int = 0
 
     def summary(self) -> str:
+        head = f"{len(self.items)} draft items: " + ", ".join(
+            f"{c} {n}" for c, n in self.selected_by_category.items()
+        )
+        if self.already_stored:
+            head += f" (plus {self.already_stored} stored earlier from this checkpoint)"
         lines = [
-            f"{len(self.items)} draft items: "
-            + ", ".join(f"{c} {n}" for c, n in self.selected_by_category.items()),
+            head,
             f"paraphrased: {self.paraphrased_share:.0%} of answerable items",
             f"dropped after one regeneration: {len(self.dropped)}; duplicates: {self.duplicates}; "
             f"unanswerable drafts flagged for review: {self.flagged}; calls: {self.calls}",
@@ -817,25 +1060,51 @@ class _Stop(Exception):
 
 
 class _Runner:
-    def __init__(self, generate: Generate, cfg: GoldConfig) -> None:
+    def __init__(
+        self,
+        generate: Generate,
+        cfg: GoldConfig,
+        on_call: Callable[[str], None] | None = None,
+        guard: Guard | None = None,
+    ) -> None:
         self.generate = generate
         self.cfg = cfg
+        self.on_call = on_call
+        self.guard = guard or Guard()
         self.calls = 0
+        self.repairs = 0
         self.errors: list[str] = []
         self.stopped: str | None = None
 
-    def call(self, prompt: Prompt) -> str | None:
+    def call(self, prompt: Prompt, label: str = "", state: _TaskState | None = None) -> str | None:
         if self.stopped:
             raise _Stop
-        self.calls += 1
+        self.guard.before_call()  # a deferred stop happens here, before anything new is paid
+        reply: str | None = None
         try:
-            return self.generate(prompt, self.cfg.tier)
-        except BudgetExceeded as error:
+            reply = self.generate(prompt, self.cfg.tier)
+        except BudgetExceeded as error:  # raised before the call goes out
             self.stopped = str(error)
             raise _Stop from None
         except Exception as error:  # network, provider: record and move on
             self.errors.append(f"{prompt.metadata.get('purpose')}: {type(error).__name__}: {error}")
-            return None
+            reply = None
+        finally:
+            self.guard.after_call(reply is not None)
+        if reply is not None and state is not None:
+            state.answered = True  # before anything else can be interrupted
+        self.calls += 1
+        if prompt.metadata.get("repair"):
+            self.repairs += 1
+        if self.on_call is not None:
+            self.on_call(label)
+        return reply
+
+
+@dataclass
+class _TaskState:
+    #: the task's first reply arrived (it is paid for: record whatever it yields)
+    answered: bool = False
 
 
 def _repair_prompt(prompt: Prompt, reply: str, problems: Sequence[str]) -> Prompt:
@@ -857,8 +1126,16 @@ def _repair_prompt(prompt: Prompt, reply: str, problems: Sequence[str]) -> Promp
     )
 
 
-def _run_questions(task: GenerationTask, runner: _Runner, out: list, dropped: list) -> None:
-    reply = runner.call(task.prompt)
+def _run_questions(
+    task: GenerationTask,
+    runner: _Runner,
+    out: list,
+    dropped: list,
+    *,
+    label: str = "",
+    state: _TaskState | None = None,
+) -> None:
+    reply = runner.call(task.prompt, label, state)
     if reply is None:
         return
     problems: list[str] = []
@@ -878,7 +1155,13 @@ def _run_questions(task: GenerationTask, runner: _Runner, out: list, dropped: li
                 out.append(verified)
     if not problems:
         return
-    reply = runner.call(_repair_prompt(task.prompt, reply, problems))
+    try:
+        reply = runner.call(_repair_prompt(task.prompt, reply, problems), f"{label} repair")
+    except BaseException:  # the cap or an interrupt: the failures are not regenerated
+        dropped.extend((q, f"{reason}; not regenerated (stopped)") for q, reason in failed)
+        if parsed is None:
+            dropped.append(("(whole reply)", "invalid; not regenerated (stopped)"))
+        raise
     try:
         repaired = parse_tool_reply(reply, _DraftReply).items if reply is not None else None
         why = "no regeneration (the call failed)"
@@ -907,16 +1190,21 @@ def is_flagged(item: GoldItem) -> bool:
     return (item.reviewer_note or "").startswith("FLAGGED")
 
 
-def _check_unanswerable(question: str, retrieve: RetrieveFn, runner: _Runner, k: int) -> str | None:
+def _check_unanswerable(
+    question: str, retrieve: RetrieveFn, runner: _Runner, k: int, label: str = ""
+) -> str | None:
     """None when the corpus doesn't answer ``question``; else why it is flagged."""
     try:
         passages = [s.text for s in list(retrieve(question).selected)[:k]]
+    except BudgetExceeded as error:  # the cap stops the run: the draft stays unchecked
+        runner.stopped = str(error)
+        raise _Stop from None
     except Exception as error:
         return f"could not be checked (retrieval failed: {type(error).__name__})"
     if not passages:
         # nothing to show the checker: skip the paid call, and let Mike decide
         return "no keyword match: retrieval returned no passages, so it was not checked"
-    reply = runner.call(_check_prompt(question, passages))
+    reply = runner.call(_check_prompt(question, passages), label)
     if reply is None:
         return "could not be checked (the check call failed)"
     try:
@@ -929,22 +1217,14 @@ def _check_unanswerable(question: str, retrieve: RetrieveFn, runner: _Runner, k:
     return f"retrieval found it {how}: {check.reason}"
 
 
-def _run_unanswerable(
-    task: GenerationTask,
-    runner: _Runner,
-    retrieve: RetrieveFn,
-    out: list,
-    dropped: list,
-    *,
-    keyword_only: bool = False,
-) -> None:
-    reply = runner.call(task.prompt)
-    if reply is None:
-        return
+def _draft_unanswerable(
+    task: GenerationTask, runner: _Runner, label: str, reply: str
+) -> tuple[list[_UnanswerableDraft], list[tuple[str, str]]]:
+    """The drafted questions from the drafting call's ``reply`` (regenerated once if invalid)."""
     try:
-        drafts = parse_tool_reply(reply, _UnanswerableReply).questions
+        return list(parse_tool_reply(reply, _UnanswerableReply).questions), []
     except ValueError as error:
-        reply = runner.call(
+        repaired = runner.call(
             Prompt(
                 messages=[
                     *task.prompt.messages,
@@ -957,32 +1237,22 @@ def _run_unanswerable(
                 ],
                 tools=task.prompt.tools,
                 metadata={**task.prompt.metadata, "repair": True},
-            )
+            ),
+            f"{label} repair",
         )
-        try:
-            drafts = parse_tool_reply(reply or "", _UnanswerableReply).questions
-        except ValueError as error2:
-            dropped.append(("(unanswerable drafts)", f"invalid twice: {error2}"))
-            return
-    for draft in drafts:
-        note = _check_unanswerable(
-            draft.question, retrieve, runner, runner.cfg.unanswerable_check_k
-        )
-        parts = [f"FLAGGED: {note}"] if note else []
-        if keyword_only:
-            parts.append(f"({KEYWORD_ONLY})" if note else KEYWORD_ONLY.capitalize() + ".")
-        out.append(
-            GoldItem(
-                question=draft.question.strip(),
-                category="unanswerable",
-                difficulty=draft.difficulty,
-                reviewer_note=" ".join(parts) or None,
-            )
-        )
+    try:
+        return list(parse_tool_reply(repaired or "", _UnanswerableReply).questions), []
+    except ValueError as error2:
+        return [], [("(unanswerable drafts)", f"invalid twice: {error2}")]
 
 
 def _question_key(question: str) -> str:
     return " ".join(words(question))
+
+
+def question_key(question: str) -> str:
+    """The normalized form questions are compared (and checkpoints track stored items) by."""
+    return _question_key(question)
 
 
 def _dedup(
@@ -1004,9 +1274,17 @@ def _dedup(
 
 
 def _select(
-    items: Sequence[GoldItem], cfg: GoldConfig
+    items: Sequence[GoldItem], cfg: GoldConfig, pinned: Collection[str] = frozenset()
 ) -> tuple[list[GoldItem], dict[str, int], int]:
-    """Fill each category's quota, then swap in paraphrased items to reach the paraphrase quota."""
+    """Fill each category's quota, then swap in paraphrased items to reach the paraphrase quota.
+
+    Items whose question key is ``pinned`` (already stored) are chosen first
+    and never swapped out.
+    """
+
+    def is_pinned(item: GoldItem) -> bool:
+        return _question_key(item.question) in pinned
+
     by_category: dict[str, list[GoldItem]] = defaultdict(list)
     for item in items:
         by_category[item.category].append(item)
@@ -1015,8 +1293,10 @@ def _select(
     for category in CATEGORIES:
         pool = by_category.get(category, [])
         if category == "unanswerable":  # clean drafts before flagged ones
-            pool = [i for i in pool if not is_flagged(i)] + [i for i in pool if is_flagged(i)]
-        quota = cfg.quotas.get(category, 0)
+            pool = sorted(pool, key=lambda i: (not is_pinned(i), is_flagged(i)))
+        else:
+            pool = sorted(pool, key=lambda i: not is_pinned(i))
+        quota = max(cfg.quotas.get(category, 0), sum(1 for i in pool if is_pinned(i)))
         chosen[category] = list(pool[:quota])
         spare[category] = list(pool[quota:])
     answerable = [c for c in CATEGORIES if c != "unanswerable"]
@@ -1030,7 +1310,7 @@ def _select(
         for j in range(len(chosen[category]) - 1, -1, -1):
             if have >= needed or not extra:
                 break
-            if not chosen[category][j].paraphrased:
+            if not chosen[category][j].paraphrased and not is_pinned(chosen[category][j]):
                 chosen[category][j] = extra.pop(0)
                 have += 1
     shortfall = {
@@ -1075,53 +1355,367 @@ def assign_splits(
     return out
 
 
+def _short(title: str, limit: int = 32) -> str:
+    title = " ".join(title.split())
+    return title if len(title) <= limit else title[: limit - 1].rstrip() + "…"
+
+
+def _pages_label(pages: Sequence[int]) -> str:
+    if not pages:
+        return ""
+    return f"p. {pages[0]}" if len(pages) == 1 else f"pp. {pages[0]}–{pages[-1]}"
+
+
+def task_labels(plan: GenerationPlan) -> dict[str, str]:
+    """Progress labels by task key: phase, position, short titles and pages (no text)."""
+    labels: dict[str, str] = {}
+    windows = [t for t in plan.tasks if t.kind == "window"]
+    crosses = [t for t in plan.tasks if t.kind == "cross"]
+    for i, task in enumerate(windows, 1):
+        doc = task.documents[0]
+        labels[task.key] = (
+            f"window {i}/{len(windows)} ({_short(doc.title)}, {_pages_label(task.pages[0])})"
+        )
+    for i, task in enumerate(crosses, 1):
+        others = len(task.documents) - 1
+        labels[task.key] = (
+            f"cross-document {i}/{len(crosses)} ({_short(task.documents[0].title, 28)} "
+            f"+ {others} more)"
+        )
+    for task in plan.tasks:
+        if task.kind == "unanswerable":
+            labels[task.key] = "unanswerable drafts"
+    return labels
+
+
+class GoldRun:
+    """Runs a plan task by task, recording each finished task and check in a checkpoint.
+
+    :meth:`collect` makes the calls, skipping what the checkpoint already
+    holds; it stops at the meter's cap (``BudgetExceeded``) and lets
+    ``KeyboardInterrupt`` through. :meth:`finish` then selects the items to
+    store from everything the checkpoint has collected, leaving out those an
+    earlier session already stored.
+    """
+
+    def __init__(
+        self,
+        plan: GenerationPlan,
+        generate: Generate,
+        *,
+        retrieve: RetrieveFn | None = None,
+        existing: Sequence[GoldItem] = (),
+        checkpoint: Checkpoint | None = None,
+        progress: Progress | None = None,
+        guard: Guard | None = None,
+    ) -> None:
+        self.plan = plan
+        self.cfg = plan.config
+        self.checkpoint = checkpoint or Checkpoint.memory(
+            tasks=plan.descriptors(), targets=plan.targets
+        )
+        self.keyword_only = retrieve is None
+        self.retrieve = retrieve or LexicalRetriever(plan.corpus, self.cfg.unanswerable_check_k)
+        self.existing = list(existing)
+        self.progress = progress
+        self.runner = _Runner(generate, self.cfg, self._called, guard)
+        if guard is not None:
+            self.checkpoint.guard = guard
+        self.labels = task_labels(plan)
+        self.reserve = plan.pending(self.checkpoint).reserve
+        self.interrupted: str | None = None
+        self._current: tuple = ()
+        self._partial: list[GoldItem] = []
+        self._unreported: str | None = None
+
+    # -------------------------------------------------------------- progress
+    def remaining_calls(self) -> int:
+        """Calls still expected after the one in flight (or just finished)."""
+        work = self.plan.pending(self.checkpoint)
+        tasks = sum(1 for t in work.tasks if self._current != ("task", t.key))
+        checks = work.checks - (1 if self._current[:1] == ("check",) else 0)
+        # a repair can only follow a generation call: the reserve shrinks with the tasks left
+        repairable = tasks + (1 if self._current[:1] == ("task",) else 0)
+        reserve = min(max(0, self.reserve - self.runner.repairs), repairable)
+        return tasks + max(0, checks) + reserve
+
+    def _called(self, label: str) -> None:
+        """A call finished: its line prints once its reply is dealt with (or at the next call)."""
+        self._report()
+        self._unreported = label
+
+    def _report(self, *, finished: bool = False) -> None:
+        if self._unreported is None:
+            return
+        label, self._unreported = self._unreported, None
+        if finished:
+            self._current = ()
+        if self.progress is not None:
+            items = self.checkpoint.n_items() + len(self._partial)
+            self.progress.tick(label, items=items, remaining=self.remaining_calls())
+
+    # ----------------------------------------------------------------- calls
+    def collect(self) -> None:
+        if self.progress is not None:
+            self.progress.start()
+        try:
+            for task in self.plan.tasks:
+                if task.kind == "unanswerable":
+                    self._unanswerable(task)
+                elif task.key not in self.checkpoint.done:
+                    self._questions(task)
+        except _Stop:
+            log.warning("gold generation stopped early: %s", self.runner.stopped)
+        finally:
+            self._current = ()
+            self._report(finished=True)
+
+    def _questions(self, task: GenerationTask) -> None:
+        self._current = ("task", task.key)
+        self._partial = items = []
+        dropped: list[tuple[str, str]] = []
+        state = _TaskState()
+        try:
+            _run_questions(
+                task, self.runner, items, dropped, label=self.labels[task.key], state=state
+            )
+        finally:
+            self._partial = []
+            if state.answered:  # paid for: keep what it yielded, never ask again
+                self.checkpoint.record_task(task.key, items, dropped)
+        self._report(finished=True)
+
+    def _unanswerable(self, task: GenerationTask) -> None:
+        checkpoint, key = self.checkpoint, task.key
+        if key not in checkpoint.drafts:
+            self._current = ("task", key)
+            reply = checkpoint.draft_replies.get(key)
+            if reply is None:
+                reply = self.runner.call(task.prompt, self.labels[key])
+                if reply is None:  # the call failed: drafted again on resume
+                    return
+                # saved before a repair can be interrupted: never paid for twice
+                checkpoint.record_draft_reply(key, reply)
+            drafts, dropped = _draft_unanswerable(task, self.runner, self.labels[key], reply)
+            kept, dupes = _dedup(
+                drafts,  # type: ignore[arg-type]
+                (i.question for i in self.existing),
+                self.cfg.dedup_similarity,
+            )
+            checkpoint.record_drafts(
+                key,
+                [{"question": d.question.strip(), "difficulty": d.difficulty} for d in kept],
+                dropped,
+                dupes,
+            )
+            self._report(finished=True)
+        drafts_left = checkpoint.drafts[key]
+        for index, draft in enumerate(drafts_left):
+            if index in checkpoint.checks.get(key, {}):
+                continue
+            self._current = ("check", key, index)
+            note = _check_unanswerable(
+                draft["question"],
+                self.retrieve,
+                self.runner,
+                self.cfg.unanswerable_check_k,
+                label=f"unanswerable check {index + 1}/{len(drafts_left)}",
+            )
+            parts = [f"FLAGGED: {note}"] if note else []
+            if self.keyword_only:
+                parts.append(f"({KEYWORD_ONLY})" if note else KEYWORD_ONLY.capitalize() + ".")
+            item = GoldItem(
+                question=draft["question"],
+                category="unanswerable",
+                difficulty=draft["difficulty"],  # type: ignore[arg-type]
+                reviewer_note=" ".join(parts) or None,
+            )
+            checkpoint.record_check(key, index, item)
+            self._report(finished=True)
+
+    # ------------------------------------------------------------- selection
+    def raw_items(self) -> list[GoldItem]:
+        """Every validated item the checkpoint holds, in plan order."""
+        out: list[GoldItem] = []
+        for task in self.plan.tasks:
+            if task.kind == "unanswerable":
+                checks = self.checkpoint.checks.get(task.key, {})
+                out.extend(checks[i] for i in sorted(checks))
+            else:
+                out.extend(self.checkpoint.done.get(task.key, []))
+        return out
+
+    def finish(self, existing: Sequence[GoldItem] = ()) -> GoldGeneration:
+        """The new items to store: dedup, quotas (the plan's targets) and splits.
+
+        ``existing`` is every stored gold item. Items this checkpoint stored
+        before are kept in the selection (pinned) but not returned again, so
+        storing the result is idempotent per checkpoint.
+        """
+        cfg = self.cfg
+        checkpoint = self.checkpoint
+        targets = checkpoint.targets
+        select_cfg = cfg.model_copy(
+            update={"quotas": {c: int(targets.get(c, 0)) for c in CATEGORIES}}
+        )
+        stored_ids = set(checkpoint.stored.values())
+        others = [i for i in existing if i.id is None or i.id not in stored_ids]
+        pinned = set(checkpoint.stored)
+        raw = sorted(self.raw_items(), key=lambda i: _question_key(i.question) not in pinned)
+        unique, dupes = _dedup(raw, (i.question for i in others), cfg.dedup_similarity)
+        selected, shortfall, para_short = _select(unique, select_cfg, pinned)
+        earlier = [i for i in selected if _question_key(i.question) in pinned]
+        new = [i for i in selected if _question_key(i.question) not in pinned]
+        new = assign_splits(new, cfg.dev_fraction, existing)
+        answerable = [i for i in selected if i.category != "unanswerable"]
+        share = sum(i.paraphrased for i in answerable) / len(answerable) if answerable else 0.0
+        counts = Counter(i.category for i in new)
+        return GoldGeneration(
+            items=new,
+            selected_by_category={c: counts.get(c, 0) for c in CATEGORIES},
+            shortfall=shortfall,
+            paraphrased_share=share,
+            paraphrase_shortfall=para_short,
+            dropped=list(checkpoint.dropped),
+            duplicates=dupes + checkpoint.duplicates,
+            flagged=sum(1 for i in new if is_flagged(i)),
+            calls=self.runner.calls,
+            errors=self.runner.errors,
+            stopped=self.runner.stopped or self.interrupted,
+            already_stored=len(earlier),
+        )
+
+
 def generate_gold(
     plan: GenerationPlan,
     generate: Generate,
     *,
     retrieve: RetrieveFn | None = None,
     existing: Sequence[GoldItem] = (),
+    checkpoint: Checkpoint | None = None,
+    progress: Progress | None = None,
 ) -> GoldGeneration:
     """Run ``plan`` through ``generate`` and return the selected draft items (not stored).
 
     ``retrieve`` checks unanswerable drafts against the whole corpus
     (default: :class:`LexicalRetriever` over the plan's corpus). Spend stops
     at the meter's cap (``BudgetExceeded``); the items validated until then
-    are kept.
+    are kept. With a ``checkpoint``, finished work is recorded as it
+    finishes and skipped when already there (see :class:`GoldRun`).
     """
-    cfg = plan.config
-    runner = _Runner(generate, cfg)
-    keyword_only = retrieve is None
-    retrieve = retrieve or LexicalRetriever(plan.corpus, cfg.unanswerable_check_k)
-    raw: list[GoldItem] = []
-    dropped: list[tuple[str, str]] = []
-    try:
-        for task in plan.tasks:
-            if task.kind == "unanswerable":
-                _run_unanswerable(task, runner, retrieve, raw, dropped, keyword_only=keyword_only)
-            else:
-                _run_questions(task, runner, raw, dropped)
-    except _Stop:
-        log.warning("gold generation stopped early: %s", runner.stopped)
-    unique, dupes = _dedup(raw, (i.question for i in existing), cfg.dedup_similarity)
-    selected, shortfall, para_short = _select(unique, cfg)
-    selected = assign_splits(selected, cfg.dev_fraction, existing)
-    answerable = [i for i in selected if i.category != "unanswerable"]
-    share = sum(i.paraphrased for i in answerable) / len(answerable) if answerable else 0.0
-    counts = Counter(i.category for i in selected)
-    return GoldGeneration(
-        items=selected,
-        selected_by_category={c: counts.get(c, 0) for c in CATEGORIES},
-        shortfall=shortfall,
-        paraphrased_share=share,
-        paraphrase_shortfall=para_short,
-        dropped=dropped,
-        duplicates=dupes,
-        flagged=sum(1 for i in selected if is_flagged(i)),
-        calls=runner.calls,
-        errors=runner.errors,
-        stopped=runner.stopped,
+    run = GoldRun(
+        plan,
+        generate,
+        retrieve=retrieve,
+        existing=existing,
+        checkpoint=checkpoint,
+        progress=progress,
     )
+    run.collect()
+    return run.finish(existing)
+
+
+# ------------------------------------------------------------------- recheck
+#: reviewer-note fragments of unanswerable drafts whose whole-corpus check never happened
+UNCHECKED_NOTES = (
+    "could not be checked",
+    "so it was not checked",
+    KEYWORD_ONLY,
+)
+CHECKED_CLEAN = "Checked: not found in the documents."
+
+
+def needs_recheck(item: GoldItem) -> bool:
+    """A draft unanswerable item whose note says it was never checked against the index."""
+    note = (item.reviewer_note or "").lower()
+    return (
+        item.category == "unanswerable"
+        and item.status == "draft"
+        and any(fragment.lower() in note for fragment in UNCHECKED_NOTES)
+    )
+
+
+@dataclass
+class RecheckOutcome:
+    """What ``kb gold recheck`` did."""
+
+    candidates: int
+    clean: int = 0
+    flagged: int = 0
+    unchecked: int = 0  # checked again but still could not be checked
+    changed: int = 0  # edited or reviewed meanwhile: left alone
+    calls: int = 0
+    errors: list[str] = field(default_factory=list)
+    stopped: str | None = None
+
+    @property
+    def done(self) -> int:
+        return self.clean + self.flagged + self.unchecked + self.changed
+
+    @property
+    def remaining(self) -> int:
+        return self.candidates - self.done
+
+
+def recheck_unanswerable(
+    items: Sequence[GoldItem],
+    generate: Generate,
+    retrieve: RetrieveFn,
+    cfg: GoldConfig,
+    save: Callable[[GoldItem, str], bool],
+    *,
+    progress: Progress | None = None,
+    guard: Guard | None = None,
+) -> RecheckOutcome:
+    """Check each item against the whole corpus again and ``save`` its new reviewer note.
+
+    The note becomes :data:`CHECKED_CLEAN`, or ``FLAGGED: retrieval found it
+    (partly) answered: ...`` as generation writes it. ``save(item, note)``
+    stores one item (False: it changed meanwhile and was left alone); it runs
+    after each check, so an interrupted recheck loses nothing. The meter's cap
+    stops the run (``outcome.stopped``); ``KeyboardInterrupt`` passes through
+    after the item in hand is saved.
+    """
+    guard = guard or Guard()
+    outcome = RecheckOutcome(candidates=len(items))
+    runner = _Runner(generate, cfg, guard=guard)
+    if progress is not None:
+        progress.start()
+    try:
+        for index, item in enumerate(items, 1):
+            before = runner.calls
+            note = _check_unanswerable(
+                item.question,
+                retrieve,
+                runner,
+                cfg.unanswerable_check_k,
+                label=f"unanswerable recheck {index}/{len(items)}",
+            )
+            new_note = CHECKED_CLEAN if note is None else f"FLAGGED: {note}"
+            with guard.shield():
+                saved = save(item, new_note)
+            if not saved:
+                outcome.changed += 1
+            elif note is None:
+                outcome.clean += 1
+            elif note.startswith(("could not be checked", "no keyword match")):
+                outcome.unchecked += 1
+            else:
+                outcome.flagged += 1
+            if progress is not None and runner.calls > before:
+                progress.tick(
+                    f"unanswerable recheck {index}/{len(items)}",
+                    items=outcome.done,
+                    remaining=len(items) - index,
+                    detail=f"{outcome.clean} clean, {outcome.flagged} flagged as answered",
+                )
+            guard.settle()  # saved: a deferred stop happens here
+    except _Stop:
+        outcome.stopped = runner.stopped
+    finally:
+        outcome.calls = runner.calls
+        outcome.errors = runner.errors
+    return outcome
 
 
 # ------------------------------------------------------------ edited evidence

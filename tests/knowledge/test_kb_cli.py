@@ -32,7 +32,14 @@ def test_flags_parse_as_documented():
     assert args.kb_command == "eval sweep" and args.force_judge and args.yes
     assert args.max_cost == 10.0 and args.resume is None
     args = parser.parse_args(["kb", "gold", "generate"])
-    assert args.max_cost == 2.0 and not args.yes
+    assert args.max_cost == 3.0 and not args.yes
+    assert args.resume is None and args.only is None and args.count is None
+    args = parser.parse_args(["kb", "gold", "generate", "--resume"])
+    assert args.resume == "latest"
+    args = parser.parse_args(["kb", "gold", "generate", "--resume", "gold-x", "--max-cost", "1"])
+    assert args.resume == "gold-x" and args.max_cost == 1.0
+    args = parser.parse_args(["kb", "gold", "generate", "--only", "unanswerable", "--count", "9"])
+    assert args.only == "unanswerable" and args.count == 9
     args = parser.parse_args(["kb", "serve"])
     assert args.port is None and args.host == "0.0.0.0" and not args.fake
     args = parser.parse_args(["kb", "ingest", "x", "y"])
