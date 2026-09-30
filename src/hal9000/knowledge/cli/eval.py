@@ -110,6 +110,18 @@ def _report(args, conn, current) -> int:
     return EXIT_OK
 
 
+def _sweep_leader(conn, current, sweep_id: str):
+    """The top S4 finalist of ``sweep_id`` (what judge-prep and S5 answer with), or None."""
+    from hal9000.knowledge.eval.config import load_eval_config
+    from hal9000.knowledge.eval.sweep import Ranker, finalist_runs, load_sweep_settings
+
+    eval_config = load_eval_config(current.config_dir / "knowledge_eval.yaml")
+    grid = load_sweep_settings(eval_config)
+    ranker = Ranker(eval_config.scoring.to_config(), budget=grid.decision_budget)
+    finalists = finalist_runs(conn, sweep_id, ranker, grid.S5.top)
+    return finalists[0] if finalists else None
+
+
 # --------------------------------------------------------------- judge-prep
 def _judge_prep(args, conn, current) -> int:
     from hal9000.knowledge.eval.config import load_eval_config
@@ -123,11 +135,25 @@ def _judge_prep(args, conn, current) -> int:
     from hal9000.knowledge.eval.store import list_gold, list_judge_labels
     from hal9000.knowledge.eval.wiring import NotWired, answerer_for
 
-    run = get_run(conn, args.run)
-    if run is None:
-        _err(f"no evaluation run {args.run!r} (judge-prep answers with that run's configuration)")
+    if not args.run.strip():
+        _err(
+            "no run ID given (is $SWEEP set in this terminal?). Pass the sweep ID or the "
+            "leading run ID that `kb eval sweep` printed."
+        )
         return EXIT_ERROR
-    cfg = load_eval_config(current.config_dir / "knowledge_eval.yaml").judge
+    run = get_run(conn, args.run)
+    if run is None and args.run.startswith("sweep-"):
+        run = _sweep_leader(conn, current, args.run)
+        if run is not None:
+            print(f"Sweep {args.run}: the leading configuration is run {run.id}.")
+    if run is None:
+        _err(
+            f"no evaluation run or finished S4 sweep {args.run!r} (judge-prep answers with "
+            "the leading configuration of a sweep, or with the run given)"
+        )
+        return EXIT_ERROR
+    eval_config = load_eval_config(current.config_dir / "knowledge_eval.yaml")
+    cfg = eval_config.judge
     pool = list_gold(conn, status="approved", split="dev")
     done = {label.gold_item_id for label in list_judge_labels(conn, eval_run_id=run.id)}
     todo = [i for i in choose_calibration_items(pool, cfg.n_items) if i.id not in done]

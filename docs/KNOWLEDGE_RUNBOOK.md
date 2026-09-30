@@ -245,6 +245,11 @@ uv run hal9000 kb eval sweep --stages S1a,S1b,S2,S3,S4 --resume "$SWEEP" --yes
 uv run hal9000 kb eval judge-prep "$SWEEP" --yes
 ```
 
+It answers 20 dev questions with the sweep's leading configuration and prints
+which run that is (`the leading configuration is run ...`). The run ID the
+sweep printed at the end (`Next (gate G-K1b): ...`) works too. If it says
+`no run ID given`, `$SWEEP` isn't set in this terminal: set it again (§1).
+
 ### 3.3 Label the 20 answers (about 15 minutes)
 
 ```bash

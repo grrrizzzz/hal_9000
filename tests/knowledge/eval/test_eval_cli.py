@@ -259,7 +259,7 @@ def test_eval_regression_needs_retrieval_then_writes_a_row(env, capsys):
 
 def test_eval_judge_prep(env, tmp_path, fixture_docs, monkeypatch, capsys):
     assert main(["kb", "eval", "judge-prep", "nope", "--yes"]) == 1
-    assert "no evaluation run 'nope'" in capsys.readouterr().err
+    assert "no evaluation run or finished S4 sweep 'nope'" in capsys.readouterr().err
     eval_dir = tmp_path / "data" / "knowledge" / "eval"
     run = fixture_run(env, fixture_docs, eval_dir, config={"profile": "p1"}, stage="S4")
     assert main(["kb", "eval", "judge-prep", run.id, "--yes"]) == 1

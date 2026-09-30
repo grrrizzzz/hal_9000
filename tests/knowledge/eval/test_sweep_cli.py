@@ -89,7 +89,12 @@ def test_sweep_judge_prep_s5_report_choose_and_test(cli, capsys, monkeypatch):
         return real(conn, current, config, **kw)
 
     monkeypatch.setattr(sweep_module, "config_answerer", spy)
-    assert main(["kb", "eval", "judge-prep", leader_id, "--yes"]) == 0
+    # an empty ID (unset $SWEEP) is explained, not looked up
+    assert main(["kb", "eval", "judge-prep", "", "--yes"]) == 1
+    assert "is $SWEEP set" in capsys.readouterr().err
+    # the sweep ID resolves to the same leading run the sweep printed
+    assert main(["kb", "eval", "judge-prep", sweep, "--yes"]) == 0
+    assert f"the leading configuration is run {leader_id}" in capsys.readouterr().out
     assert calls == [SweepConfig.from_run_config(leader.config)]
     conn = open_db(settings.db_path)
     try:
