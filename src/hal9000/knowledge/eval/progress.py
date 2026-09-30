@@ -53,6 +53,8 @@ class UsageBasis:
     #: call-to-call intervals the time figure comes from (0: the config default)
     timed: int = 0
     what: str = "earlier calls"
+    #: ledger calls needed before the ledger's means are used
+    needed: int = 5
 
     def describe(self) -> str:
         if self.calls:
@@ -63,7 +65,8 @@ class UsageBasis:
         else:
             tokens = (
                 f"default allowance of {self.completion_tokens:,.0f} completion tokens per call "
-                "incl. reasoning (no earlier calls to this model in the ledger)"
+                f"incl. reasoning (fewer than {self.needed} earlier calls to this model in the "
+                "ledger)"
             )
         if self.timed:
             timing = f"~{self.seconds:.0f} s per call from their ledger timestamps"
@@ -117,7 +120,7 @@ def ledger_basis(db: Database | None, model: str, tier: str, allowance: GoldEsti
     ]
     timed = len(gaps) >= max(1, enough - 1)
     seconds = sum(gaps) / len(gaps) if timed else float(allowance.seconds_per_call)
-    return UsageBasis(tokens, seconds, len(chosen), len(gaps) if timed else 0, what)
+    return UsageBasis(tokens, seconds, len(chosen), len(gaps) if timed else 0, what, enough)
 
 
 class Progress:
@@ -145,15 +148,18 @@ class Progress:
         if self.started is None:
             self.started = self.clock()
 
-    def tick(self, label: str, *, items: int, remaining: int) -> str:
-        """Record one finished call; ``remaining`` is the calls still expected after it."""
+    def tick(self, label: str, *, items: int, remaining: int, detail: str | None = None) -> str:
+        """Record one finished call; ``remaining`` is the calls still expected after it.
+
+        ``detail`` replaces the default ``N items so far``.
+        """
         self.start()
         assert self.started is not None
         self.done += 1
         per_call = (self.clock() - self.started) / self.done
         left = format_duration(per_call * remaining)
         line = (
-            f"[{self.done}/{self.done + remaining}] {label}: {items} items so far; "
+            f"[{self.done}/{self.done + remaining}] {label}: {detail or f'{items} items so far'}; "
             f"${self.spent():.2f} spent; ~{per_call:.0f} s/call; "
             f"{left if left.startswith('<') else '~' + left} left"
         )

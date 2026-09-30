@@ -9,7 +9,8 @@ module                  commands                            owner
 ======================  ==================================  ======
 ``cli/check.py``        ``check``                           KWP3
 ``cli/ingest.py``       ``ingest``                          KWP3
-``cli/gold.py``         ``gold generate|export|import``     KWP5
+``cli/gold.py``         ``gold generate|recheck|export|     KWP5
+                        import``
 ``cli/eval.py``         ``eval sweep|judge-prep|latency|    KWP5
                         choose|test|export|report|
                         regression``
@@ -124,6 +125,21 @@ def register(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="check unanswerable drafts with keyword search when no index is available",
     )
     _yes(generate)
+    recheck = _command(
+        gold_cmds,
+        "recheck",
+        "gold",
+        "check again the unanswerable drafts that could not be checked (review untouched)",
+        "gold recheck",
+    )
+    recheck.add_argument(
+        "--max-cost",
+        type=float,
+        default=3.00,
+        metavar="USD",
+        help="stop spending at this amount (default 3.00)",
+    )
+    _yes(recheck)
     for name, help_text in (
         ("export", "write the question set to a JSONL file (keep it under data/)"),
         ("import", "read a question set from a JSONL file"),

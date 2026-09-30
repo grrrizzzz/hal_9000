@@ -9,13 +9,16 @@ rule K2) holding:
   ``complete``). Rewritten atomically.
 - ``events.jsonl``: one line per finished unit of paid work, appended and
   fsynced as it finishes: a generation task's validated items (``task``), the
-  unanswerable drafts (``drafts``) and each checked draft (``check``). A
-  truncated last line (the process was killed mid-write) is ignored.
+  drafting call's raw reply (``draft_reply``, so an interrupted repair never
+  pays for the drafts again), the unanswerable drafts (``drafts``) and each
+  checked draft (``check``). A truncated last line (the process was killed
+  mid-write) is ignored.
+- ``lock``: held (``flock``) by the process running the checkpoint, so a
+  second ``--resume`` can't run it at the same time.
 
 :class:`StopSignals` turns SIGINT (Ctrl-C) and SIGTERM into
-:class:`GenerationInterrupted` so the command can save before it exits, and
-defers a signal that arrives while a checkpoint line or ledger row is being
-written until the write is done.
+:class:`GenerationInterrupted` so the command can save before it exits,
+without ever losing a reply that has been paid for (see its docstring).
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ import secrets
 import signal
 import sys
 import threading
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,6 +42,7 @@ __all__ = [
     "Checkpoint",
     "CheckpointError",
     "GenerationInterrupted",
+    "Guard",
     "StopSignals",
 ]
 
@@ -46,6 +50,7 @@ log = logging.getLogger(__name__)
 
 MANIFEST = "manifest.json"
 EVENTS = "events.jsonl"
+LOCK = "lock"
 FINISHED = "complete"
 
 
@@ -61,7 +66,30 @@ def _new_id() -> str:
     return f"gold-{datetime.now(UTC):%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
 
 
-Shield = Callable[[], AbstractContextManager[Any]]
+class Guard:
+    """What paid work tells the stop-signal handling; this base class does nothing.
+
+    :class:`StopSignals` overrides it. The protocol: ``before_call()`` before
+    a paid call goes out, ``after_call(answered)`` when it returns,
+    ``hold()`` once its cost is in the ledger, ``shield()`` around a write
+    that must not be cut in half, and ``settle()`` once the reply's unit of
+    work is saved.
+    """
+
+    def shield(self) -> AbstractContextManager[Any]:
+        return nullcontext()
+
+    def before_call(self) -> None:
+        pass
+
+    def after_call(self, answered: bool) -> None:
+        pass
+
+    def hold(self) -> None:
+        pass
+
+    def settle(self) -> None:
+        pass
 
 
 class Checkpoint:
@@ -71,11 +99,14 @@ class Checkpoint:
     """
 
     def __init__(
-        self, directory: Path | None, manifest: dict[str, Any], shield: Shield | None = None
+        self, directory: Path | None, manifest: dict[str, Any], guard: Guard | None = None
     ) -> None:
         self.directory = directory
         self.manifest = manifest
-        self.shield: Shield = shield or nullcontext
+        self.guard: Guard = guard or Guard()
+        self._lock_fd: int | None = None
+        #: unanswerable task key -> the drafting call's raw reply
+        self.draft_replies: dict[str, str] = {}
         #: task key -> validated items of a finished generation task
         self.done: dict[str, list[GoldItem]] = {}
         #: unanswerable task key -> the drafts to check ({"question", "difficulty"})
@@ -187,6 +218,8 @@ class Checkpoint:
         if kind == "task":
             self.done[event["key"]] = [GoldItem.model_validate(i) for i in event["items"]]
             self.dropped.extend((q, r) for q, r in event.get("dropped", []))
+        elif kind == "draft_reply":
+            self.draft_replies[event["key"]] = str(event["reply"])
         elif kind == "drafts":
             self.drafts[event["key"]] = [
                 {"question": str(d["question"]), "difficulty": str(d["difficulty"])}
@@ -202,20 +235,20 @@ class Checkpoint:
 
     # --------------------------------------------------------------- writes
     def _append(self, event: dict[str, Any]) -> None:
-        with self.shield():
+        with self.guard.shield():
             self._apply(event)
-            if self.directory is None:
-                return
-            line = json.dumps(event, ensure_ascii=False) + "\n"
-            with (self.directory / EVENTS).open("a", encoding="utf-8") as fh:
-                fh.write(line)
-                fh.flush()
-                os.fsync(fh.fileno())
+            if self.directory is not None:
+                line = json.dumps(event, ensure_ascii=False) + "\n"
+                with (self.directory / EVENTS).open("a", encoding="utf-8") as fh:
+                    fh.write(line)
+                    fh.flush()
+                    os.fsync(fh.fileno())
+        self.guard.settle()  # the paid reply is saved: a deferred stop may happen now
 
     def _write_manifest(self) -> None:
         if self.directory is None:
             return
-        with self.shield():
+        with self.guard.shield():
             self.manifest["updated_at"] = _now()
             target = self.directory / MANIFEST
             tmp = target.with_suffix(".tmp")
@@ -233,6 +266,9 @@ class Checkpoint:
                 "dropped": [list(d) for d in dropped],
             }
         )
+
+    def record_draft_reply(self, key: str, reply: str) -> None:
+        self._append({"type": "draft_reply", "key": key, "reply": reply})
 
     def record_drafts(
         self,
@@ -271,6 +307,31 @@ class Checkpoint:
     def reopen(self) -> None:
         self.manifest["status"] = "running"
         self._write_manifest()
+
+    # ---------------------------------------------------------------- lock
+    def acquire(self) -> None:
+        """Take the checkpoint's lock, or raise ``CheckpointError`` if another process has it.
+
+        The lock is released by :meth:`release` or when the process ends.
+        """
+        if self.directory is None or self._lock_fd is not None:
+            return
+        import fcntl
+
+        fd = os.open(self.directory / LOCK, os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            raise CheckpointError(
+                f"checkpoint {self.id} is being run by another process right now"
+            ) from None
+        self._lock_fd = fd
+
+    def release(self) -> None:
+        if self._lock_fd is not None:
+            os.close(self._lock_fd)  # closing the descriptor drops the flock
+            self._lock_fd = None
 
     # ---------------------------------------------------------------- reads
     @property
@@ -317,12 +378,20 @@ class GenerationInterrupted(KeyboardInterrupt):
         return "interrupted (Ctrl-C)" if self.signum == signal.SIGINT else "stopped by SIGTERM"
 
 
-class StopSignals:
-    """SIGINT and SIGTERM raise :class:`GenerationInterrupted`, except inside :meth:`shield`.
+class StopSignals(Guard):
+    """Ctrl-C and SIGTERM stop a gold run without losing a reply that was paid for.
 
-    A signal inside a shield is raised when the outermost shield exits (so a
-    checkpoint line or ledger row is never half-written). During
-    :meth:`saving` signals are noted and ignored: the save always finishes.
+    - While a paid call is in flight, the first signal waits for it: the reply
+      is paid for either way, so it is saved first (a notice says so; a second
+      signal abandons the call).
+    - From the moment a reply arrives (or its ledger row is written) until its
+      unit of work is in the checkpoint, signals are deferred.
+    - A deferred signal is raised as :class:`GenerationInterrupted` once the
+      unit is saved (:meth:`settle`) or before the next paid call
+      (:meth:`before_call`), never in between.
+    - Outside :meth:`running` (before the run, and while the results are
+      saved) signals only print a notice: the save always finishes.
+
     Only the main thread can own signal handlers; elsewhere this is inert.
     """
 
@@ -331,7 +400,9 @@ class StopSignals:
     def __init__(self, out=None) -> None:
         self.depth = 0
         self.pending: int | None = None
-        self.in_save = False
+        self.armed = False
+        self.in_call = False
+        self.held = False
         self.out = out
         self._previous: dict[int, Any] = {}
 
@@ -346,15 +417,32 @@ class StopSignals:
             signal.signal(signum, previous)
         self._previous.clear()
 
+    def _say(self, text: str) -> None:
+        print(f"hal9000 kb: {text}", file=self.out or sys.stderr, flush=True)
+
     def _handle(self, signum: int, frame: object) -> None:
-        if self.in_save:
-            print("hal9000 kb: saving what is done, please wait", file=self.out or sys.stderr)
+        if not self.armed:
+            self._say("saving what is done, please wait")
             return
-        if self.depth:
+        if self.depth or self.held:
+            self.pending = signum  # raised once the paid reply is saved
+            return
+        if self.in_call and self.pending is None:
             self.pending = signum
+            self._say(
+                "stopping once the call in flight returns (it is paid for either way); "
+                "press Ctrl-C again to abandon it now"
+            )
             return
+        self.pending = None
         raise GenerationInterrupted(signum)
 
+    def _raise_pending(self) -> None:
+        if self.armed and self.pending is not None and not (self.depth or self.held):
+            signum, self.pending = self.pending, None
+            raise GenerationInterrupted(signum)
+
+    # ------------------------------------------------------------- guard
     @contextmanager
     def shield(self) -> Iterator[None]:
         self.depth += 1
@@ -362,15 +450,35 @@ class StopSignals:
             yield
         finally:
             self.depth -= 1
-        if self.depth == 0 and self.pending is not None and not self.in_save:
-            signum, self.pending = self.pending, None
-            raise GenerationInterrupted(signum)
+        if not self.in_call:
+            self._raise_pending()
 
+    def before_call(self) -> None:
+        self.held = False  # everything paid before is saved, or saved as the stop unwinds
+        self._raise_pending()
+        self.in_call = True
+
+    def after_call(self, answered: bool) -> None:
+        self.in_call = False
+        if answered:
+            self.held = True
+
+    def hold(self) -> None:
+        self.held = True
+
+    def settle(self) -> None:
+        self.held = False
+        self._raise_pending()
+
+    # ------------------------------------------------------------ phases
     @contextmanager
-    def saving(self) -> Iterator[None]:
-        self.in_save = True
+    def running(self) -> Iterator[None]:
+        """Signals may stop the run (at a safe point) inside this block only."""
+        self.armed = True
         try:
             yield
         finally:
-            self.in_save = False
+            self.armed = False
+            self.in_call = self.held = False
             self.pending = None
+            self.depth = 0

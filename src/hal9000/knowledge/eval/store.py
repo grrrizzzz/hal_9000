@@ -31,9 +31,11 @@ __all__ = [
     "insert_judge_label",
     "list_gold",
     "list_judge_labels",
+    "set_check_note",
     "set_gold_status",
     "set_human_labels",
     "set_judge_labels",
+    "unreviewed_gold",
 ]
 
 
@@ -109,6 +111,35 @@ def list_gold(
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     rows = conn.execute(f"SELECT * FROM gold_items{where} ORDER BY id", params).fetchall()
     return [_row_to_gold(r) for r in rows]
+
+
+def unreviewed_gold(conn: sqlite3.Connection, *, category: str) -> list[GoldItem]:
+    """Drafts of ``category`` nobody has edited or reviewed yet (``updated_at = created_at``)."""
+    rows = conn.execute(
+        "SELECT * FROM gold_items WHERE category = ? AND status = 'draft' "
+        "AND updated_at = created_at ORDER BY id",
+        (category,),
+    ).fetchall()
+    return [_row_to_gold(r) for r in rows]
+
+
+def set_check_note(
+    conn: sqlite3.Connection, item_id: int, old_note: str | None, new_note: str | None
+) -> bool:
+    """Replace an unreviewed draft's reviewer note with a (re)check result.
+
+    Compare-and-set: only if the item is still an unedited draft with
+    ``old_note``, so a review decision made meanwhile is never overwritten.
+    ``updated_at`` is left alone: it records review changes, and a check is
+    not one. Returns whether the note was replaced.
+    """
+    with conn:
+        cur = conn.execute(
+            "UPDATE gold_items SET reviewer_note = ? WHERE id = ? AND status = 'draft' "
+            "AND updated_at = created_at AND reviewer_note IS ?",
+            (new_note, item_id, old_note),
+        )
+    return cur.rowcount == 1
 
 
 def get_gold(conn: sqlite3.Connection, item_id: int) -> GoldItem | None:

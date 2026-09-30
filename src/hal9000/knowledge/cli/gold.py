@@ -1,4 +1,4 @@
-"""``hal9000 kb gold generate|export|import`` (plan §8.1, §17)."""
+"""``hal9000 kb gold generate|recheck|export|import`` (plan §8.1, §17)."""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from hal9000 import config as hal_config
 EXIT_OK = 0
 EXIT_ERROR = 1
 EXIT_NOT_RUN = 3
+#: stopped by the --max-cost cap or KB_EVAL_CAP_USD (what was done is stored)
+EXIT_STOPPED = 4
 
 
 def _err(message: str) -> None:
@@ -26,6 +28,8 @@ def run(args: argparse.Namespace) -> int:
     try:
         if args.kb_command == "gold generate":
             return _generate(args, conn, current)
+        if args.kb_command == "gold recheck":
+            return _recheck(args, conn, current)
         return _exchange(args, conn, current)
     finally:
         conn.close()
@@ -116,7 +120,7 @@ def _generate(args, conn, current) -> int:
     from hal9000.knowledge.eval.config import load_eval_config
     from hal9000.knowledge.eval.gold import load_corpus, plan_from_descriptors, plan_generation
     from hal9000.knowledge.eval.progress import ledger_basis
-    from hal9000.knowledge.eval.spend import confirm, open_spend
+    from hal9000.knowledge.eval.spend import open_spend
     from hal9000.knowledge.eval.store import UnsafePath, check_data_path, list_gold
     from hal9000.knowledge.eval.wiring import NotWired, retriever_for
 
@@ -187,6 +191,11 @@ def _generate(args, conn, current) -> int:
                 f"{len(plan.tasks) - len(work.tasks)} of {len(plan.tasks)} generation tasks "
                 f"done, {work.checks} unanswerable checks left."
             )
+        elif only:
+            print(
+                f"Top-up plan: {len(plan.tasks)} generation tasks, "
+                f"{plan.n_unanswerable} unanswerable drafts to check."
+            )
         else:
             print(
                 f"Gold generation over {len(corpus)} documents ({pages} pages): "
@@ -201,7 +210,7 @@ def _generate(args, conn, current) -> int:
         if refusal:
             _err(f"not started: {refusal}")
             return EXIT_NOT_RUN
-        if estimate.calls and not confirm("Generate the draft question set?", yes=args.yes):
+        if estimate.calls and not _confirm("Generate the draft question set?", args.yes):
             return EXIT_NOT_RUN
         try:
             generate = spend.generate()
@@ -216,16 +225,42 @@ def _generate(args, conn, current) -> int:
                 only=only,
                 keyword_only=retrieve is None,
             )
-        else:
+        try:
+            checkpoint.acquire()
+        except CheckpointError as error:
+            _err(f"cannot resume: {error}")
+            return EXIT_ERROR
+        try:
             checkpoint.reopen()
-        print(
-            f"Checkpoint {checkpoint.id}. Progress follows on stderr, one line per LLM call; "
-            "Ctrl-C stops, stores what is done and prints how to continue.",
-            flush=True,
-        )
-        return _run(plan, checkpoint, generate, retrieve, existing, spend, basis, conn)
+            print(
+                f"Checkpoint {checkpoint.id}. Progress follows on stderr, one line per LLM "
+                "call; Ctrl-C stops (after the call in flight), stores what is done and prints "
+                "how to continue.",
+                flush=True,
+            )
+            return _run(plan, checkpoint, generate, retrieve, existing, spend, basis, conn)
+        finally:
+            checkpoint.release()
     finally:
         spend.close()
+
+
+def _confirm(question: str, yes: bool) -> bool:
+    """``confirm``, with Ctrl-C at the prompt a plain "no" (nothing has started)."""
+    from hal9000.knowledge.eval.spend import confirm
+
+    try:
+        return confirm(question, yes=yes)
+    except (KeyboardInterrupt, EOFError):
+        print("\nNot started.")
+        return False
+
+
+def _stop(error: KeyboardInterrupt) -> tuple[str, int]:
+    """How an interrupt is described, and the exit code it gives."""
+    if getattr(error, "signum", None):
+        return error.describe(), error.exit_code  # type: ignore[attr-defined]
+    return "interrupted (Ctrl-C)", EXIT_INTERRUPTED
 
 
 def _run(plan, checkpoint, generate, retrieve, existing, spend, basis, conn) -> int:
@@ -236,8 +271,7 @@ def _run(plan, checkpoint, generate, retrieve, existing, spend, basis, conn) -> 
 
     exit_code = EXIT_OK
     with StopSignals() as signals:
-        checkpoint.shield = signals.shield
-        spend.shield_records(signals.shield)
+        spend.guard_records(signals)
         run = GoldRun(
             plan,
             generate,
@@ -245,24 +279,26 @@ def _run(plan, checkpoint, generate, retrieve, existing, spend, basis, conn) -> 
             existing=existing,
             checkpoint=checkpoint,
             progress=Progress(spent=lambda: spend.meter.spent),
+            guard=signals,
         )
         try:
-            run.collect()
+            with signals.running():
+                run.collect()
         except KeyboardInterrupt as error:
-            signum = getattr(error, "signum", None)
-            run.interrupted = error.describe() if signum else "interrupted (Ctrl-C)"
-            exit_code = getattr(error, "exit_code", EXIT_INTERRUPTED)
+            run.interrupted, exit_code = _stop(error)
             print(f"\n{run.interrupted}: storing what is done...", file=sys.stderr, flush=True)
-        with signals.saving():
-            result = run.finish(list_gold(conn))
-            stored = insert_gold(conn, result.items)
-            checkpoint.record_stored([(question_key(i.question), i.id) for i in stored])
-            unfinished = bool(plan.pending(checkpoint))
-            checkpoint.close_session(
-                status="stopped" if unfinished else "complete",
-                spent=spend.meter.spent,
-                calls=run.runner.calls,
-            )
+        # outside running(): a signal now only prints a notice, the save always finishes
+        result = run.finish(list_gold(conn))
+        stored = insert_gold(conn, result.items)
+        checkpoint.record_stored([(question_key(i.question), i.id) for i in stored])
+        unfinished = bool(plan.pending(checkpoint))
+        checkpoint.close_session(
+            status="stopped" if unfinished else "complete",
+            spent=spend.meter.spent,
+            calls=run.runner.calls,
+        )
+    if exit_code == EXIT_OK and run.runner.stopped:
+        exit_code = EXIT_STOPPED
     print(result.summary())
     print(
         f"Stored {len(stored)} draft items for review. Spent ${spend.meter.spent:.4f} "
@@ -276,5 +312,125 @@ def _run(plan, checkpoint, generate, retrieve, existing, spend, basis, conn) -> 
         print(
             "Every planned call is done. To fill the shortfall later:\n"
             f"  uv run hal9000 kb gold generate --only {categories}"
+        )
+    return exit_code
+
+
+# ------------------------------------------------------------------- recheck
+def _recheck(args, conn, current) -> int:
+    from hal9000.knowledge.eval.checkpoint import StopSignals
+    from hal9000.knowledge.eval.config import load_eval_config
+    from hal9000.knowledge.eval.gold import (
+        estimate_checks,
+        load_corpus,
+        needs_recheck,
+        recheck_unanswerable,
+    )
+    from hal9000.knowledge.eval.progress import Progress, ledger_basis
+    from hal9000.knowledge.eval.spend import open_spend
+    from hal9000.knowledge.eval.store import set_check_note, unreviewed_gold
+    from hal9000.knowledge.eval.wiring import NotWired, retriever_for
+
+    cfg = load_eval_config(current.config_dir / "knowledge_eval.yaml")
+    items = [i for i in unreviewed_gold(conn, category="unanswerable") if needs_recheck(i)]
+    if not items:
+        print("Nothing to recheck: no unreviewed unanswerable draft says it could not be checked.")
+        return EXIT_OK
+    corpus = load_corpus(conn)
+    if not corpus:
+        _err("no documents in knowledge.db: run `hal9000 kb ingest` first")
+        return EXIT_ERROR
+    spend = open_spend(current, max_cost=args.max_cost, label="gold-recheck")
+    try:
+        try:
+            retrieve = retriever_for(conn, current, meter=spend.meter).retrieve
+        except NotWired as error:
+            _err(f"{error}. The recheck needs the real index: build one first.")
+            return EXIT_ERROR
+        model = hal_config.model_for(cfg.gold.tier)
+        basis = ledger_basis(spend.meter.db, model, cfg.gold.tier, cfg.gold.estimate)
+        estimate = estimate_checks(len(items), corpus, cfg.gold, basis)
+        print(
+            f"{len(items)} unanswerable drafts were never checked against the library (their "
+            "note says they could not be checked); checking each against the whole library now. "
+            "Reviewed, edited and rejected items are left alone."
+        )
+        print(f"Estimate: {estimate.describe()} (cap --max-cost ${args.max_cost:.2f}).")
+        print(f"Basis: {basis.describe()}.")
+        refusal = spend.refusal(estimate.usd)
+        if refusal:
+            _err(f"not started: {refusal}")
+            return EXIT_NOT_RUN
+        if not _confirm("Recheck them?", args.yes):
+            return EXIT_NOT_RUN
+        try:
+            generate = spend.generate()
+        except hal_config.ConfigError as error:
+            _err(str(error))
+            return EXIT_ERROR
+        print(
+            "Progress follows on stderr, one line per check; each result is saved at once, so "
+            "Ctrl-C loses nothing and a rerun skips what is done.",
+            flush=True,
+        )
+        exit_code = EXIT_OK
+        interrupted = None
+        with StopSignals() as signals:
+            spend.guard_records(signals)
+            try:
+                with signals.running():
+                    outcome = recheck_unanswerable(
+                        items,
+                        generate,
+                        retrieve,
+                        cfg.gold,
+                        lambda item, note: set_check_note(conn, item.id, item.reviewer_note, note),
+                        progress=Progress(spent=lambda: spend.meter.spent),
+                        guard=signals,
+                    )
+            except KeyboardInterrupt as error:
+                interrupted, exit_code = _stop(error)
+                outcome = None
+        return _recheck_report(outcome, items, conn, spend, interrupted, exit_code)
+    finally:
+        spend.close()
+
+
+def _recheck_report(outcome, items, conn, spend, interrupted, exit_code) -> int:
+    from hal9000.knowledge.eval.gold import CHECKED_CLEAN, is_flagged, needs_recheck
+    from hal9000.knowledge.eval.store import get_gold, list_gold
+
+    # counted from what is stored, so an interrupted run reports exactly what it saved
+    now = [get_gold(conn, i.id) for i in items]
+    clean = sum(1 for i in now if i and i.reviewer_note == CHECKED_CLEAN)
+    left = sum(1 for i in now if i and needs_recheck(i))
+    answered = sum(1 for i in now if i and is_flagged(i) and not needs_recheck(i))
+    changed = sum(1 for i in now if i is None or i.status != "draft")
+    print(
+        f"Rechecked {len(items) - left - changed} of {len(items)} drafts: {clean} clean "
+        f"(note: {CHECKED_CLEAN!r}), {answered} flagged as answered by the documents. "
+        f"Spent ${spend.meter.spent:.4f} (agent knowledge-eval)."
+    )
+    stopped = interrupted or (outcome.stopped if outcome else None)
+    if stopped:
+        print(f"STOPPED EARLY: {stopped} (every finished check is saved)")
+        if exit_code == EXIT_OK:
+            exit_code = EXIT_STOPPED
+    if outcome is not None:
+        for error in outcome.errors[:5]:
+            print(f"error: {error}")
+    if left:
+        print(f"{left} still unchecked: run `uv run hal9000 kb gold recheck` again to continue.")
+    waiting = [
+        i
+        for i in list_gold(conn, status="draft", category="unanswerable")
+        if is_flagged(i) and not needs_recheck(i)
+    ]
+    if waiting:
+        print(
+            f"Next: {len(waiting)} unanswerable drafts are flagged as answered by the documents. "
+            "Review, rejecting every one the documents do answer; then "
+            "`uv run hal9000 kb gold generate --only unanswerable` refills exactly what was "
+            "rejected."
         )
     return exit_code

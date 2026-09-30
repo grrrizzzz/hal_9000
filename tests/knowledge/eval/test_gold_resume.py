@@ -7,7 +7,6 @@ call, 2,890 of them reasoning).
 
 from __future__ import annotations
 
-import json
 import math
 import os
 import re
@@ -41,33 +40,16 @@ from hal9000.knowledge.eval.gold import (
 from hal9000.knowledge.eval.progress import Progress, UsageBasis, format_duration, ledger_basis
 from hal9000.knowledge.eval.spend import suggest_max_cost
 from hal9000.knowledge.eval.store import insert_gold, list_gold
-from hal9000.knowledge.storage import open_db
 from hal9000.storage.db import Database
-from tests.knowledge.eval.conftest import store_documents
+from tests.knowledge.eval.conftest import GOLD_QUOTAS as QUOTAS
 from tests.knowledge.eval.fakes import FakeRetrieve, GoldLLM, RealisticProvider
 
 REPO = Path(__file__).resolve().parents[3]
-QUOTAS = {"factoid": 4, "money": 2, "date": 2, "list": 2, "cross_document": 2, "unanswerable": 3}
-SMALL_CONFIG = "gold:\n  quotas: " + json.dumps(QUOTAS) + "\n"
 GENERATE = ["kb", "gold", "generate", "--allow-keyword-check", "--yes"]
 PROGRESS = re.compile(
     r"^\[(\d+)/(\d+)\] (.+?): (\d+) items so far; \$(\d+\.\d\d) spent; ~(\d+) s/call; "
     r"(<1 min|~\d+ min|~\d+ h \d\d min) left$"
 )
-
-
-@pytest.fixture
-def gold_env(tmp_path, monkeypatch, openai_env, fixture_docs):
-    data, config = tmp_path / "data", tmp_path / "config"
-    config.mkdir()
-    (config / "knowledge_eval.yaml").write_text(SMALL_CONFIG)
-    monkeypatch.setenv("HAL_DATA_DIR", str(data))
-    monkeypatch.setenv("HAL_CONFIG_DIR", str(config))
-    conn = open_db(data / "knowledge.db")
-    store_documents(conn, fixture_docs)
-    yield conn
-    conn.close()
-    wiring.register_retriever(None)
 
 
 def use(monkeypatch, provider: RealisticProvider) -> RealisticProvider:
@@ -163,7 +145,7 @@ def test_a_cap_stop_mid_check_stores_what_was_validated_and_resume_pays_only_for
 ):
     # each call costs more than the estimate allows for, so the $0.55 cap hits in the checks
     heavy = use(monkeypatch, RealisticProvider(GoldLLM(), completion=6000, prompt_tokens=1880))
-    assert main([*GENERATE, "--max-cost", "0.55"]) == 0
+    assert main([*GENERATE, "--max-cost", "0.55"]) == 4  # the cap's own exit code
     out = capsys.readouterr().out
     assert heavy.calls == 9 and heavy.purposes.count("kb-gold-check") == 2
     assert "STOPPED EARLY" in out and "hard cap" in out
@@ -247,14 +229,15 @@ def test_sigterm_saves_and_the_run_resumes(gold_env, monkeypatch, tmp_path, caps
     assert child.returncode == 128 + signal.SIGTERM, "".join(lines) + err
     assert "stopped by SIGTERM: storing what is done" in err
     assert "--resume gold-" in out and "STOPPED EARLY: stopped by SIGTERM" in out
+    # the call in flight when SIGTERM came was finished and saved, never paid for twice
     paid = len(ledger(tmp_path))
-    assert paid == 3
+    assert paid in (3, 4)
     [manifest] = checkpoints(tmp_path)
-    assert manifest["status"] == "stopped" and manifest["calls"] == 3
+    assert manifest["status"] == "stopped" and manifest["calls"] == paid
 
     provider = use(monkeypatch, RealisticProvider(GoldLLM()))
     assert main([*GENERATE, "--resume", manifest["id"]]) == 0
-    assert provider.calls == 12 - 3 and len(ledger(tmp_path)) == 12
+    assert provider.calls == 12 - paid and len(ledger(tmp_path)) == 12
     assert Counter(i.category for i in list_gold(gold_env)) == Counter(QUOTAS)
     assert_no_duplicates(gold_env)
 
@@ -294,21 +277,47 @@ def test_a_checkpoint_survives_a_truncated_last_line_and_rejects_bad_ids(tmp_pat
             Checkpoint.load(root, bad)
 
 
-def test_signals_inside_a_shield_wait_for_it_and_saving_ignores_them():
+def test_stop_signals_never_cut_a_paid_reply_short(capsys):
+    def kill(signum=signal.SIGINT):
+        os.kill(os.getpid(), signum)
+        time.sleep(0.05)
+
     with StopSignals() as signals:
-        with pytest.raises(GenerationInterrupted) as caught:
-            with signals.shield():
-                os.kill(os.getpid(), signal.SIGTERM)
-                time.sleep(0.05)
-                finished = True  # the shielded write completed first
-        assert finished and caught.value.signum == signal.SIGTERM
-        assert caught.value.exit_code == 143
-        with signals.saving():
-            os.kill(os.getpid(), signal.SIGINT)
-            time.sleep(0.05)
-        with pytest.raises(GenerationInterrupted):
-            os.kill(os.getpid(), signal.SIGINT)
-            time.sleep(0.5)
+        kill()  # not running yet: only a notice
+        assert "saving what is done" in capsys.readouterr().err
+        with signals.running():
+            # a write in a shield finishes first; the stop comes when it ends
+            with pytest.raises(GenerationInterrupted) as caught:
+                with signals.shield():
+                    kill(signal.SIGTERM)
+                    finished = True
+            assert finished and caught.value.signum == signal.SIGTERM
+            assert caught.value.exit_code == 143
+            # a call in flight: the first Ctrl-C waits for its reply...
+            signals.before_call()
+            kill()
+            assert "stopping once the call in flight returns" in capsys.readouterr().err
+            signals.after_call(True)  # ...which arrives and is held until it is saved
+            kill()
+            with pytest.raises(GenerationInterrupted):
+                signals.settle()  # saved: now it stops
+            # a second Ctrl-C abandons the call in flight
+            signals.before_call()
+            kill()
+            with pytest.raises(GenerationInterrupted):
+                kill()
+            signals.after_call(False)
+            # a stop noted after a reply is raised before the next paid call at the latest
+            signals.before_call()
+            signals.after_call(True)
+            kill()
+            with pytest.raises(GenerationInterrupted):
+                signals.before_call()
+            signals.after_call(False)
+            # idle: at once
+            with pytest.raises(GenerationInterrupted):
+                kill()
+        kill()  # saving: ignored
     assert signal.getsignal(signal.SIGTERM) != signals._handle
 
 

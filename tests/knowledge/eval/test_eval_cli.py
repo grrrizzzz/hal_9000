@@ -150,7 +150,7 @@ def test_gold_generate_stops_at_the_hard_cap_and_keeps_partial_results(
     monkeypatch.setattr("hal9000.llm.generate_response", expensive)
     assert (
         main(["kb", "gold", "generate", "--allow-keyword-check", "--max-cost", "1.00", "--yes"])
-        == 0
+        == 4  # stopped by the cap: what was done is stored
     )
     out = capsys.readouterr().out
     assert "STOPPED EARLY" in out

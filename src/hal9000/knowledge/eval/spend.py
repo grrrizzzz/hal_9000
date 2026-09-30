@@ -14,14 +14,16 @@ import math
 import sys
 import uuid
 from collections.abc import Callable
-from contextlib import AbstractContextManager
 from dataclasses import dataclass
-from typing import Any, TextIO
+from typing import TYPE_CHECKING, TextIO
 
 from hal9000 import config as hal_config
 from hal9000.cost.metering import Meter
 from hal9000.knowledge.config import EVAL_AGENT, KnowledgeSettings, monthly_caps
 from hal9000.knowledge.eval.types import Generate
+
+if TYPE_CHECKING:  # pragma: no cover
+    from hal9000.knowledge.eval.checkpoint import Guard
 
 __all__ = ["EvalSpend", "confirm", "open_spend", "suggest_max_cost"]
 
@@ -67,15 +69,21 @@ class EvalSpend:
             from hal9000.llm import generate_response
         return self.meter.wrap(generate_response, EVAL_AGENT)
 
-    def shield_records(self, shield: Callable[[], AbstractContextManager[Any]]) -> None:
-        """Write every ledger row inside ``shield()`` (a signal can't cut one in half)."""
+    def guard_records(self, guard: Guard) -> None:
+        """Write every ledger row inside ``guard.shield()``, then ``guard.hold()``.
+
+        A signal can't cut a ledger row in half, and one arriving after the row
+        is written waits until the reply it paid for is saved.
+        """
         record = self.meter.record
 
-        def shielded(usage: dict, agent: str) -> float:
-            with shield():
-                return record(usage, agent)
+        def guarded(usage: dict, agent: str) -> float:
+            with guard.shield():
+                usd = record(usage, agent)
+                guard.hold()
+            return usd
 
-        self.meter.record = shielded  # type: ignore[method-assign]
+        self.meter.record = guarded  # type: ignore[method-assign]
 
     def close(self) -> None:
         self.meter.db.close()

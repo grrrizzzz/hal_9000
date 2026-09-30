@@ -46,7 +46,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from hal9000.core.prompt import Prompt
 from hal9000.cost.metering import BudgetExceeded
 from hal9000.knowledge.contracts import EvidenceQuote, GoldCategory, GoldItem
-from hal9000.knowledge.eval.checkpoint import Checkpoint
+from hal9000.knowledge.eval.checkpoint import Checkpoint, Guard
 from hal9000.knowledge.eval.config import CATEGORIES, GoldConfig
 from hal9000.knowledge.eval.progress import Progress, UsageBasis, format_duration
 from hal9000.knowledge.eval.text import (
@@ -84,6 +84,9 @@ __all__ = [
     "parse_tool_reply",
     "plan_from_descriptors",
     "question_key",
+    "estimate_checks",
+    "needs_recheck",
+    "recheck_unanswerable",
     "plan_generation",
     "propose_link_sets",
     "stems",
@@ -585,11 +588,12 @@ class GenerationEstimate(CostEstimate):
     basis: UsageBasis | None = None
 
     def describe(self) -> str:
-        kinds = f"{self.generation_calls} generation"
-        if self.reserve_calls:
-            kinds += f" + {self.reserve_calls} repair reserve"
-        if self.check_calls:
-            kinds += f" + {self.check_calls} unanswerable checks"
+        parts = [
+            (self.generation_calls, "generation"),
+            (self.reserve_calls, "repair reserve"),
+            (self.check_calls, "unanswerable checks"),
+        ]
+        kinds = " + ".join(f"{n} {what}" for n, what in parts if n) or "none"
         return (
             f"about {self.calls} calls to {self.model} ({kinds}): ~{self.prompt_tokens:,} prompt "
             f"and ~{self.output_tokens:,} completion tokens incl. reasoning, estimated "
@@ -687,39 +691,83 @@ class GenerationPlan:
         call, checks and a repair reserve included, is allowed ``basis``'s
         completion tokens, which include reasoning, and its seconds.
         """
-        from hal9000 import config as hal_config
-        from hal9000.knowledge.tokens import count_tokens, encoding_for_model
-
         cfg = self.config
         basis = basis or self.default_basis()
-        if count is None:
-            encoding = encoding_for_model(hal_config.model_for(cfg.tier))
-
-            def count(text: str) -> int:
-                return count_tokens(text, encoding)
+        count = count or _counter(cfg)
 
         work = self.pending(checkpoint)
         task_prompts = [count(_prompt_text(t.prompt)) for t in work.tasks]
         mean_task = sum(task_prompts) / len(task_prompts) if task_prompts else 0.0
-        pages = [text for doc in self.corpus for text in doc.pages.values()]
-        mean_page = sum(count(t) for t in pages) / len(pages) if pages else 0.0
-        passages = min(cfg.unanswerable_check_k, len(pages)) * mean_page
-        check_prompt = count(_CHECK_SYSTEM) + min(passages, cfg.estimate.check_passage_tokens)
-        prompt_tokens = sum(task_prompts) + work.reserve * mean_task + work.checks * check_prompt
-        completion = work.calls * basis.completion_tokens
-        cost = estimate_cost(work.calls, math.ceil(prompt_tokens), math.ceil(completion), cfg.tier)
-        return GenerationEstimate(
-            cost.calls,
-            cost.prompt_tokens,
-            cost.output_tokens,
-            cost.usd,
-            cost.model,
-            generation_calls=len(work.tasks),
-            reserve_calls=work.reserve,
-            check_calls=work.checks,
-            seconds=work.calls * basis.seconds,
-            basis=basis,
+        prompt_tokens = sum(task_prompts) + work.reserve * mean_task
+        prompt_tokens += work.checks * _check_prompt_tokens(self.corpus, cfg, count)
+        return _estimate(
+            cfg,
+            basis,
+            generation=len(work.tasks),
+            reserve=work.reserve,
+            checks=work.checks,
+            prompt_tokens=prompt_tokens,
         )
+
+
+def _counter(cfg: GoldConfig):
+    from hal9000 import config as hal_config
+    from hal9000.knowledge.tokens import count_tokens, encoding_for_model
+
+    encoding = encoding_for_model(hal_config.model_for(cfg.tier))
+
+    def count(text: str) -> int:
+        return count_tokens(text, encoding)
+
+    return count
+
+
+def _check_prompt_tokens(corpus: Sequence[SourceDocument], cfg: GoldConfig, count) -> float:
+    """One check's prompt: the instructions plus up to ``check_passage_tokens`` of passages."""
+    pages = [text for doc in corpus for text in doc.pages.values()]
+    mean_page = sum(count(t) for t in pages) / len(pages) if pages else 0.0
+    passages = min(cfg.unanswerable_check_k, len(pages)) * mean_page
+    return count(_CHECK_SYSTEM) + min(passages, cfg.estimate.check_passage_tokens)
+
+
+def _estimate(
+    cfg: GoldConfig,
+    basis: UsageBasis,
+    *,
+    generation: int,
+    reserve: int,
+    checks: int,
+    prompt_tokens: float,
+) -> GenerationEstimate:
+    calls = generation + reserve + checks
+    completion = calls * basis.completion_tokens
+    cost = estimate_cost(calls, math.ceil(prompt_tokens), math.ceil(completion), cfg.tier)
+    return GenerationEstimate(
+        cost.calls,
+        cost.prompt_tokens,
+        cost.output_tokens,
+        cost.usd,
+        cost.model,
+        generation_calls=generation,
+        reserve_calls=reserve,
+        check_calls=checks,
+        seconds=calls * basis.seconds,
+        basis=basis,
+    )
+
+
+def estimate_checks(
+    n: int,
+    corpus: Sequence[SourceDocument],
+    cfg: GoldConfig,
+    basis: UsageBasis | None = None,
+    count=None,
+) -> GenerationEstimate:
+    """The cost and time of ``n`` unanswerable checks (``kb gold recheck``)."""
+    basis = basis or UsageBasis(cfg.estimate.completion(cfg.tier), cfg.estimate.seconds_per_call)
+    count = count or _counter(cfg)
+    prompt = n * _check_prompt_tokens(corpus, cfg, count)
+    return _estimate(cfg, basis, generation=0, reserve=0, checks=n, prompt_tokens=prompt)
 
 
 def _allocate(total: int, weights: Sequence[float]) -> list[int]:
@@ -1013,11 +1061,16 @@ class _Stop(Exception):
 
 class _Runner:
     def __init__(
-        self, generate: Generate, cfg: GoldConfig, on_call: Callable[[str], None] | None = None
+        self,
+        generate: Generate,
+        cfg: GoldConfig,
+        on_call: Callable[[str], None] | None = None,
+        guard: Guard | None = None,
     ) -> None:
         self.generate = generate
         self.cfg = cfg
         self.on_call = on_call
+        self.guard = guard or Guard()
         self.calls = 0
         self.repairs = 0
         self.errors: list[str] = []
@@ -1026,14 +1079,18 @@ class _Runner:
     def call(self, prompt: Prompt, label: str = "", state: _TaskState | None = None) -> str | None:
         if self.stopped:
             raise _Stop
+        self.guard.before_call()  # a deferred stop happens here, before anything new is paid
+        reply: str | None = None
         try:
-            reply: str | None = self.generate(prompt, self.cfg.tier)
+            reply = self.generate(prompt, self.cfg.tier)
         except BudgetExceeded as error:  # raised before the call goes out
             self.stopped = str(error)
             raise _Stop from None
         except Exception as error:  # network, provider: record and move on
             self.errors.append(f"{prompt.metadata.get('purpose')}: {type(error).__name__}: {error}")
             reply = None
+        finally:
+            self.guard.after_call(reply is not None)
         if reply is not None and state is not None:
             state.answered = True  # before anything else can be interrupted
         self.calls += 1
@@ -1139,6 +1196,9 @@ def _check_unanswerable(
     """None when the corpus doesn't answer ``question``; else why it is flagged."""
     try:
         passages = [s.text for s in list(retrieve(question).selected)[:k]]
+    except BudgetExceeded as error:  # the cap stops the run: the draft stays unchecked
+        runner.stopped = str(error)
+        raise _Stop from None
     except Exception as error:
         return f"could not be checked (retrieval failed: {type(error).__name__})"
     if not passages:
@@ -1158,16 +1218,13 @@ def _check_unanswerable(
 
 
 def _draft_unanswerable(
-    task: GenerationTask, runner: _Runner, label: str
-) -> tuple[list[_UnanswerableDraft], list[tuple[str, str]]] | None:
-    """The drafted questions (regenerated once if invalid); None when the call failed."""
-    reply = runner.call(task.prompt, label)
-    if reply is None:
-        return None
+    task: GenerationTask, runner: _Runner, label: str, reply: str
+) -> tuple[list[_UnanswerableDraft], list[tuple[str, str]]]:
+    """The drafted questions from the drafting call's ``reply`` (regenerated once if invalid)."""
     try:
         return list(parse_tool_reply(reply, _UnanswerableReply).questions), []
     except ValueError as error:
-        reply = runner.call(
+        repaired = runner.call(
             Prompt(
                 messages=[
                     *task.prompt.messages,
@@ -1184,7 +1241,7 @@ def _draft_unanswerable(
             f"{label} repair",
         )
     try:
-        return list(parse_tool_reply(reply or "", _UnanswerableReply).questions), []
+        return list(parse_tool_reply(repaired or "", _UnanswerableReply).questions), []
     except ValueError as error2:
         return [], [("(unanswerable drafts)", f"invalid twice: {error2}")]
 
@@ -1350,6 +1407,7 @@ class GoldRun:
         existing: Sequence[GoldItem] = (),
         checkpoint: Checkpoint | None = None,
         progress: Progress | None = None,
+        guard: Guard | None = None,
     ) -> None:
         self.plan = plan
         self.cfg = plan.config
@@ -1360,7 +1418,9 @@ class GoldRun:
         self.retrieve = retrieve or LexicalRetriever(plan.corpus, self.cfg.unanswerable_check_k)
         self.existing = list(existing)
         self.progress = progress
-        self.runner = _Runner(generate, self.cfg, self._called)
+        self.runner = _Runner(generate, self.cfg, self._called, guard)
+        if guard is not None:
+            self.checkpoint.guard = guard
         self.labels = task_labels(plan)
         self.reserve = plan.pending(self.checkpoint).reserve
         self.interrupted: str | None = None
@@ -1429,10 +1489,14 @@ class GoldRun:
         checkpoint, key = self.checkpoint, task.key
         if key not in checkpoint.drafts:
             self._current = ("task", key)
-            drafted = _draft_unanswerable(task, self.runner, self.labels[key])
-            if drafted is None:  # the call failed: drafted again on resume
-                return
-            drafts, dropped = drafted
+            reply = checkpoint.draft_replies.get(key)
+            if reply is None:
+                reply = self.runner.call(task.prompt, self.labels[key])
+                if reply is None:  # the call failed: drafted again on resume
+                    return
+                # saved before a repair can be interrupted: never paid for twice
+                checkpoint.record_draft_reply(key, reply)
+            drafts, dropped = _draft_unanswerable(task, self.runner, self.labels[key], reply)
             kept, dupes = _dedup(
                 drafts,  # type: ignore[arg-type]
                 (i.question for i in self.existing),
@@ -1549,6 +1613,109 @@ def generate_gold(
     )
     run.collect()
     return run.finish(existing)
+
+
+# ------------------------------------------------------------------- recheck
+#: reviewer-note fragments of unanswerable drafts whose whole-corpus check never happened
+UNCHECKED_NOTES = (
+    "could not be checked",
+    "so it was not checked",
+    KEYWORD_ONLY,
+)
+CHECKED_CLEAN = "Checked: not found in the documents."
+
+
+def needs_recheck(item: GoldItem) -> bool:
+    """A draft unanswerable item whose note says it was never checked against the index."""
+    note = (item.reviewer_note or "").lower()
+    return (
+        item.category == "unanswerable"
+        and item.status == "draft"
+        and any(fragment.lower() in note for fragment in UNCHECKED_NOTES)
+    )
+
+
+@dataclass
+class RecheckOutcome:
+    """What ``kb gold recheck`` did."""
+
+    candidates: int
+    clean: int = 0
+    flagged: int = 0
+    unchecked: int = 0  # checked again but still could not be checked
+    changed: int = 0  # edited or reviewed meanwhile: left alone
+    calls: int = 0
+    errors: list[str] = field(default_factory=list)
+    stopped: str | None = None
+
+    @property
+    def done(self) -> int:
+        return self.clean + self.flagged + self.unchecked + self.changed
+
+    @property
+    def remaining(self) -> int:
+        return self.candidates - self.done
+
+
+def recheck_unanswerable(
+    items: Sequence[GoldItem],
+    generate: Generate,
+    retrieve: RetrieveFn,
+    cfg: GoldConfig,
+    save: Callable[[GoldItem, str], bool],
+    *,
+    progress: Progress | None = None,
+    guard: Guard | None = None,
+) -> RecheckOutcome:
+    """Check each item against the whole corpus again and ``save`` its new reviewer note.
+
+    The note becomes :data:`CHECKED_CLEAN`, or ``FLAGGED: retrieval found it
+    (partly) answered: ...`` as generation writes it. ``save(item, note)``
+    stores one item (False: it changed meanwhile and was left alone); it runs
+    after each check, so an interrupted recheck loses nothing. The meter's cap
+    stops the run (``outcome.stopped``); ``KeyboardInterrupt`` passes through
+    after the item in hand is saved.
+    """
+    guard = guard or Guard()
+    outcome = RecheckOutcome(candidates=len(items))
+    runner = _Runner(generate, cfg, guard=guard)
+    if progress is not None:
+        progress.start()
+    try:
+        for index, item in enumerate(items, 1):
+            before = runner.calls
+            note = _check_unanswerable(
+                item.question,
+                retrieve,
+                runner,
+                cfg.unanswerable_check_k,
+                label=f"unanswerable recheck {index}/{len(items)}",
+            )
+            new_note = CHECKED_CLEAN if note is None else f"FLAGGED: {note}"
+            with guard.shield():
+                saved = save(item, new_note)
+            if not saved:
+                outcome.changed += 1
+            elif note is None:
+                outcome.clean += 1
+            elif note.startswith(("could not be checked", "no keyword match")):
+                outcome.unchecked += 1
+            else:
+                outcome.flagged += 1
+            if progress is not None and runner.calls > before:
+                progress.tick(
+                    f"unanswerable recheck {index}/{len(items)}",
+                    items=outcome.done,
+                    remaining=len(items) - index,
+                    detail=f"{outcome.clean} clean, {outcome.flagged} flagged as answered",
+                )
+            guard.settle()  # saved: a deferred stop happens here
+    except _Stop:
+        outcome.stopped = runner.stopped
+    finally:
+        outcome.calls = runner.calls
+        outcome.errors = runner.errors
+    return outcome
 
 
 # ------------------------------------------------------------ edited evidence
