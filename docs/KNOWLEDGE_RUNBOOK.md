@@ -63,7 +63,12 @@ parsers.
 ```bash
 git fetch && git checkout knowledge && git pull
 uv sync --all-groups
+(cd web && npm ci && npm run build)
 ```
+
+The last line builds the web page that `kb serve` shows (it needs Node 22 or
+newer: `node -v`; on a Mac, `brew install node`). Re-run it after any pull that
+changes `web/`. Without it, <http://localhost:8910> only explains how to build it.
 
 `.env` needs `OPENAI_API_KEY` and `KB_PASSCODE` (the household passcode for
 the web page: letters, digits, `-` and `_` only).

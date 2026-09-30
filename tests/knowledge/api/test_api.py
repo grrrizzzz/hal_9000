@@ -750,3 +750,17 @@ def test_the_services_wire_the_regression_retention_and_budget(tmp_path, module_
         assert kept.ingest.regression is mine  # a caller's own hook is left alone
     finally:
         kept.close()
+
+
+def test_an_unbuilt_ui_explains_how_to_build_it(api: Api, tmp_path):
+    """Without web/dist, / says how to build the page instead of a bare JSON 404."""
+    missing = tmp_path / "web" / "dist"
+    client = client_for(create_app(api.services, web_dist=missing))
+    reply = client.get("/")
+    assert reply.status_code == 503
+    assert reply.headers["content-type"].startswith("text/html")
+    assert "npm ci &amp;&amp; npm run build" in reply.text
+    assert str(missing) in reply.text
+    # the API is unaffected, and other paths are still plain 404s
+    assert client.get("/health").status_code == 200
+    assert client.get("/library").status_code == 404

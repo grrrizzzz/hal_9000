@@ -102,6 +102,15 @@ def run(args: argparse.Namespace) -> int:
     port = args.port or services.settings.port
     mode = " (fake mode: offline fakes, synthetic library)" if args.fake else ""
     print(f"House knowledge base on http://{args.host}:{port}{mode}", flush=True)
+    from hal9000.knowledge.api.app import WEB_DIST
+
+    if not (WEB_DIST / "index.html").is_file():
+        print(
+            f"Note: the web page isn't built ({WEB_DIST} is missing), so / only explains how "
+            "to build it. Run: cd web && npm ci && npm run build",
+            file=sys.stderr,
+            flush=True,
+        )
     if args.fake and services.settings.passcode == FAKE_PASSCODE:
         print(f"Passcode: {FAKE_PASSCODE} (set KB_PASSCODE to change it)", flush=True)
     # uvicorn re-raises SIGTERM after a graceful shutdown; with Python's default

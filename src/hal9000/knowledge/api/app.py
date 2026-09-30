@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import html
 import logging
 import sqlite3
 import threading
@@ -982,7 +983,38 @@ def create_app(services: Any | None = None, *, web_dist: Path | None | bool = No
     dist = WEB_DIST if web_dist is None else web_dist
     if services is not None and isinstance(dist, Path) and (dist / "index.html").is_file():
         _static(app, dist)
+    elif services is not None and isinstance(dist, Path):
+        _ui_not_built(app, dist)
     return app
+
+
+#: The page ``/`` shows when the web UI has not been built in this checkout.
+UI_NOT_BUILT_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>House knowledge base: web page not built</title>
+<style>body{{font:16px/1.5 system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem}}
+pre{{background:#f4f4f5;padding:.75rem 1rem;border-radius:6px;overflow-x:auto}}
+@media (prefers-color-scheme:dark){{body{{background:#18181b;color:#e4e4e7}}
+pre{{background:#27272a}}}}</style>
+</head><body><h1>The web page hasn't been built yet</h1>
+<p>The service is running (the API answers), but <code>{dist}</code> doesn't exist.
+Build the page once, then restart <code>kb serve</code>:</p>
+<pre>cd web &amp;&amp; npm ci &amp;&amp; npm run build &amp;&amp; cd ..
+uv run hal9000 kb serve</pre>
+<p>It needs Node 22 or newer (<code>node -v</code>; on a Mac, <code>brew install node</code>).
+Rebuild after pulling changes to <code>web/</code>.</p></body></html>
+"""
+
+
+def _ui_not_built(app: FastAPI, dist: Path) -> None:
+    """Explain at ``/`` how to build the UI, instead of a bare ``{"detail":"Not Found"}``."""
+    from fastapi.responses import HTMLResponse
+
+    page = UI_NOT_BUILT_HTML.format(dist=html.escape(str(dist)))
+
+    @app.get("/", include_in_schema=False)
+    def ui_not_built() -> Response:
+        return HTMLResponse(page, status_code=503, headers={"Cache-Control": "no-cache"})
 
 
 def _document_chat_stream(app: FastAPI) -> None:
