@@ -11,7 +11,7 @@ and per-question scores only.
 
 | § | Gate | Where | Time | Cost |
 |---|---|---|---|---|
-| 2 | G-K1: ingest, house test, question set, review | Mac | about 1 hour, can be split | about $1 |
+| 2 | G-K1: ingest, house test, question set, review | Mac | about 1 hour of your time, plus 60–90 min unattended generation | about $2.50 |
 | 3 | G-K1b: sweep S1a–S4, judge labels, S5, export | Mac | 15 min + unattended runs | capped at $10 in all |
 | 4 | Pi deployment | Pi (and the Mac for the copy) | about 1 hour, mostly building | a cent for the smoke test |
 | 5 | S6: latency on the Pi | Pi | about 30 min | a few cents |
@@ -118,18 +118,58 @@ uv run pytest -m house --no-cov
 Pass: every `house` test passes (89 pages, the eleven sub-documents, no header
 noise in chunks).
 
-### 2.6 Generate the draft question set (about $1)
+### 2.6 Generate the draft question set (about $2.50, 60–90 minutes unattended)
 
 ```bash
 uv run hal9000 kb gold generate --yes
 ```
 
 It prints the plan (documents, pages, generation tasks, unanswerable drafts
-to check) and the estimate, then generates. Pass: a summary of about 120
-drafts by category, with any quota shortfall listed. Unanswerable drafts are
-checked against the profile §2.4 activated; don't add
-`--allow-keyword-check`. If it stops for want of an index, §2.4's `kb check`
-line didn't show the active profile: send the orchestrator both outputs.
+to check), then the estimate and its basis, for example:
+
+```
+Estimate: about 75 calls to openai/gpt-5 (35 generation + 4 repair reserve + 36 unanswerable checks): ... estimated $2.58, taking about 1 h 28 min (cap --max-cost $3.00).
+Basis: ~3,190 completion tokens per call incl. reasoning, the mean of 38 earlier gold-generation calls to openai/gpt-5; ~70 s per call from their ledger timestamps.
+```
+
+GPT-5 thinks before it answers, and its reasoning tokens are billed as
+output: a call takes about 70 s and costs about 3.4 cents, so the whole run
+takes 60–90 minutes and costs about $2.50. The estimate counts that (from
+the cost ledger once there are earlier calls, else a default allowance), the
+unanswerable checks and a reserve for repair calls. If the estimate exceeds
+`--max-cost` (default $3.00) it refuses and says which `--max-cost` to pass.
+
+While it runs, one progress line per LLM call appears, e.g.
+`[12/75] window 9/29 (Home inspection report, pp. 20–22): 34 items so far; $0.43 spent; ~70 s/call; ~74 min left`.
+Nothing is lost if it stops: each finished call is saved to a checkpoint
+under `data/knowledge/eval/gold/`. Ctrl-C (or a stop at the `--max-cost` cap)
+stores the drafts collected so far and prints the exact command to continue,
+e.g. `uv run hal9000 kb gold generate --resume gold-20261001-181502-3fa0 --max-cost 1.50`.
+`--resume` on its own continues the latest unfinished run; finished calls are
+never paid for again and nothing is stored twice.
+
+Pass: a summary of about 120 drafts by category, with any quota shortfall
+listed. Unanswerable drafts are checked against the profile §2.4 activated;
+don't add `--allow-keyword-check`. If it stops for want of an index, §2.4's
+`kb check` line didn't show the active profile: send the orchestrator both
+outputs.
+
+**Topping up a shortfall.** If a run stopped at the cap during the
+unanswerable checks (or the summary lists a SHORTFALL), fill just the missing
+items:
+
+```bash
+uv run hal9000 kb gold generate --only unanswerable --yes
+```
+
+It prints the shortfall it is filling (the quota minus what is stored and
+not rejected), drafts about 50% extra to survive flagging and de-duplication,
+checks each, and stores the new drafts with dev/test splits consistent with
+the stored set. Each draft costs one check call (about 70 s and 3.5 cents):
+a dozen missing unanswerables take about 20 minutes and $0.70.
+`--only` takes several categories (`--only list,cross_document`) and
+`--count N` asks for N items of each instead of the shortfall. It works on a
+set generated before checkpoints existed.
 
 ### 2.7 Review (about 45 minutes, can be split)
 

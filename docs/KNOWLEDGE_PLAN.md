@@ -238,7 +238,7 @@ An **index profile** is one full combination: parser, chunker, size, overlap, he
 Run once during setup on the Mac, on the inspection bundle, then re-run in quick mode as the library grows.
 
 ### 8.1 The question set (gold set)
-**Generation** (powerful tier, once, estimated at about $1 and shown first). Three generators feed the draft set:
+**Generation** (powerful tier, once, estimated at about $2.50 including reasoning tokens and shown first; resumable from a checkpoint). Three generators feed the draft set:
 - **Per sub-document.** Windows of pages from each sub-document produce factoid, money, date and list questions.
 - **Cross-document.** Linked sets of sub-documents produce cross-document questions. The links are proposed from shared vendors, dates and reference numbers, for example pest report → completion notice → repair invoice.
 - **Unanswerable.** Plausible house questions are drafted without looking at the documents. Each is then checked against the **whole** bundle: retrieval at a large k, plus a powerful-tier "is this answered anywhere?" call. Any the bundle might answer are flagged for Mike instead of being assumed unanswerable.
@@ -533,7 +533,7 @@ hal9000 kb check                         # OpenAI embed + chat reachable, sqlite
 hal9000 kb ingest PATH... [--collection NAME] [--no-llm]
 hal9000 kb ask "question" [--trace]      # one question from the terminal, with sources
 hal9000 kb serve [--host 0.0.0.0 --port 8910] [--fake]   # --fake: fake LLM and embedder, fixture corpus (UI e2e tests)
-hal9000 kb gold generate [--max-cost 2.00] [--yes]
+hal9000 kb gold generate [--max-cost 3.00] [--resume [ID]] [--only CATEGORY[,CATEGORY] [--count N]] [--yes]
 hal9000 kb gold export|import FILE       # jsonl, stays under data/
 hal9000 kb eval sweep --stages S1a,S1b,S2,S3,S4 [--max-cost 10] [--resume RUN] [--yes]
 hal9000 kb eval judge-prep RUN [--yes]   # answers for 20 dev items, for Mike's calibration labels

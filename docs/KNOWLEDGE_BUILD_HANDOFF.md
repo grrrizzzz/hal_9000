@@ -431,7 +431,7 @@ The critical path is KWP0 → G-K0b → 3 → 4 → 5 → 6 → 7 e2e → G-K1 �
 |---|---|---|---|---|
 | **G-K0** | Now | Approves the plan; confirms or changes the assumptions (plan §2); sets `KB_PASSCODE`; adds the `KB_DENYLIST` GitHub secret | 10 min | Pre-flight, wave 0 |
 | **G-K0b** | After KWP0 | Runs `uv run python scripts/kb_sqlite_vec_check.py` on the Mac. On the Pi, from a checkout of the branch, runs `docker run --rm -v $PWD:/w -w /w python:3.12-slim sh -c "pip install -q sqlite-vec==<pin> numpy && python scripts/kb_sqlite_vec_check.py"` | 5 min | KWP3 |
-| **G-K1** | After wave 6 | Follows runbook G-K1 on the Mac: ingest, `pytest -m house`, generate the question set (about $1), review about 120 items in the UI | 45 min, can be split | S1a–S4 |
+| **G-K1** | After wave 6 | Follows runbook G-K1 on the Mac: ingest, `pytest -m house`, generate the question set (about $2.50, 60–90 min unattended), review about 120 items in the UI | 45 min, can be split | S1a–S4 |
 | **G-K1b** | After S1a–S4 | Labels 20 generated answers on the Judge calibration tab; runs S5 (estimate shown first; whole sweep capped at $10); shares `eval export` | 15 min + unattended run | Analysis, S6 |
 | **G-K2** | After S6 on the Pi | Reads the evaluation report and chooses the configuration (the recommended one or an alternative) | 15 min | KWP12 |
 | **G-K3** | After KWP12 | A week of real use, then the acceptance checklist | Ongoing | Done |
