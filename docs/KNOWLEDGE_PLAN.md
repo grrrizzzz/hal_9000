@@ -534,6 +534,7 @@ hal9000 kb ingest PATH... [--collection NAME] [--no-llm]
 hal9000 kb ask "question" [--trace]      # one question from the terminal, with sources
 hal9000 kb serve [--host 0.0.0.0 --port 8910] [--fake]   # --fake: fake LLM and embedder, fixture corpus (UI e2e tests)
 hal9000 kb gold generate [--max-cost 3.00] [--resume [ID]] [--only CATEGORY[,CATEGORY] [--count N]] [--yes]
+hal9000 kb gold recheck [--max-cost 3.00] [--yes]   # unanswerable drafts that could not be checked
 hal9000 kb gold export|import FILE       # jsonl, stays under data/
 hal9000 kb eval sweep --stages S1a,S1b,S2,S3,S4 [--max-cost 10] [--resume RUN] [--yes]
 hal9000 kb eval judge-prep RUN [--yes]   # answers for 20 dev items, for Mike's calibration labels

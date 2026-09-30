@@ -142,11 +142,14 @@ unanswerable checks and a reserve for repair calls. If the estimate exceeds
 While it runs, one progress line per LLM call appears, e.g.
 `[12/75] window 9/29 (Home inspection report, pp. 20–22): 34 items so far; $0.43 spent; ~70 s/call; ~74 min left`.
 Nothing is lost if it stops: each finished call is saved to a checkpoint
-under `data/knowledge/eval/gold/`. Ctrl-C (or a stop at the `--max-cost` cap)
-stores the drafts collected so far and prints the exact command to continue,
-e.g. `uv run hal9000 kb gold generate --resume gold-20261001-181502-3fa0 --max-cost 1.50`.
-`--resume` on its own continues the latest unfinished run; finished calls are
-never paid for again and nothing is stored twice.
+under `data/knowledge/eval/gold/`. Ctrl-C lets the call in flight finish
+(it is paid for either way; press Ctrl-C again to abandon it), then stores the
+drafts collected so far and prints the exact command to continue, e.g.
+`uv run hal9000 kb gold generate --resume gold-20261001-181502-3fa0 --max-cost 1.50`.
+A stop at the `--max-cost` cap (or `KB_EVAL_CAP_USD`) does the same and exits
+with code 4; Ctrl-C exits 130, SIGTERM 143. `--resume` on its own continues
+the latest unfinished run; finished calls are never paid for again, nothing
+is stored twice, and a checkpoint another terminal is running is refused.
 
 Pass: a summary of about 120 drafts by category, with any quota shortfall
 listed. Unanswerable drafts are checked against the profile §2.4 activated;
@@ -154,9 +157,36 @@ don't add `--allow-keyword-check`. If it stops for want of an index, §2.4's
 `kb check` line didn't show the active profile: send the orchestrator both
 outputs.
 
-**Topping up a shortfall.** If a run stopped at the cap during the
-unanswerable checks (or the summary lists a SHORTFALL), fill just the missing
-items:
+**After a run that stopped at the cap in the unanswerable checks** (the
+first run, before checkpoints existed, did: it stored 24 unanswerable drafts,
+16 of them "FLAGGED: could not be checked (retrieval failed:
+BudgetExceeded)"), do these three steps in order:
+
+1. Check the drafts that were never checked:
+
+   ```bash
+   uv run hal9000 kb gold recheck --yes
+   ```
+
+   It lists how many unreviewed unanswerable drafts say they could not be
+   checked, prints the estimate, then checks each against the whole library
+   with the real index: about 16 checks, about $0.55 and 20 minutes at the
+   observed rates. Each result is saved as it comes: the note becomes
+   "Checked: not found in the documents." or
+   "FLAGGED: retrieval found it answered: …" (or "partly answered"). Ctrl-C
+   loses nothing; run it again to finish (exit code 4 if it stopped at the
+   cap). Drafts you have already approved, rejected or edited are never
+   touched.
+2. Review (§2.7), rejecting every unanswerable draft flagged as answered.
+3. Refill exactly what you rejected:
+
+   ```bash
+   uv run hal9000 kb gold generate --only unanswerable --yes
+   ```
+
+**Topping up a shortfall.** `--only` fills whatever a category is short of
+its quota (for example after the review, or when the summary lists a
+SHORTFALL):
 
 ```bash
 uv run hal9000 kb gold generate --only unanswerable --yes
