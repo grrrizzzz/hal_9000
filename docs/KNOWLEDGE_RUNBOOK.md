@@ -44,7 +44,7 @@ commands then use `$SWEEP`, `$NAME` and so on as they are.
 | Variable | Where | What | Set it like |
 |---|---|---|---|
 | `PI` | Mac | the Pi's SSH login | `PI=mike@192.168.1.50` |
-| `SWEEP` | Mac and Pi | the sweep ID `kb eval sweep` printed (§3.1) | `SWEEP=20261002T0915-a1b2` |
+| `SWEEP` | Mac and Pi | the sweep ID `kb eval sweep` printed (§3.1); lost it? `ls data/knowledge/eval/runs \| grep -o '^sweep-[^.]*' \| sort -u` lists every sweep | `SWEEP=sweep-20261002T091500-a1b2` |
 | `SHA` | Pi | the inspection bundle's SHA-256 (§5) | `SHA=0f3c...` (all 64 characters) |
 | `PROFILE` | Pi | a profile name, from the orchestrator (§4.7) | `PROFILE=pdfium.structure-768.hdr.te3s-1536` |
 | `NAME` | Pi | the configuration you choose at G-K2 (§6) | `NAME=s4-07` |
