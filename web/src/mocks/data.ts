@@ -323,7 +323,13 @@ export function seedJudgeLabels(): JudgeLabel[] {
       answer: "The June 2023 inspection says the furnace was installed in 2009 and is near the end of its expected life [S1].",
       citations: [furnace],
       human: null,
-      judge: { correctness: "correct", faithful: true, citations_correct: true, abstention_correct: null },
+      judge: { correctness: "correct", faithful: true, citations_correct: true, abstention_correct: true },
+      judge_reasons: {
+        correctness: "Gives 2009, the year in the reference answer.",
+        faithful: "S1 says the furnace was installed in 2009 and is near the end of its life.",
+        citations_correct: "The one claim cites S1, which supports it.",
+        abstention_correct: "The documents answer this, and it answered.",
+      },
     },
     {
       id: 2,
@@ -333,7 +339,8 @@ export function seedJudgeLabels(): JudgeLabel[] {
       answer: "Invoice 1001 from Brightline Pest Co. totals $1,234.00 [S1].",
       citations: [invoice],
       human: null,
-      judge: { correctness: "correct", faithful: true, citations_correct: true, abstention_correct: null },
+      judge: { correctness: "correct", faithful: true, citations_correct: true, abstention_correct: true },
+      judge_reasons: null,
     },
     {
       id: 3,
@@ -342,8 +349,14 @@ export function seedJudgeLabels(): JudgeLabel[] {
       question: "Is anything wrong with the gas line near the kitchen?",
       answer: "The inspection found no issues with the gas line [S1].",
       citations: [gas],
-      human: { correctness: "wrong", faithful: false, citations_correct: false, abstention_correct: null },
-      judge: { correctness: "wrong", faithful: false, citations_correct: true, abstention_correct: null },
+      human: { correctness: "wrong", faithful: false, citations_correct: false, abstention_correct: true },
+      judge: { correctness: "wrong", faithful: false, citations_correct: true, abstention_correct: true },
+      judge_reasons: {
+        correctness: "Says there are no issues; the reference names a gas connector routed through the cabinet wall.",
+        faithful: "S1 recommends an HVAC evaluation, so 'no issues' contradicts it.",
+        citations_correct: "The one sentence cites S1, the source about the gas line.",
+        abstention_correct: "The documents answer this, and it answered.",
+      },
     },
     {
       id: 4,

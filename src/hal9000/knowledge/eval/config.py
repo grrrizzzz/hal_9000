@@ -150,7 +150,7 @@ def _default_reasoning() -> dict[str, int]:
 class JudgeEstimate(_Model):
     answer_prompt_tokens: int = 3000
     answer_output_tokens: int = 350
-    judge_output_tokens: int = 150
+    judge_output_tokens: int = 300
     #: reasoning tokens per call by tier, billed as output (reasoning models)
     reasoning_tokens: dict[Literal["fast", "powerful"], int] = Field(
         default_factory=_default_reasoning

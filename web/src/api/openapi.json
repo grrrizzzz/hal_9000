@@ -3837,6 +3837,16 @@
                 "type": "null"
               }
             ]
+          },
+          "judge_reasons": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/JudgeReasons"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "additionalProperties": false,
@@ -3861,6 +3871,34 @@
           "human"
         ],
         "title": "JudgeLabelUpdate"
+      },
+      "JudgeReasons": {
+        "properties": {
+          "correctness": {
+            "type": "string",
+            "title": "Correctness",
+            "default": ""
+          },
+          "faithful": {
+            "type": "string",
+            "title": "Faithful",
+            "default": ""
+          },
+          "citations_correct": {
+            "type": "string",
+            "title": "Citations Correct",
+            "default": ""
+          },
+          "abstention_correct": {
+            "type": "string",
+            "title": "Abstention Correct",
+            "default": ""
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "JudgeReasons",
+        "description": "The judge's one-sentence reason for each rubric label (shown once Mike has labelled)."
       },
       "MessageOut": {
         "properties": {

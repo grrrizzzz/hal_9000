@@ -14,19 +14,23 @@ from hal9000.knowledge.eval.judge import (
     RUBRIC_VERSION,
     JudgeError,
     JudgeNotCalibrated,
+    SourcesUnavailable,
     agreement,
     choose_calibration_items,
     estimate_judge_prep,
     judge_answer,
     judge_prep,
     judge_prompt,
+    rejudge,
     require_agreement,
 )
 from hal9000.knowledge.eval.store import (
     insert_gold,
+    label_sources,
     list_judge_labels,
     set_gold_status,
     set_human_labels,
+    set_judge_labels,
 )
 from hal9000.knowledge.eval.types import AnswerOutput, Source
 from tests.fakes import FakeLLM, tool_call
@@ -90,14 +94,59 @@ def test_the_rubric_is_pinned_and_the_prompt_carries_everything():
 
 def test_judge_answer_parses_retries_once_then_fails():
     llm = FakeLLM([verdict(correctness="partial", faithful=False)])
-    labels = judge_answer(llm, "powerful", item(5), ANSWER)
-    assert labels.correctness == "partial" and labels.faithful is False
+    judged = judge_answer(llm, "powerful", item(5), ANSWER)
+    assert judged.labels.correctness == "partial" and judged.labels.faithful is False
+    assert judged.reasons is None  # a reply without reasons still grades
     assert llm.tiers == ["powerful"]
     llm = FakeLLM([verdict(correctness="great"), verdict()])
-    assert judge_answer(llm, "powerful", item(5), ANSWER) == GOOD
+    assert judge_answer(llm, "powerful", item(5), ANSWER).labels == GOOD
     assert "That reply was invalid" in llm.calls[1].messages[-1]["content"]
     with pytest.raises(JudgeError):
         judge_answer(FakeLLM(["nope", "{}"]), "powerful", item(5), ANSWER)
+
+
+REASONS = {
+    "correctness": "States $5.00, the reference answer.",
+    "faithful": "S1 says Total: $5.00.",
+    "citations_correct": "The one claim cites S1, which supports it.",
+    "abstention_correct": "Answerable, and it answered.",
+}
+
+
+def test_the_judge_gives_a_reason_for_each_label_before_the_labels():
+    schema = judge_prompt(item(5), ANSWER).tools[0]["function"]["parameters"]
+    assert schema["required"][0] == "reasons" and next(iter(schema["properties"])) == "reasons"
+    reasons = schema["properties"]["reasons"]
+    assert reasons["additionalProperties"] is False
+    assert reasons["required"] == [
+        "correctness",
+        "faithful",
+        "citations_correct",
+        "abstention_correct",
+    ]
+    assert "reason in one short sentence" in RUBRIC
+    judged = judge_answer(FakeLLM([verdict(reasons=REASONS)]), "powerful", item(5), ANSWER)
+    assert judged.labels == GOOD and judged.reasons.faithful == "S1 says Total: $5.00."
+    with pytest.raises(JudgeError):  # reasons must cover every label, and nothing else
+        judge_answer(
+            FakeLLM([verdict(reasons={"faithful": "x"}), verdict(reasons={**REASONS, "x": "y"})]),
+            "powerful",
+            item(5),
+            ANSWER,
+        )
+
+
+def test_the_judge_sees_each_source_header_the_answer_saw():
+    """A date or vendor taken from a source's header line is supported (calibration 2026-10-01:
+    the judge saw only titles and marked such answers unfaithful)."""
+    meta = "Invoice 5 · invoice · Acme Plumbing · dated March 3, 2024 · page 1"
+    answer = AnswerOutput(
+        "Acme Plumbing billed $5.00 on March 3, 2024 [S1].",
+        sources=[Source("S1", "Total: $5.00", "Invoice 5", meta=meta)],
+    )
+    body = judge_prompt(item(5), answer).messages[1]["content"]
+    assert f"[S1] {meta}\nTotal: $5.00" in body
+    assert "header line" in RUBRIC and "supported by it" in RUBRIC
 
 
 def test_calibration_items_spread_over_categories():
@@ -138,6 +187,74 @@ def test_judge_prep_answers_dev_items_and_stores_the_judges_labels(kb_db):
         kb_db, answer, FakeLLM([verdict()] * 2), eval_run_id="s4-1", config=JudgeConfig(n_items=5)
     )
     assert again.skipped == 3 and len(again.label_ids) == 2
+
+
+def test_judge_prep_keeps_the_reasons_and_the_sources_the_answer_was_given(kb_db):
+    _seed(kb_db)
+    meta = "Invoice 1 · invoice · dated March 3, 2024 · page 1"
+    sources = [Source("S1", "Total: $1.00", "Invoice 1", meta=meta)]
+    judge_prep(
+        kb_db,
+        lambda q: AnswerOutput("It was $1.00 [S1].", sources=sources),
+        FakeLLM([verdict(reasons=REASONS)]),
+        eval_run_id="r",
+        config=JudgeConfig(n_items=1),
+    )
+    (label,) = list_judge_labels(kb_db, eval_run_id="r")
+    assert (
+        label.judge == GOOD
+        and label.judge_reasons.citations_correct == REASONS["citations_correct"]
+    )
+    assert label_sources(kb_db, label.id) == sources
+    # replacing the judge's labels without reasons clears the old reasons
+    set_judge_labels(kb_db, label.id, GOOD)
+    assert list_judge_labels(kb_db, eval_run_id="r")[0].judge_reasons is None
+
+
+def test_rejudge_replaces_the_judges_labels_and_keeps_mikes(kb_db):
+    _seed(kb_db)
+    sources = [Source("S1", "Total: $1.00", "Invoice 1", meta="Invoice 1 · invoice · page 1")]
+    judge_prep(
+        kb_db,
+        lambda q: AnswerOutput("It was $1.00 [S1].", sources=sources),
+        FakeLLM([verdict(faithful=False)] * 3),
+        eval_run_id="r",
+        config=JudgeConfig(n_items=3),
+    )
+    first, second, third = list_judge_labels(kb_db, eval_run_id="r")
+    set_human_labels(kb_db, first.id, GOOD)
+    with kb_db:  # two answers stored before sources were kept
+        kb_db.execute(
+            "UPDATE judge_labels SET sources = '[]' WHERE id IN (?, ?)", (second.id, third.id)
+        )
+    rebuilt = [Source("S1", "Total: $2.00", "Invoice 2", meta="rebuilt header")]
+    asked = []
+
+    def rebuild(question, cited):
+        asked.append(question)
+        if question == third.question:
+            raise SourcesUnavailable("retrieval no longer returns S1")
+        return rebuilt
+
+    llm = FakeLLM([verdict(reasons=REASONS)] * 2)
+    result = rejudge(kb_db, llm, eval_run_id="r", rebuild_sources=rebuild)
+    assert result.label_ids == [first.id, second.id] and result.skipped == 1
+    assert "retrieval no longer returns S1" in result.errors[0]
+    assert asked == [second.question, third.question]  # stored sources are used as they are
+    assert "[S1] Invoice 1 · invoice · page 1" in llm.calls[0].messages[1]["content"]
+    assert "rebuilt header" in llm.calls[1].messages[1]["content"]
+    after = {label.id: label for label in list_judge_labels(kb_db, eval_run_id="r")}
+    assert after[first.id].human == GOOD and after[first.id].judge == GOOD
+    assert after[first.id].judge_reasons.faithful == REASONS["faithful"]
+    assert after[second.id].answer == second.answer  # the answer itself is never regenerated
+    assert label_sources(kb_db, second.id) == rebuilt
+    assert after[third.id].judge.faithful is False and after[third.id].judge_reasons is None
+
+    def capped(prompt, tier):
+        raise BudgetExceeded("cap")
+
+    stopped = rejudge(kb_db, capped, eval_run_id="r", rebuild_sources=rebuild)
+    assert stopped.stopped == "cap" and not stopped.label_ids
 
 
 def test_judge_prep_stops_at_the_cap_and_records_errors(kb_db):
@@ -239,5 +356,5 @@ def test_judge_prep_estimate(monkeypatch):
     monkeypatch.setenv("AGENT_MODEL_POWERFUL", "openai/gpt-5")
     estimate = estimate_judge_prep(20, JudgeConfig(), "fast", "powerful")
     assert estimate.calls == 40
-    assert 0.01 < estimate.usd < 0.5  # plan §8.4: about $0.10
+    assert 0.01 < estimate.usd < 0.6  # plan §8.4: about $0.10 metered; the estimate is cautious
     assert "gpt-5-mini" in estimate.model and "openai/gpt-5 (judge)" in estimate.model

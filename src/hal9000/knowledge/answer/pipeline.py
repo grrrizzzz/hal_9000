@@ -314,6 +314,14 @@ class AnswerPipeline:
             profile=profile,
         )
 
+    def sources(self, conn: sqlite3.Connection, question: str) -> list[NumberedSource]:
+        """The numbered sources :meth:`ask` gives the model for ``question`` (no history, no
+        generation): what an earlier answer was given, rebuilt for judging it again."""
+        profile = self._profile(conn)
+        config = RetrievalConfig.from_settings(self.knowledge_file or self.settings)
+        result = self._retriever(conn, profile, config).retrieve(question, (), None, config)
+        return number_sources(conn, result.selected)
+
     # ---------------------------------------------------------------- ask
     def ask(
         self,

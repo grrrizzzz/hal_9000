@@ -131,6 +131,37 @@ def test_the_eval_binding_answers_with_full_sources_and_no_traces(settings, conn
     assert answer("Is there a swimming pool heater?").abstained
 
 
+def test_the_eval_binding_carries_source_headers_and_rebuilds_its_sources(
+    settings, conn, meter_factory
+):
+    """The judge sees each source's header line, and ``pipeline.sources`` rebuilds exactly
+    the numbered sources an answer was given, without generating (judge-prep --rejudge)."""
+    import dataclasses
+
+    from hal9000.knowledge.eval.judge import SourcesUnavailable, source_rebuilder
+
+    base = fake_deps(delay_s=0)
+    streamed = []
+
+    def stream(*args, **kw):
+        streamed.append(1)
+        return base.stream_fn(*args, **kw)
+
+    deps = dataclasses.replace(base, stream_fn=stream)
+    answer = binding(conn, settings, meter=meter_factory(), run=None, deps=deps)
+    question = "How much was the termite repair?"
+    output = answer(question)
+    assert output.sources[0].meta.startswith("Invoice 1001 · ")
+    assert len(streamed) == 1
+    rebuilt = source_rebuilder(conn, answer.pipeline)(
+        question, {c.marker: c.chunk_id for c in output.citations}
+    )
+    assert rebuilt == list(output.sources)
+    assert len(streamed) == 1  # retrieval only: nothing generated
+    with pytest.raises(SourcesUnavailable, match="S1"):
+        source_rebuilder(conn, answer.pipeline)(question, {"S1": -1})
+
+
 def test_the_eval_binding_meters_as_knowledge_eval(settings, conn, meter_factory):
     meter = meter_factory()
     answer = binding(conn, settings, meter=meter, run=None)

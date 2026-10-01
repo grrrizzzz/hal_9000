@@ -64,7 +64,8 @@ def binding(
         return AnswerOutput(
             text=result.text,
             sources=tuple(
-                Source(marker=s.marker, text=s.text, title=s.document.title) for s in kept
+                Source(marker=s.marker, text=s.text, title=s.document.title, meta=s.meta_line)
+                for s in kept
             ),
             abstained=result.outcome == "abstained",
             cost_usd=result.cost_usd,

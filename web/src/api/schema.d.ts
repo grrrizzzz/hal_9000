@@ -1272,10 +1272,37 @@ export interface components {
             citations?: components["schemas"]["Citation"][];
             human?: components["schemas"]["RubricLabels"] | null;
             judge?: components["schemas"]["RubricLabels"] | null;
+            judge_reasons?: components["schemas"]["JudgeReasons"] | null;
         };
         /** JudgeLabelUpdate */
         JudgeLabelUpdate: {
             human: components["schemas"]["RubricLabels"];
+        };
+        /**
+         * JudgeReasons
+         * @description The judge's one-sentence reason for each rubric label (shown once Mike has labelled).
+         */
+        JudgeReasons: {
+            /**
+             * Correctness
+             * @default
+             */
+            correctness: string;
+            /**
+             * Faithful
+             * @default
+             */
+            faithful: string;
+            /**
+             * Citations Correct
+             * @default
+             */
+            citations_correct: string;
+            /**
+             * Abstention Correct
+             * @default
+             */
+            abstention_correct: string;
         };
         /** MessageOut */
         MessageOut: {

@@ -49,7 +49,7 @@ judge:                      # plan §8.4.1
   estimate:
     answer_prompt_tokens: 3000
     answer_output_tokens: 350
-    judge_output_tokens: 150
+    judge_output_tokens: 300     # grades plus a one-sentence reason for each
     reasoning_tokens: {fast: 600, powerful: 1500}   # per call, billed as output
     metered_margin: 1.25        # S5 prefers judge-prep's metered cost per answer, times this
 

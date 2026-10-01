@@ -81,6 +81,9 @@ class Source:
     marker: str
     text: str
     title: str = ""
+    #: the header line the answer prompt showed above the text (title · type · vendor ·
+    #: date · pages): answers may state those facts, so the judge sees it too
+    meta: str = ""
 
 
 @dataclass(frozen=True)

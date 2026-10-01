@@ -167,6 +167,11 @@ def register(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "eval judge-prep",
     )
     judge.add_argument("run", metavar="RUN")
+    judge.add_argument(
+        "--rejudge",
+        action="store_true",
+        help="grade the existing answers again with the current rubric (keeps your labels)",
+    )
     _yes(judge)
     latency = _command(ev_cmds, "latency", "eval", "S6 latency on the Pi", "eval latency")
     latency.add_argument(

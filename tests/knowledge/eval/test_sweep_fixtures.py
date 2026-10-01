@@ -173,6 +173,12 @@ class FakeProvider:
             declined = "couldn't find" in answer.lower() or "not in" in answer.lower()
             return tool_call(
                 "record_judgement",
+                reasons={
+                    "correctness": "Matches the reference.",
+                    "faithful": "The cited source says so.",
+                    "citations_correct": "Each claim cites its source.",
+                    "abstention_correct": "Declined." if declined else "Answered.",
+                },
                 correctness=self.judge.get("correctness", "correct"),
                 faithful=True,
                 citations_correct=True,

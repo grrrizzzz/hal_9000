@@ -258,6 +258,29 @@ uv run hal9000 kb serve
 
 **Evaluation → Judge calibration**: label all 20. Then Ctrl-C.
 
+How to label (the judge grades by the same rules):
+
+- **Faithful** means supported by the sources the answer *cites*. An answer
+  that cites nothing is not faithful, even when the fact is right. A date,
+  vendor or title from a source's header line counts as supported.
+- **Citations correct** means every factual sentence carries an `[S#]` marker
+  and each marker's source supports it.
+- **Abstention correct**: Yes if it answered a question the documents answer,
+  or declined one they don't; No otherwise. Always Yes or No.
+
+Once you save an answer's labels, the judge's labels appear beside yours, each
+with its one-sentence reason. Where you disagree, check its reason against the
+sources and keep your own label if you're right. The **Judge agrees with you**
+figure is counted exactly as S5's gate counts it.
+
+**Re-judging** (under $0.50): after the judge's
+instructions change, grade the existing answers again. Your labels and the
+answers are kept; the judge's labels and reasons are replaced.
+
+```bash
+uv run hal9000 kb eval judge-prep "$SWEEP" --rejudge --yes
+```
+
 ### 3.4 S5 (unattended)
 
 ```bash

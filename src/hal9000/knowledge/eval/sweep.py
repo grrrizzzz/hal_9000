@@ -647,7 +647,8 @@ def config_answerer(
         output = AnswerOutput(
             text=result.text,
             sources=tuple(
-                Source(marker=s.marker, text=s.text, title=s.document.title) for s in kept
+                Source(marker=s.marker, text=s.text, title=s.document.title, meta=s.meta_line)
+                for s in kept
             ),
             abstained=result.outcome == "abstained",
             cost_usd=result.cost_usd,
@@ -655,6 +656,7 @@ def config_answerer(
         )
         return output, result
 
+    answer.pipeline = pipeline  # type: ignore[attr-defined]  (judge-prep --rejudge)
     return answer
 
 
@@ -1436,7 +1438,7 @@ class SweepRunner:
                         "abstained": output.abstained,
                         "cost_usd": output.cost_usd,
                         "sources": [
-                            {"marker": x.marker, "text": x.text, "title": x.title}
+                            {"marker": x.marker, "text": x.text, "title": x.title, "meta": x.meta}
                             for x in output.sources
                         ],
                     },
@@ -1450,8 +1452,10 @@ class SweepRunner:
                 cost_usd=stored["cost_usd"],
             )
             spent = self.meter.spent
+            reasons = None
             try:
-                labels = judge_answer(generate, self.settings.judge_tier, item, output)
+                judgement = judge_answer(generate, self.settings.judge_tier, item, output)
+                labels, reasons = judgement.labels, judgement.reasons
             except JudgeError as error:
                 log.warning("the judge failed on item %s: %s", item.id, error)
                 labels = None
@@ -1465,6 +1469,7 @@ class SweepRunner:
                     "faithful": labels.faithful if labels else None,
                     "citations_correct": labels.citations_correct if labels else None,
                     "abstention_correct": labels.abstention_correct if labels else None,
+                    "judge_reasons": reasons.model_dump() if reasons else None,
                 }
             )
             self._save_partial(run_id, "answers", record)

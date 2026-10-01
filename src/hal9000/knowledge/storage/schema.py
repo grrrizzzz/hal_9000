@@ -286,8 +286,22 @@ CREATE TABLE sessions (
 CREATE INDEX ix_sessions_expires ON sessions(expires_at);
 """
 
+# Judge reasons (2026-10-01): why the judge chose each rubric label, and the numbered
+# sources a calibration answer was given, so it can be judged again exactly.
+_V6 = """
+ALTER TABLE judge_labels ADD COLUMN judge_reasons TEXT;
+ALTER TABLE judge_labels ADD COLUMN sources TEXT NOT NULL DEFAULT '[]';
+"""
+
 #: (version, script). Append only.
-MIGRATIONS: tuple[tuple[int, str], ...] = ((1, _V1), (2, _V2), (3, _V3), (4, _V4), (5, _V5))
+MIGRATIONS: tuple[tuple[int, str], ...] = (
+    (1, _V1),
+    (2, _V2),
+    (3, _V3),
+    (4, _V4),
+    (5, _V5),
+    (6, _V6),
+)
 SCHEMA_VERSION = MIGRATIONS[-1][0]
 
 #: Every plan §12 table created by the migrations (the per-profile tables are separate,

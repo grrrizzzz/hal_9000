@@ -18,8 +18,10 @@ from hal9000.knowledge.contracts import (
     EvidenceQuote,
     GoldItem,
     JudgeLabel,
+    JudgeReasons,
     RubricLabels,
 )
+from hal9000.knowledge.eval.types import Source
 
 __all__ = [
     "UnsafePath",
@@ -29,12 +31,14 @@ __all__ = [
     "import_jsonl",
     "insert_gold",
     "insert_judge_label",
+    "label_sources",
     "list_gold",
     "list_judge_labels",
     "set_check_note",
     "set_gold_status",
     "set_human_labels",
     "set_judge_labels",
+    "set_label_sources",
     "unreviewed_gold",
 ]
 
@@ -253,19 +257,24 @@ def insert_judge_label(
     judge: RubricLabels | None = None,
     human: RubricLabels | None = None,
     citations: Sequence[Citation] = (),
+    judge_reasons: JudgeReasons | None = None,
+    sources: Sequence[Source] = (),
 ) -> int:
     now = _now()
     with conn:
         cur = conn.execute(
             "INSERT INTO judge_labels (gold_item_id, eval_run_id, answer, human_labels, "
-            "judge_labels, citations, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "judge_labels, judge_reasons, citations, sources, created_at, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 gold_item_id,
                 eval_run_id,
                 answer,
                 human.model_dump_json() if human else None,
                 judge.model_dump_json() if judge else None,
+                judge_reasons.model_dump_json() if judge_reasons else None,
                 json.dumps([c.model_dump(mode="json") for c in citations]),
+                _sources_json(sources),
                 now,
                 now,
             ),
@@ -288,8 +297,40 @@ def set_human_labels(conn: sqlite3.Connection, label_id: int, labels: RubricLabe
     _set(conn, "human_labels", label_id, labels)
 
 
-def set_judge_labels(conn: sqlite3.Connection, label_id: int, labels: RubricLabels) -> None:
-    _set(conn, "judge_labels", label_id, labels)
+def set_judge_labels(
+    conn: sqlite3.Connection,
+    label_id: int,
+    labels: RubricLabels,
+    *,
+    reasons: JudgeReasons | None = None,
+) -> None:
+    """The judge's labels and its reasons (replacing both: a re-judge without reasons clears
+    the old ones)."""
+    with conn:
+        _set(conn, "judge_labels", label_id, labels)
+        conn.execute(
+            "UPDATE judge_labels SET judge_reasons = ? WHERE id = ?",
+            (reasons.model_dump_json() if reasons else None, label_id),
+        )
+
+
+def _sources_json(sources: Sequence[Source]) -> str:
+    return json.dumps(
+        [{"marker": s.marker, "text": s.text, "title": s.title, "meta": s.meta} for s in sources]
+    )
+
+
+def label_sources(conn: sqlite3.Connection, label_id: int) -> list[Source]:
+    """The numbered sources a calibration answer was given ([] if not recorded)."""
+    row = conn.execute("SELECT sources FROM judge_labels WHERE id = ?", (label_id,)).fetchone()
+    return [Source(**s) for s in json.loads(row["sources"] or "[]")] if row else []
+
+
+def set_label_sources(conn: sqlite3.Connection, label_id: int, sources: Sequence[Source]) -> None:
+    with conn:
+        conn.execute(
+            "UPDATE judge_labels SET sources = ? WHERE id = ?", (_sources_json(sources), label_id)
+        )
 
 
 def list_judge_labels(
@@ -311,6 +352,9 @@ def list_judge_labels(
             citations=[Citation.model_validate(c) for c in json.loads(r["citations"] or "[]")],
             human=_labels(r["human_labels"]),
             judge=_labels(r["judge_labels"]),
+            judge_reasons=(
+                JudgeReasons.model_validate_json(r["judge_reasons"]) if r["judge_reasons"] else None
+            ),
         )
         for r in rows
     ]

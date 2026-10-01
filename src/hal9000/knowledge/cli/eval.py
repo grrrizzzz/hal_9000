@@ -154,6 +154,8 @@ def _judge_prep(args, conn, current) -> int:
         return EXIT_ERROR
     eval_config = load_eval_config(current.config_dir / "knowledge_eval.yaml")
     cfg = eval_config.judge
+    if getattr(args, "rejudge", False):
+        return _rejudge(args, conn, current, run, cfg)
     pool = list_gold(conn, status="approved", split="dev")
     done = {label.gold_item_id for label in list_judge_labels(conn, eval_run_id=run.id)}
     todo = [i for i in choose_calibration_items(pool, cfg.n_items) if i.id not in done]
@@ -220,6 +222,59 @@ def _judge_prep(args, conn, current) -> int:
         spend.close()
 
 
+def _rejudge(args, conn, current, run, cfg) -> int:
+    """``judge-prep --rejudge``: the judge grades the run's calibration answers again."""
+    from hal9000.knowledge.eval.judge import estimate_judging, rejudge, source_rebuilder
+    from hal9000.knowledge.eval.spend import confirm, open_spend
+    from hal9000.knowledge.eval.store import list_judge_labels
+    from hal9000.knowledge.eval.wiring import NotWired, answerer_for
+
+    labels = list_judge_labels(conn, eval_run_id=run.id)
+    if not labels:
+        _err(f"no calibration answers for {run.id} yet: run judge-prep without --rejudge first")
+        return EXIT_ERROR
+    estimate = estimate_judging(len(labels), cfg, current.judge_tier)
+    print(
+        f"Re-judging {len(labels)} calibration answers of {run.id} with the current rubric "
+        "(your labels are kept; the judge's labels and reasons are replaced)."
+    )
+    print(f"Estimate: {estimate.describe()}.")
+    spend = open_spend(current, max_cost=None, label="rejudge")
+    try:
+        refusal = spend.refusal(estimate.usd)
+        if refusal:
+            _err(f"not started: {refusal}")
+            return EXIT_NOT_RUN
+        if not confirm("Judge the calibration answers again?", yes=args.yes):
+            return EXIT_NOT_RUN
+        try:
+            answer = _run_answerer(conn, current, run, spend.meter, raw=True)
+            if answer is None:
+                answer = answerer_for(conn, current, meter=spend.meter, run=run)
+            generate = spend.generate()
+        except (NotWired, hal_config.ConfigError) as error:
+            _err(str(error))
+            return EXIT_ERROR
+        result = rejudge(
+            conn,
+            generate,
+            eval_run_id=run.id,
+            rebuild_sources=source_rebuilder(conn, answer.pipeline),
+            judge_tier=current.judge_tier,
+        )
+        print(
+            f"Judged {len(result.label_ids)} answers again ({result.skipped} skipped). "
+            f"Spent ${spend.meter.spent:.4f} (agent knowledge-eval)."
+        )
+        for error in result.errors[:5]:
+            print(f"error: {error}")
+        if result.stopped:
+            print(f"STOPPED EARLY: {result.stopped} (re-run to judge the rest again)")
+        return EXIT_OK
+    finally:
+        spend.close()
+
+
 def _metering(meter, answer, generate):
     """Wrap judge-prep's answer and judge calls to measure the metered spend of each."""
     totals = {"answers": 0, "answer_usd": 0.0, "judgements": 0, "judge_usd": 0.0}
@@ -241,9 +296,10 @@ def _metering(meter, answer, generate):
     return measured_answer, measured_generate, totals
 
 
-def _run_answerer(conn, current, run, meter):
+def _run_answerer(conn, current, run, meter, *, raw: bool = False):
     """``question -> AnswerOutput`` with every setting of a sweep run (profile, method,
-    reranker, transform, chat tier), or None for a run that isn't a sweep configuration."""
+    reranker, transform, chat tier), or None for a run that isn't a sweep configuration.
+    ``raw`` returns :func:`config_answerer`'s function itself (it carries ``.pipeline``)."""
     from hal9000.knowledge.config import EVAL_AGENT
     from hal9000.knowledge.eval.config import load_eval_config
     from hal9000.knowledge.eval.sweep import (
@@ -259,6 +315,8 @@ def _run_answerer(conn, current, run, meter):
     cfg = load_eval_config(current.config_dir / "knowledge_eval.yaml")
     budget = load_sweep_settings(cfg).decision_budget if cfg.sweep else 2000
     answer = config_answerer(conn, current, config, meter=meter, deps=SweepDeps(), budget=budget)
+    if raw:
+        return answer
 
     def answer_fn(question: str):
         output, result = answer(question)

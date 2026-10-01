@@ -230,6 +230,7 @@ SAMPLES: list[BaseModel] = [
     c.FeedbackResponse(id=1, gold_item_id=2),
     c.GoldPatch(status="rejected", reviewer_note="ambiguous"),
     RUBRIC,
+    c.JudgeReasons(correctness="Matches the reference."),
     c.JudgeLabel(
         id=1,
         gold_item_id=2,
@@ -238,6 +239,12 @@ SAMPLES: list[BaseModel] = [
         citations=[CITATION],
         human=RUBRIC,
         judge=RUBRIC,
+        judge_reasons=c.JudgeReasons(
+            correctness="Matches the reference.",
+            faithful="S1 states it.",
+            citations_correct="Every claim cites S1.",
+            abstention_correct="Answerable, and answered.",
+        ),
     ),
     c.EvalResultsPage(
         items=[

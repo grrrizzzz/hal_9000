@@ -17,6 +17,7 @@ export type GoldPatch = Schemas["GoldPatch"];
 export type EvidenceQuote = Schemas["EvidenceQuote"];
 export type JudgeLabel = Schemas["JudgeLabel"];
 export type RubricLabels = Schemas["RubricLabels"];
+export type JudgeReasons = Schemas["JudgeReasons"];
 export type EvalRun = Schemas["EvalRun"];
 export type EvalMetrics = Schemas["EvalMetrics"];
 export type MetricCI = Schemas["MetricCI"];

@@ -69,6 +69,7 @@ __all__ = [
     "Job",
     "JudgeLabel",
     "JudgeLabelUpdate",
+    "JudgeReasons",
     "MessageOut",
     "MetricCI",
     "Outcome",
@@ -695,6 +696,15 @@ class RubricLabels(_Model):
     abstention_correct: bool | None = None
 
 
+class JudgeReasons(_Model):
+    """The judge's one-sentence reason for each rubric label (shown once Mike has labelled)."""
+
+    correctness: str = ""
+    faithful: str = ""
+    citations_correct: str = ""
+    abstention_correct: str = ""
+
+
 class JudgeLabel(_Model):
     id: int
     gold_item_id: int
@@ -705,6 +715,8 @@ class JudgeLabel(_Model):
     citations: list[Citation] = Field(default_factory=list)
     human: RubricLabels | None = None
     judge: RubricLabels | None = None
+    #: why the judge chose each label (None for labels judged before reasons were recorded)
+    judge_reasons: JudgeReasons | None = None
 
 
 class JudgeLabelUpdate(_Model):

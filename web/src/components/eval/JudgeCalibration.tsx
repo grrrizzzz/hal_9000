@@ -7,7 +7,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle2, Gavel, XCircle } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { api } from "@/api/client";
-import type { Citation, JudgeLabel, RubricLabels } from "@/api/types";
+import type { Citation, JudgeLabel, JudgeReasons, RubricLabels } from "@/api/types";
 import { CitationText } from "@/components/chat/CitationText";
 import { SourceList } from "@/components/chat/SourceList";
 import { ViewerDialog } from "@/components/viewer/ViewerDialog";
@@ -29,18 +29,23 @@ const FIELDS: { key: Field; label: string }[] = [
   { key: "abstention_correct", label: "Abstention correct" },
 ];
 
-/** Label-level agreement between Mike and the judge over the items both labelled. */
+/**
+ * Label-level agreement, counted exactly as S5's gate counts it (eval/judge.py
+ * `agreement`): every label Mike gave; N/A against the judge's Yes or No is a
+ * disagreement (only N/A on both sides is skipped); an answer the judge failed
+ * to grade disagrees on every label.
+ */
 export function agreement(labels: JudgeLabel[]): { agree: number; total: number } {
   let agree = 0;
   let total = 0;
   for (const l of labels) {
-    if (!l.human || !l.judge) continue;
+    if (!l.human) continue;
     for (const { key } of FIELDS) {
-      const h = l.human[key];
-      const j = l.judge[key];
-      if (h === null || h === undefined || j === null || j === undefined) continue;
+      const h = l.human[key] ?? null;
+      const j = l.judge ? (l.judge[key] ?? null) : null;
+      if (key === "abstention_correct" && h === null && j === null) continue;
       total++;
-      if (h === j) agree++;
+      if (l.judge && h === j) agree++;
     }
   }
   return { agree, total };
@@ -131,7 +136,8 @@ const yesNo = [
 
 function LabelCard({ label, n, onOpen }: { label: JudgeLabel; n: number; onOpen: (c: Citation) => void }) {
   const qc = useQueryClient();
-  const [draft, setDraft] = useState<Partial<RubricLabels>>(label.human ?? {});
+  // an old N/A abstention label must be answered again (the judge always says Yes or No)
+  const [draft, setDraft] = useState<Partial<RubricLabels>>(label.human ? { ...label.human, abstention_correct: label.human.abstention_correct ?? undefined } : {});
   const [editing, setEditing] = useState(!label.human);
   const gold = useQuery({ queryKey: ["gold-item", label.gold_item_id], queryFn: () => api.get("/api/eval/gold/{id}", { params: { id: label.gold_item_id } }), staleTime: 5 * 60_000 });
   const save = useMutation({
@@ -141,7 +147,8 @@ function LabelCard({ label, n, onOpen }: { label: JudgeLabel; n: number; onOpen:
       void qc.invalidateQueries({ queryKey: ["judge-labels"] });
     },
   });
-  const complete = draft.correctness !== undefined && draft.faithful !== undefined && draft.citations_correct !== undefined;
+  const complete =
+    draft.correctness !== undefined && draft.faithful !== undefined && draft.citations_correct !== undefined && draft.abstention_correct !== undefined && draft.abstention_correct !== null;
   const bool = (v: boolean | null | undefined) => (v === true ? "yes" : v === false ? "no" : undefined);
   const g = gold.data;
 
@@ -180,7 +187,7 @@ function LabelCard({ label, n, onOpen }: { label: JudgeLabel; n: number; onOpen:
               className="space-y-4"
               onSubmit={(e) => {
                 e.preventDefault();
-                if (complete) save.mutate({ abstention_correct: null, ...(draft as RubricLabels) });
+                if (complete) save.mutate(draft as RubricLabels);
               }}
             >
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -202,13 +209,8 @@ function LabelCard({ label, n, onOpen }: { label: JudgeLabel; n: number; onOpen:
                 <Rubric label="Citations correct?">
                   <Segmented label={`Answer ${n}: citations correct`} value={bool(draft.citations_correct)} onChange={(v) => setDraft((d) => ({ ...d, citations_correct: v === "yes" }))} options={yesNo} />
                 </Rubric>
-                <Rubric label="Abstention correct?">
-                  <Segmented
-                    label={`Answer ${n}: abstention correct`}
-                    value={draft.abstention_correct === null || draft.abstention_correct === undefined ? "na" : bool(draft.abstention_correct)}
-                    onChange={(v) => setDraft((d) => ({ ...d, abstention_correct: v === "na" ? null : v === "yes" }))}
-                    options={[...yesNo, { value: "na", label: "N/A" }]}
-                  />
+                <Rubric label="Abstention correct?" hint="Yes if it answered a question the documents answer, or declined one they don't.">
+                  <Segmented label={`Answer ${n}: abstention correct`} value={bool(draft.abstention_correct)} onChange={(v) => setDraft((d) => ({ ...d, abstention_correct: v === "yes" }))} options={yesNo} />
                 </Rubric>
               </div>
               {save.isError ? (
@@ -229,7 +231,7 @@ function LabelCard({ label, n, onOpen }: { label: JudgeLabel; n: number; onOpen:
               <p className="text-xs text-muted-foreground">The judge's labels appear once you've saved yours.</p>
             </form>
           ) : label.human ? (
-            <Comparison human={label.human} judge={label.judge} onEdit={() => setEditing(true)} />
+            <Comparison human={label.human} judge={label.judge} reasons={label.judge_reasons} onEdit={() => setEditing(true)} />
           ) : null}
         </div>
       </div>
@@ -237,20 +239,31 @@ function LabelCard({ label, n, onOpen }: { label: JudgeLabel; n: number; onOpen:
   );
 }
 
-function Rubric({ label, children }: { label: string; children: ReactNode }) {
+function Rubric({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <div className="space-y-1">
       <p className="text-[13px] font-medium">{label}</p>
       {children}
+      {hint ? <p className="text-xs text-muted-foreground">{hint}</p> : null}
     </div>
   );
 }
 
 const show = (v: unknown) => (v === true ? "Yes" : v === false ? "No" : v === null || v === undefined ? "N/A" : String(v)[0].toUpperCase() + String(v).slice(1));
 
-function Comparison({ human, judge, onEdit }: { human: RubricLabels; judge: RubricLabels | null | undefined; onEdit: () => void }) {
+function Comparison({
+  human,
+  judge,
+  reasons,
+  onEdit,
+}: {
+  human: RubricLabels;
+  judge: RubricLabels | null | undefined;
+  reasons: JudgeReasons | null | undefined;
+  onEdit: () => void;
+}) {
   return (
-    <div data-testid="judge-comparison" className="max-w-xl">
+    <div data-testid="judge-comparison" className="max-w-2xl">
       <table className="w-full text-[13px]">
         <thead>
           <tr className="text-left text-xs text-muted-foreground">
@@ -267,24 +280,37 @@ function Comparison({ human, judge, onEdit }: { human: RubricLabels; judge: Rubr
         </thead>
         <tbody>
           {FIELDS.map(({ key, label }) => {
-            const h = human[key];
-            const j = judge?.[key];
-            const differs = judge && h !== null && h !== undefined && j !== null && j !== undefined && h !== j;
+            const h = human[key] ?? null;
+            const j = judge ? (judge[key] ?? null) : null;
+            // as the gate counts it: N/A against a Yes or No disagrees
+            const differs = !!judge && h !== j;
+            const reason = judge ? reasons?.[key] : undefined;
             return (
-              <tr key={key} className="border-t border-border">
+              <tr key={key} className="border-t border-border align-top">
                 <th scope="row" className="py-1.5 pr-2 text-left font-normal text-muted-foreground">
                   {label}
                 </th>
-                <td className="py-1.5 font-medium">{show(h)}</td>
-                <td className={cn("py-1.5", differs && "font-medium text-warning")}>
-                  {judge ? show(j) : "—"}
+                <td className="py-1.5 pr-3 font-medium">{show(h)}</td>
+                <td className={cn("py-1.5", differs && "text-warning")}>
+                  <span className={cn(differs && "font-medium")}>{judge ? show(j) : "—"}</span>
                   {differs ? <span className="sr-only"> (disagrees)</span> : null}
+                  {reason ? (
+                    <p data-testid="judge-reason" className={cn("mt-0.5 text-xs", differs ? "text-foreground" : "text-muted-foreground")}>
+                      {reason}
+                    </p>
+                  ) : null}
                 </td>
               </tr>
             );
           })}
         </tbody>
       </table>
+      {judge && !reasons ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          The judge gave no reasons for this answer (it was judged before reasons were recorded). Run{" "}
+          <code className="font-mono">hal9000 kb eval judge-prep "$SWEEP" --rejudge</code> to have it judged again with reasons.
+        </p>
+      ) : null}
       <Button size="sm" variant="ghost" className="mt-2 -ml-2" onClick={onEdit}>
         Change my labels
       </Button>

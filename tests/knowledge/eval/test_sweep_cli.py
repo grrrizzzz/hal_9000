@@ -89,6 +89,9 @@ def test_sweep_judge_prep_s5_report_choose_and_test(cli, capsys, monkeypatch):
         return real(conn, current, config, **kw)
 
     monkeypatch.setattr(sweep_module, "config_answerer", spy)
+    # nothing to re-judge before judge-prep has answered
+    assert main(["kb", "eval", "judge-prep", sweep, "--rejudge", "--yes"]) == 1
+    assert "without --rejudge first" in capsys.readouterr().err
     # an empty ID (unset $SWEEP) is explained, not looked up
     assert main(["kb", "eval", "judge-prep", "", "--yes"]) == 1
     assert "is $SWEEP set" in capsys.readouterr().err
@@ -100,12 +103,31 @@ def test_sweep_judge_prep_s5_report_choose_and_test(cli, capsys, monkeypatch):
     try:
         labels = list_judge_labels(conn, eval_run_id=leader_id)
         assert len(labels) == 3 and all(label.judge for label in labels)
+        assert all(label.judge_reasons.faithful for label in labels)
         for label in labels:  # Mike agrees with the judge
             set_human_labels(conn, label.id, label.judge)
+        with conn:  # answers judged before sources were kept: --rejudge rebuilds them
+            conn.execute("UPDATE judge_labels SET sources = '[]', judge_reasons = NULL")
+    finally:
+        conn.close()
+    calls.clear()
+    assert main(["kb", "eval", "judge-prep", sweep, "--rejudge", "--yes"]) == 0
+    out = capsys.readouterr().out
+    assert "Re-judging 3 calibration answers" in out and "Judged 3 answers again (0 skipped)" in out
+    assert calls == [SweepConfig.from_run_config(leader.config)]  # the same retrieval
+    conn = open_db(settings.db_path)
+    try:
+        again = list_judge_labels(conn, eval_run_id=leader_id)
+        assert [a.answer for a in again] == [label.answer for label in labels]
+        assert all(a.human == a.judge and a.judge_reasons for a in again)
     finally:
         conn.close()
     assert main(["kb", "eval", "sweep", "--stages", "S5", "--resume", sweep, "--yes"]) == 0
     assert runs(settings, "S5")
+    from hal9000.knowledge.eval.runs import load_results
+
+    s5_records = load_results(runs(settings, "S5")[0])
+    assert s5_records and all(r["judge_reasons"]["faithful"] for r in s5_records)
 
     assert main(["kb", "eval", "report", sweep]) == 0
     report = (settings.config_dir.parent / "docs" / "KNOWLEDGE_EVAL_REPORT.md").read_text()
