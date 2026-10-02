@@ -589,21 +589,80 @@ def test_s5_stops_cleanly_when_the_connection_is_lost_and_resumes(swept_env):
     assert {r["outcome"] for r in results(run)} == {"answered"}
 
 
-def test_s5_stops_cleanly_when_judging_fails(swept_env):
+class RateLimitError(Exception):
+    """Named as LiteLLM's (``describe_call_error`` goes by the class name)."""
+
+
+QUOTA = RateLimitError(
+    "OpenAIException - You exceeded your current quota, please check your plan and billing "
+    "details. {'code': 'insufficient_quota'}"
+)
+
+
+def _judge_failing(failures):
+    """The fake provider, raising ``failures`` (in order) on judge calls."""
     from tests.knowledge.eval.test_sweep_fixtures import FakeProvider
 
+    provider, pending = FakeProvider(None), list(failures)
+
+    def judge(prompt, tier="powerful", **kw):
+        if prompt.tools and pending:
+            raise pending.pop(0)
+        return provider(prompt, tier, **kw)
+
+    return judge
+
+
+def test_s5_stops_cleanly_when_judging_fails(swept_env):
     env, sweep_id = swept_env
     grid = (env.settings.config_dir / "knowledge_eval.yaml").read_text().replace(*ONE_RUN)
     _calibrate(env, sweep_id, grid)
-    provider = FakeProvider(None)
-
-    def judge(prompt, tier="powerful", **kw):
-        if prompt.tools:
-            raise ConnectionError("network is unreachable")
-        return provider(prompt, tier, **kw)
-
-    outcome = env.runner(generate_response=judge).run(["S5"], sweep_id=sweep_id)
-    assert outcome.status == "stopped" and "judging question" in outcome.message
+    pauses = []
+    down = [ConnectionError("network is unreachable")] * 3
+    outcome = env.runner(generate_response=_judge_failing(down), sleep=pauses.append).run(
+        ["S5"], sweep_id=sweep_id
+    )
+    assert outcome.status == "stopped"
+    assert (
+        "judging question" in outcome.message and "check the internet connection" in outcome.message
+    )
+    assert pauses == [5.0, 30.0]
     _, records = _partial(env)
     assert len(records) == 1 and not records[0]["judged"]  # answered; judged on resume
     assert env.runner().run(["S5"], sweep_id=sweep_id).status == "done"
+
+
+def test_s5_waits_out_a_rate_limit_but_stops_at_once_when_the_account_is_out_of_credit(
+    swept_env,
+):
+    env, sweep_id = swept_env
+    grid = (env.settings.config_dir / "knowledge_eval.yaml").read_text().replace(*ONE_RUN)
+    _calibrate(env, sweep_id, grid)
+    pauses = []
+    outcome = env.runner(generate_response=_judge_failing([QUOTA]), sleep=pauses.append).run(
+        ["S5"], sweep_id=sweep_id
+    )
+    assert outcome.status == "stopped" and pauses == []  # trying again never helps
+    assert "run out of credit or reached its spending limit" in outcome.message
+    assert "platform.openai.com" in outcome.message and "insufficient_quota" in outcome.message
+
+    busy = [RateLimitError("Rate limit reached for gpt-5 (tokens per min)")]
+    outcome = env.runner(generate_response=_judge_failing(busy), sleep=pauses.append).run(
+        ["S5"], sweep_id=sweep_id
+    )
+    assert outcome.status == "done" and pauses == [5.0]
+
+
+def test_call_errors_are_described_in_words():
+    from hal9000.knowledge.eval.sweep import describe_call_error
+
+    class AuthenticationError(Exception):
+        pass
+
+    assert describe_call_error(QUOTA)[1] is False
+    assert describe_call_error(AuthenticationError("bad key")) == (
+        "OpenAI refused the API key (AuthenticationError: bad key)",
+        False,
+    )
+    detail, transient = describe_call_error(ValueError("x" * 400))
+    assert transient and detail.startswith("ValueError: ") and detail.endswith("...")

@@ -98,6 +98,7 @@ def generate_response(
     from litellm import completion
 
     litellm.drop_params = True  # tolerate params a given model does not accept
+    litellm.suppress_debug_info = True  # no "Give Feedback / Get Help" banner on errors
 
     model = config.model_for(tier)
     kwargs: dict[str, Any] = {
@@ -161,6 +162,7 @@ def stream_response(
     from litellm import completion
 
     litellm.drop_params = True
+    litellm.suppress_debug_info = True  # no "Give Feedback / Get Help" banner on errors
     model, kwargs = _completion_kwargs(prompt, tier)
     kwargs.update(kw)
     kwargs["stream"] = True
@@ -264,6 +266,7 @@ def embed(
     from litellm import embedding
 
     litellm.drop_params = True
+    litellm.suppress_debug_info = True  # no "Give Feedback / Get Help" banner on errors
     counter = count_tokens or _default_token_counter(model)
     counts = [counter(t) for t in texts]
     vectors: list[list[float]] = []

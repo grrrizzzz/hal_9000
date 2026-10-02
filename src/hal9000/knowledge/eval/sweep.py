@@ -711,8 +711,35 @@ class SweepInterrupted(Exception):  # noqa: N818 - control flow
     finished so far is kept and the sweep can be resumed."""
 
 
-#: pauses before answering a question again after a failed answer (S5)
+#: pauses before answering or judging a question again after a failed call (S5)
 ANSWER_RETRY_PAUSES_S: tuple[float, ...] = (5.0, 30.0)
+
+_OPENAI_BILLING = "platform.openai.com > Settings > Billing (and Limits)"
+
+
+def describe_call_error(error: BaseException) -> tuple[str, bool]:
+    """What went wrong with an LLM call, in words, and whether trying again may help.
+
+    OpenAI reports an account out of credit (or over its budget) as a rate limit
+    with the code ``insufficient_quota``: trying again never helps that.
+    """
+    name = type(error).__name__
+    text = " ".join(str(error).split())
+    quoted = text[:300] + ("..." if len(text) > 300 else "")
+    if "insufficient_quota" in text or "exceeded your current quota" in text:
+        return (
+            "your OpenAI account has run out of credit or reached its spending limit. "
+            f"Add credit or raise the limit at {_OPENAI_BILLING}, then resume "
+            f"(OpenAI said: {quoted})",
+            False,
+        )
+    if name in ("AuthenticationError", "PermissionDeniedError"):
+        return f"OpenAI refused the API key ({name}: {quoted})", False
+    if name == "RateLimitError":
+        return f"OpenAI is limiting the request rate ({quoted})", True
+    if name in ("APIConnectionError", "Timeout", "ConnectionError", "ServiceUnavailableError"):
+        return f"check the internet connection ({name}: {quoted})", True
+    return f"{name}: {quoted}", True
 
 
 class SweepRefused(Exception):  # noqa: N818 - control flow
@@ -1442,8 +1469,8 @@ class SweepRunner:
                         raise SweepInterrupted(
                             f"answering question {item.id} failed "
                             f"{len(ANSWER_RETRY_PAUSES_S) + 1} times; check the internet "
-                            "connection (if it keeps failing on the same question, tell the "
-                            "orchestrator)"
+                            "connection and your OpenAI account's credit (if it keeps failing "
+                            "on the same question, tell the orchestrator)"
                         )
                     log.warning("answering question %s failed; trying again", item.id)
                     self.deps.sleep(pause)
@@ -1481,19 +1508,25 @@ class SweepRunner:
             )
             spent = self.meter.spent
             reasons = None
-            try:
-                judgement = judge_answer(generate, self.settings.judge_tier, item, output)
-                labels, reasons = judgement.labels, judgement.reasons
-            except JudgeError as error:
-                log.warning("the judge failed on item %s: %s", item.id, error)
-                labels = None
-            except BudgetExceeded:
-                raise
-            except Exception as error:  # the call itself failed: the answer waits, unjudged
-                raise SweepInterrupted(
-                    f"judging question {item.id} failed ({type(error).__name__}); check the "
-                    "internet connection"
-                ) from error
+            for pause in (*ANSWER_RETRY_PAUSES_S, None):
+                try:
+                    judgement = judge_answer(generate, self.settings.judge_tier, item, output)
+                    labels, reasons = judgement.labels, judgement.reasons
+                    break
+                except JudgeError as error:
+                    log.warning("the judge failed on item %s: %s", item.id, error)
+                    labels = None
+                    break
+                except BudgetExceeded:
+                    raise
+                except Exception as error:  # the call itself failed: the answer waits, unjudged
+                    detail, transient = describe_call_error(error)
+                    if pause is None or not transient:
+                        raise SweepInterrupted(
+                            f"judging question {item.id} failed: {detail}"
+                        ) from error
+                    log.warning("judging question %s failed (%s); trying again", item.id, detail)
+                    self.deps.sleep(pause)
             record = {k: v for k, v in record.items() if k != "answer_output"}
             record.update(
                 {
