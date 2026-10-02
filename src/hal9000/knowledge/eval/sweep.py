@@ -677,6 +677,8 @@ class SweepDeps:
     docling_available: Callable[[], bool] | None = None
     #: parse in the child process with the time limit (tests parse in-process)
     isolate_parse: bool = True
+    #: ``time.sleep`` (tests pass a recorder)
+    sleep: Callable[[float], None] = time.sleep
     _rerankers: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def reranker(self, name: str) -> Any:
@@ -702,6 +704,15 @@ class SweepDeps:
 
 class SweepStopped(Exception):  # noqa: N818 - control flow
     """A spending cap was reached: finished runs are kept, the sweep can be resumed."""
+
+
+class SweepInterrupted(Exception):  # noqa: N818 - control flow
+    """Answering or judging kept failing (usually a lost internet connection): the work
+    finished so far is kept and the sweep can be resumed."""
+
+
+#: pauses before answering a question again after a failed answer (S5)
+ANSWER_RETRY_PAUSES_S: tuple[float, ...] = (5.0, 30.0)
 
 
 class SweepRefused(Exception):  # noqa: N818 - control flow
@@ -885,6 +896,9 @@ class SweepRunner:
         except SweepStopped as stop:
             return self._outcome("stopped", f"STOPPED at the cost cap: {stop}. Finished runs are "
                                  f"kept; resume with --resume {self.sweep_id}.")  # fmt: skip
+        except SweepInterrupted as interrupted:
+            return self._outcome("stopped", f"STOPPED: {interrupted}. Finished runs and answers "
+                                 f"are kept; resume with --resume {self.sweep_id}.")  # fmt: skip
         except SweepRefused as refused:
             return self._outcome("refused", str(refused))
         finally:
@@ -1400,6 +1414,8 @@ class SweepRunner:
         total = len(items)
         for number, item in enumerate(items, start=1):
             record = done.get(item.id)
+            if record is not None and record.get("outcome") == "error":
+                record = None  # a failed answer (a lost connection, say) is answered again
             if record is not None and record.get("judged"):
                 continue
             if record is None:
@@ -1414,11 +1430,23 @@ class SweepRunner:
                     )
                 self.meter.precheck(EVAL_AGENT)
                 spent = self.meter.spent
-                started = time.perf_counter()
-                output, result = answer(item.question)
-                total_ms = (time.perf_counter() - started) * 1000
-                if result.outcome in ("retrieval_only", "error"):
-                    self.meter.precheck(EVAL_AGENT)  # a cap turns answers retrieval-only: stop
+                for pause in (*ANSWER_RETRY_PAUSES_S, None):
+                    started = time.perf_counter()
+                    output, result = answer(item.question)
+                    total_ms = (time.perf_counter() - started) * 1000
+                    if result.outcome in ("retrieval_only", "error"):
+                        self.meter.precheck(EVAL_AGENT)  # a cap turns answers retrieval-only
+                    if result.outcome != "error":
+                        break
+                    if pause is None:  # never saved, so never judged: a resume answers it
+                        raise SweepInterrupted(
+                            f"answering question {item.id} failed "
+                            f"{len(ANSWER_RETRY_PAUSES_S) + 1} times; check the internet "
+                            "connection (if it keeps failing on the same question, tell the "
+                            "orchestrator)"
+                        )
+                    log.warning("answering question %s failed; trying again", item.id)
+                    self.deps.sleep(pause)
                 record = {
                     "gold_item_id": item.id,
                     "question": item.question,
@@ -1459,6 +1487,13 @@ class SweepRunner:
             except JudgeError as error:
                 log.warning("the judge failed on item %s: %s", item.id, error)
                 labels = None
+            except BudgetExceeded:
+                raise
+            except Exception as error:  # the call itself failed: the answer waits, unjudged
+                raise SweepInterrupted(
+                    f"judging question {item.id} failed ({type(error).__name__}); check the "
+                    "internet connection"
+                ) from error
             record = {k: v for k, v in record.items() if k != "answer_output"}
             record.update(
                 {

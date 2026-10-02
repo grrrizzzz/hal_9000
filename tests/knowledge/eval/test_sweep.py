@@ -510,3 +510,100 @@ def test_the_embedding_estimate_covers_a_real_model_metered(env):
     metered = sum(usd for _, usd in env.ledger())
     assert 0 < metered <= estimate.usd + 1e-12
     assert env.active() == ACTIVE
+
+
+# ---------------------------------------------------------- S5 and a lost connection
+ONE_RUN = ("    top: 2\n    chat_tiers: [fast, powerful]\n    repeat_top: 1",
+           "    top: 1\n    chat_tiers: [fast]\n    repeat_top: 0")  # fmt: skip
+
+
+class Flaky:
+    """The chat stream, failing as a lost connection does on the calls in ``down``."""
+
+    def __init__(self, down):
+        from tests.knowledge.eval.test_sweep_fixtures import fake_chat
+
+        self.chat, self.down, self.calls = fake_chat(), down, 0
+
+    def __call__(self, *args, **kw):
+        self.calls += 1
+        if self.calls in self.down:
+            raise ConnectionError("network is unreachable")
+        return self.chat(*args, **kw)
+
+
+def _calibrate(env, sweep_id, grid):
+    runner = env.runner(grid=grid)
+    runner.sweep_id = sweep_id
+    label_calibration(env.conn, runner.finalists()[0].id, agree=True)
+
+
+def _partial(env):
+    import json
+
+    (path,) = (env.settings.eval_dir / "runs").glob("*.s5.*/partial-answers.jsonl")
+    return path, [json.loads(line) for line in path.read_text().splitlines()]
+
+
+def test_s5_answers_a_failed_question_again(swept_env):
+    env, sweep_id = swept_env
+    grid = (env.settings.config_dir / "knowledge_eval.yaml").read_text().replace(*ONE_RUN)
+    _calibrate(env, sweep_id, grid)
+    pauses = []
+    outcome = env.runner(stream_response=Flaky({1}), sleep=pauses.append).run(
+        ["S5"], sweep_id=sweep_id
+    )
+    assert outcome.status == "done", outcome.message
+    assert pauses == [5.0]  # one failure, answered again after a pause
+    (run,) = sweep_runs(env.conn, sweep_id, "S5")
+    assert {r["outcome"] for r in results(run)} == {"answered"}
+
+
+def test_s5_stops_cleanly_when_the_connection_is_lost_and_resumes(swept_env):
+    import json
+
+    env, sweep_id = swept_env
+    grid = (env.settings.config_dir / "knowledge_eval.yaml").read_text().replace(*ONE_RUN)
+    _calibrate(env, sweep_id, grid)
+    pauses = []
+    down = Flaky(set(range(3, 100)))  # the connection drops after two answers
+    outcome = env.runner(stream_response=down, sleep=pauses.append).run(["S5"], sweep_id=sweep_id)
+    assert outcome.status == "stopped"
+    assert "failed 3 times; check the internet connection" in outcome.message
+    assert f"resume with --resume {sweep_id}" in outcome.message
+    assert pauses == [5.0, 30.0] and not sweep_runs(env.conn, sweep_id, "S5")
+    path, records = _partial(env)
+    assert len(records) == 4  # two answers, each saved again with its judgement
+    assert all(r["outcome"] == "answered" for r in records)  # the failure was never saved
+    # an answer stored as failed by an earlier version is answered again, not judged
+    failed = {**records[0], "gold_item_id": -1, "outcome": "error", "judged": False}
+    dev = [i.id for i in env.runner().dev_items()]
+    failed["gold_item_id"] = dev[5]
+    path.write_text(path.read_text() + json.dumps(failed) + "\n")
+
+    back = Flaky(set())
+    assert env.runner(stream_response=back).run(["S5"], sweep_id=sweep_id).status == "done"
+    assert back.calls == len(dev) - 2  # the two judged answers were kept
+    (run,) = sweep_runs(env.conn, sweep_id, "S5")
+    assert len(results(run)) == len(dev)
+    assert {r["outcome"] for r in results(run)} == {"answered"}
+
+
+def test_s5_stops_cleanly_when_judging_fails(swept_env):
+    from tests.knowledge.eval.test_sweep_fixtures import FakeProvider
+
+    env, sweep_id = swept_env
+    grid = (env.settings.config_dir / "knowledge_eval.yaml").read_text().replace(*ONE_RUN)
+    _calibrate(env, sweep_id, grid)
+    provider = FakeProvider(None)
+
+    def judge(prompt, tier="powerful", **kw):
+        if prompt.tools:
+            raise ConnectionError("network is unreachable")
+        return provider(prompt, tier, **kw)
+
+    outcome = env.runner(generate_response=judge).run(["S5"], sweep_id=sweep_id)
+    assert outcome.status == "stopped" and "judging question" in outcome.message
+    _, records = _partial(env)
+    assert len(records) == 1 and not records[0]["judged"]  # answered; judged on resume
+    assert env.runner().run(["S5"], sweep_id=sweep_id).status == "done"
