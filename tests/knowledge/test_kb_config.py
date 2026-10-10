@@ -124,3 +124,16 @@ def test_env_example_documents_every_kb_setting():
         "KB_DENYLIST",
     ):
         assert name in text, name
+
+
+def test_the_answer_policy_keeps_citation_discipline():
+    """S5 (2026-10): half the answers failed the citation check, mostly uncited closing
+    sentences and markers for merely related sources. The policy rules that prevent it."""
+    from pathlib import Path
+
+    policy = (Path(__file__).parents[2] / "config" / "knowledge_policy.txt").read_text()
+    assert "End every sentence that states something from the sources with the marker" in policy
+    assert "Cite only a source that itself states what the sentence says" in policy
+    assert "no closing remark or summary that would need a citation" in policy
+    assert "don't guess which document might have it" in policy
+    assert "reply with exactly NOT_IN_SOURCES" in policy

@@ -41,7 +41,7 @@ __all__ = [
     "regeneration_prompt",
 ]
 
-#: What the model replies when it must decline entirely (``config/knowledge_policy.txt`` rule 2).
+#: What the model replies when it must decline entirely (``config/knowledge_policy.txt`` rule 4).
 NOT_IN_SOURCES = "NOT_IN_SOURCES"
 #: How much of a source's text the ``sources`` event and citations carry.
 SNIPPET_CHARS = 600
@@ -226,8 +226,9 @@ def regeneration_prompt(prompt: Prompt, answer: str, issues: Sequence[str]) -> P
     note = (
         "Your answer could not be verified against the sources:\n"
         f"{listed}\n\n"
-        "Answer the question again. Use only the numbered sources, quote every figure and date "
-        f"exactly as a source you cite writes it, and cite only S1-S{count}."
+        "Answer the question again. Use only the numbered sources, end every sentence that states "
+        "something from them with the marker of the source that states it, quote every figure "
+        f"and date exactly as a source you cite writes it, and cite only S1-S{count}."
     )
     return Prompt(
         messages=[

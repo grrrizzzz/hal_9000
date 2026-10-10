@@ -640,6 +640,11 @@ Nothing is committed on the Pi; §6 commits the final report from the Mac.
 
 ## 6. G-K2: choose the configuration (Pi, then the Mac)
 
+Decided after S5 (2026-10-09): the **fast** chat model. Choose a configuration
+whose name ends in `+fast`. The answer instructions (`config/knowledge_policy.txt`)
+were tightened after S5 so that every sentence cites the source that states it;
+S5 measured the old instructions, and the test split below measures the new ones.
+
 The orchestrator presents the report's recommendation and the alternatives.
 Pick one and set `NAME` to it, as the report prints it (§1). On the Pi:
 
