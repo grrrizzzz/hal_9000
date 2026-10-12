@@ -165,7 +165,10 @@ def test_gold_generate_without_documents_or_key(tmp_path, monkeypatch, openai_en
     assert "run `hal9000 kb ingest` first" in capsys.readouterr().err
 
 
-def test_gold_generate_without_an_llm_key(env, monkeypatch, capsys):
+def test_gold_generate_without_an_llm_key(env, tmp_path, monkeypatch, capsys):
+    # main() loads the .env it finds from the working directory, which would put a real
+    # OPENAI_API_KEY back (and make a paid call): run from a folder that has none.
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("AGENT_MODEL_POWERFUL", "openai/gpt-5")
     monkeypatch.delenv("OPENAI_API_KEY")
     monkeypatch.setenv("LLM_PROVIDER", "openai")

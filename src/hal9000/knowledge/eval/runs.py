@@ -256,13 +256,32 @@ def runs_for(conn: sqlite3.Connection, run_id: str) -> list[EvalRun]:
     return [r for r in list_runs(conn) if r.config.get("sweep_id") == run_id]
 
 
+def _relocated_results(run: EvalRun) -> Path | None:
+    """The run's results file under this machine's own eval folder.
+
+    ``eval_runs.results_path`` is an absolute path written on the machine that ran
+    the sweep. After the library is copied to another machine (the Mac to the Pi,
+    runbook 4.5) that path doesn't exist, but the same ``runs/<id>/results.jsonl``
+    sits under the local ``data/knowledge/eval``.
+    """
+    try:
+        from hal9000.knowledge.config import settings
+
+        candidate = run_dir(settings().eval_dir, run.id) / RESULTS_FILE
+    except Exception:  # noqa: BLE001 - settings unavailable or an unusable run ID: no fallback
+        return None
+    return candidate if candidate.exists() else None
+
+
 def load_results(run: EvalRun) -> list[dict[str, Any]]:
     """The run's per-question records (empty when it has no results file yet)."""
     if not run.results_path:
         return []
     path = Path(run.results_path)
     if not path.exists():
-        return []
+        path = _relocated_results(run)
+        if path is None:
+            return []
     with path.open(encoding="utf-8") as fh:
         return [json.loads(line) for line in fh if line.strip()]
 

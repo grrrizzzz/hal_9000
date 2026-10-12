@@ -148,6 +148,28 @@ def test_full_support_falls_back_to_the_largest_k_and_missing_files(kb_db, tmp_p
     assert load_results(unfinished) == []
 
 
+def test_results_are_found_after_the_library_is_copied_to_another_machine(
+    kb_db, tmp_path, monkeypatch
+):
+    """``results_path`` is absolute on the machine that ran the sweep (the Mac); on the Pi
+    the same ``runs/<id>/results.jsonl`` is under the local eval folder."""
+    metrics, records = scored(3)
+    run = record_run(
+        kb_db, eval_dir=tmp_path, stage="S5", config={}, metrics=metrics, records=records
+    )
+    kb_db.execute(
+        "UPDATE eval_runs SET results_path = ? WHERE id = ?",
+        (f"/Users/elsewhere/data/knowledge/eval/runs/{run.id}/results.jsonl", run.id),
+    )
+    kb_db.commit()
+    moved = get_run(kb_db, run.id)
+    assert load_results(moved) == []
+    monkeypatch.setenv("KB_DATA_DIR", str(tmp_path.parent / "data"))
+    (tmp_path.parent / "data" / "knowledge").mkdir(parents=True)
+    (tmp_path.parent / "data" / "knowledge" / "eval").symlink_to(tmp_path)
+    assert len(load_results(moved)) == 3
+
+
 def test_run_ids_are_safe_directory_names(tmp_path):
     rid = new_run_id("S1a")
     assert rid.startswith("s1a-") and run_dir(tmp_path, rid).parent == tmp_path / "runs"

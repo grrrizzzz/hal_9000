@@ -276,6 +276,8 @@ def _chat_tier(ranker: Ranker, winner: EvalRun, s5: Sequence[EvalRun]) -> tuple[
     if "fast" in by_tier and "powerful" in by_tier:
         comparison = ranker.compare(by_tier["powerful"], by_tier["fast"], metric="correct")
         fast, powerful = (ranker.point(by_tier[t], "correct") for t in ("fast", "powerful"))
+        if fast is None or powerful is None:
+            return None, "S5 per-question scores are missing: keep KB_CHAT_TIER as it is"
         numbers = f"correct {fast:.3f} (fast) vs {powerful:.3f} (powerful)"
         if comparison.verdict == "a":
             return "powerful", f"{numbers}; the powerful tier is significantly more correct"
