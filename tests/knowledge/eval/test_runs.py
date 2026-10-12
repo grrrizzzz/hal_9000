@@ -170,6 +170,21 @@ def test_results_are_found_after_the_library_is_copied_to_another_machine(
     assert len(load_results(moved)) == 3
 
 
+def test_a_pi_is_recognised_inside_docker(tmp_path, monkeypatch):
+    """Docker masks /sys/firmware (so /proc/device-tree/model can't be read); the Raspberry
+    Pi kernel's Model line in /proc/cpuinfo still says it is a Pi."""
+    from hal9000.knowledge.eval import runs
+
+    masked = tmp_path / "device-tree-model"  # does not exist, as in the container
+    cpuinfo = tmp_path / "cpuinfo"
+    cpuinfo.write_text("processor\t: 0\nModel\t\t: Raspberry Pi 5 Model B Rev 1.0\n")
+    monkeypatch.setattr(runs.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(runs, "_MODEL_SOURCES", (masked, cpuinfo))
+    assert runs.host_class() == "pi"
+    cpuinfo.write_text("processor\t: 0\nmodel name\t: Intel(R) Xeon(R)\n")
+    assert runs.host_class() == "linux"
+
+
 def test_run_ids_are_safe_directory_names(tmp_path):
     rid = new_run_id("S1a")
     assert rid.startswith("s1a-") and run_dir(tmp_path, rid).parent == tmp_path / "runs"

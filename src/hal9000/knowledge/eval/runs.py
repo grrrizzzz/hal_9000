@@ -63,6 +63,12 @@ FULL_SUPPORT_K = 5
 HOST_CLASSES = ("mac", "pi", "linux", "windows")
 
 
+#: Where a Raspberry Pi names itself. ``/proc/device-tree`` links into ``/sys/firmware``,
+#: which Docker masks by default, so inside the container only ``/proc/cpuinfo`` (whose
+#: ``Model`` line the Raspberry Pi kernel adds) says it is a Pi.
+_MODEL_SOURCES = (Path("/proc/device-tree/model"), Path("/proc/cpuinfo"))
+
+
 def host_class() -> str:
     """``mac``, ``pi`` (a Raspberry Pi), ``linux`` or ``windows`` for this machine."""
     system = platform.system()
@@ -70,11 +76,14 @@ def host_class() -> str:
         return "mac"
     if system == "Windows":
         return "windows"
-    try:
-        model = Path("/proc/device-tree/model").read_text(errors="ignore")
-    except OSError:
-        model = ""
-    return "pi" if "raspberry pi" in model.lower() else "linux"
+    for source in _MODEL_SOURCES:
+        try:
+            text = source.read_text(errors="ignore")
+        except OSError:
+            continue
+        if "raspberry pi" in text.lower():
+            return "pi"
+    return "linux"
 
 
 def _now() -> datetime:
