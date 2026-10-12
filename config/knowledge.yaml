@@ -8,14 +8,16 @@
 # text-embedding-3-small at 1536 dimensions). The setup evaluation replaces
 # it at gate G-K2 (`kb eval choose` rewrites this line). After the first
 # ingest, the database's active profile decides what serves the chat.
-active_profile: pdfium.structure-768.hdr.te3s-1536
+# G-K2: chosen by `hal9000 kb eval choose sweep-20260930T185815-b8c2 --config pdfium.fixed-128-o15.nohdr.te3l-256+weighted0.3+fast` on 2026-10-12
+# G-K2: abstain threshold none: the generation-side NOT_IN_SOURCES reply decides -- the S4 calibration's AUC 0.668 < 0.75, so abstention moves to the generation step (plan §8.5)
+active_profile: pdfium.fixed-128-o15.nohdr.te3l-256
 # Cross-encoder reranker, or null for none (chosen at G-K2).
 reranker: null
 
 retrieval:                  # plan §7.1 starting values; the evaluation tunes them
-  method: rrf               # dense | bm25 | rrf | weighted
+  method: weighted               # dense | bm25 | rrf | weighted
   rrf_k: 60
-  weighted_alpha: null      # set only for method: weighted
+  weighted_alpha: 0.3      # set only for method: weighted
   top_k_vector: 30
   top_k_bm25: 30
   context_budget_tokens: 2000
@@ -24,7 +26,7 @@ retrieval:                  # plan §7.1 starting values; the evaluation tunes t
 
 answer:                     # plan §7.4
   max_output_tokens: null   # null: the chat tier's default (AGENT_MAX_TOKENS)
-  chat_tier: null           # fast | powerful (chosen at G-K2); KB_CHAT_TIER in .env overrides
+  chat_tier: fast           # fast | powerful (chosen at G-K2); KB_CHAT_TIER in .env overrides
   wall_clock_seconds: 90
   questions_per_minute: 20  # per session
 
